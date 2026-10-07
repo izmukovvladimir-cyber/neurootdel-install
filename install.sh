@@ -1,31 +1,36 @@
 #!/usr/bin/env bash
-# edgelab-install v3.0.1 -- 3-Claude architecture installer
+# neurootdel-install -- НЕЙРООТДЕЛ AI Agent installer (3-Claude architecture)
 #
 # Installs on a fresh Ubuntu 22.04 / 24.04 VPS:
-#   - edgelab user (dedicated, non-login-privileged)
+#   - neurootdel user (dedicated, non-login-privileged); a server that already
+#     has an edgelab install keeps the edgelab user and its paths
+#     (see select_install_names)
 #   - Node.js 22 + Python 3.12 + Claude Code CLI
 #   - Jarvis: izmukovvladimir-cyber/dashi-plugin-claude-code (main) -> systemd unit channel-jarvis
 #     (a server that still runs the old claude-gateway is migrated; see --rollback)
 #   - Richard: izmukovvladimir-cyber/claude-code-telegram v1.6.0 -> systemd unit claude-richard
 #
-# Both agents share Anthropic Max OAuth from /home/edgelab/.claude/
-# Operator runs `sudo -u edgelab -i bash -lc 'claude auth login'` once after install finishes.
+# Both agents share Anthropic Max OAuth from /home/neurootdel/.claude/
+# Operator runs `sudo -u neurootdel -i bash -lc 'claude auth login'` once after install finishes.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/edgelab-install/main/install.sh -o install.sh && sudo bash install.sh
+#   curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/neurootdel-install/main/install.sh -o /root/neurootdel-install.sh && sudo bash /root/neurootdel-install.sh
 #   # or
-#   sudo ./install.sh
-#   sudo ./install.sh --rollback   # Jarvis back to the old claude-gateway unit
+#   sudo bash /root/neurootdel-install.sh
+#   sudo bash /root/neurootdel-install.sh --rollback   # Jarvis back to the old claude-gateway unit
+#   sudo bash /root/neurootdel-install.sh --solo # «Агент за вечер»: asks for the personal key first
+#                                  # (or NEUROOTDEL_AZV_KEY=...), stops without a valid one
 #
-# Env overrides (non-interactive):
-#   EDGELAB_JARVIS_BOT_TOKEN   Jarvis Telegram bot token
-#   EDGELAB_JARVIS_BOT_USER    Jarvis bot @username (no @)
-#   EDGELAB_RICHARD_BOT_TOKEN  Richard Telegram bot token
-#   EDGELAB_RICHARD_BOT_USER   Richard bot @username (no @)
-#   EDGELAB_TG_USER_ID         Operator Telegram numeric ID
-#   EDGELAB_USER_NAME          Operator display name (for Jarvis CLAUDE.md)
-#   EDGELAB_LANGUAGE           Operator language (default: Russian)
-#   EDGELAB_TIMEZONE           Operator timezone (default: Europe/Moscow)
+# Env overrides (non-interactive). The old EDGELAB_* names are still accepted
+# when the NEUROOTDEL_* one is not set:
+#   NEUROOTDEL_JARVIS_BOT_TOKEN   Jarvis Telegram bot token
+#   NEUROOTDEL_JARVIS_BOT_USER    Jarvis bot @username (no @)
+#   NEUROOTDEL_RICHARD_BOT_TOKEN  Richard Telegram bot token
+#   NEUROOTDEL_RICHARD_BOT_USER   Richard bot @username (no @)
+#   NEUROOTDEL_TG_USER_ID         Operator Telegram numeric ID
+#   NEUROOTDEL_USER_NAME          Operator display name (for Jarvis CLAUDE.md)
+#   NEUROOTDEL_LANGUAGE           Operator language (default: Russian)
+#   NEUROOTDEL_TIMEZONE           Operator timezone (default: Europe/Moscow)
 
 set -euo pipefail
 
@@ -33,24 +38,16 @@ set -euo pipefail
 # CONSTANTS
 # =============================================================================
 
-readonly EDGELAB_VERSION="3.1.0"
+readonly INSTALLER_VERSION="3.1.0"
 readonly PLUGIN_REPO="https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code.git"
 readonly PLUGIN_REF="main"
 readonly JARVIS_UNIT="channel-jarvis"
-readonly JARVIS_ENV_DIR="/etc/dashi-plugin/jarvis"
-readonly CHANNEL_CONFIRM_BIN="/usr/local/lib/edgelab/channel-confirm.sh"
-readonly CHANNEL_START_BIN="/usr/local/lib/edgelab/channel-start.sh"
-# Root-owned apt wrapper: the only apt path in sudoers (plain `apt-get *` = root).
-readonly APT_WRAPPER_BIN="/usr/local/sbin/edgelab-apt-install"
 # Pre-plugin Jarvis (v3.0.x). Kept on disk for --rollback, never deleted.
 readonly LEGACY_GATEWAY_UNIT="claude-gateway"
 readonly LEGACY_GATEWAY_DIR_NAME="claude-gateway"
-readonly LEGACY_BACKUP_ROOT="/var/backups/edgelab-install"
 readonly RICHARD_REPO_SPEC="git+https://github.com/izmukovvladimir-cyber/claude-code-telegram@v1.6.0"
 readonly RICHARD_HOME="/opt/richard"
 readonly NODE_MAJOR="22"
-readonly EDGELAB_USER="edgelab"
-readonly EDGELAB_HOME="/home/edgelab"
 
 # Template bundle (inherited from v2.2.6 -- pinned SHAs for supply chain).
 readonly TEMPLATE_REPO="https://github.com/izmukovvladimir-cyber/public-architecture-claude-code.git"
@@ -68,10 +65,102 @@ readonly INSTALLER_ROOT_DEFAULT="${_SCRIPT_DIR}"
 unset _SCRIPT_DIR
 readonly CURL_OPTS=(-fsSL --max-time 60 --retry 2 --retry-delay 3)
 
-TEMPLATES_DIR="${EDGELAB_TEMPLATES_DIR:-$TEMPLATES_DIR_DEFAULT}"
-INSTALLER_ROOT="${EDGELAB_INSTALLER_ROOT:-$INSTALLER_ROOT_DEFAULT}"
+# =============================================================================
+# INSTALL NAMES: neurootdel for new servers, edgelab kept where it already lives
+# =============================================================================
+
+# import_legacy_env -- an old EDGELAB_<X> fills NEUROOTDEL_<X> when that is unset,
+# so instructions and scripts written for the old installer keep working.
+import_legacy_env() {
+    local old new
+    for old in $(compgen -v EDGELAB_ || true); do
+        new="NEUROOTDEL_${old#EDGELAB_}"
+        if [[ -z "${!new:-}" && -n "${!old:-}" ]]; then
+            export "${new}=${!old}"
+        fi
+    done
+}
+
+# env_value <SUFFIX> -- NEUROOTDEL_<SUFFIX>, else EDGELAB_<SUFFIX>, else empty.
+env_value() {
+    local new="NEUROOTDEL_$1" old="EDGELAB_$1"
+    printf '%s' "${!new:-${!old:-}}"
+}
+
+# detect_install_names [root] -- prints "new" or "legacy".
+# legacy = this server already carries an edgelab install (user, ~/.claude,
+# sudoers or /etc/dashi-plugin): live agents read those paths, so a re-run
+# keeps them and never creates a second user next to them.
+# Order: edgelab install files > neurootdel install files > bare edgelab user.
+# A neurootdel install wins only over a leftover edgelab user without files.
+# [root] is a filesystem prefix for tests; empty = this server.
+detect_install_names() {
+    local root="${1:-}"
+    if [[ -d "${root}/home/edgelab/.claude" \
+          || -f "${root}/etc/sudoers.d/edgelab-agents" \
+          || -d "${root}/etc/dashi-plugin" ]]; then
+        echo legacy     # a live edgelab install wins over any neurootdel leftover
+    elif [[ -d "${root}/home/neurootdel/.claude" || -f "${root}/etc/sudoers.d/neurootdel-agents" ]]; then
+        echo new
+    elif grep -q '^edgelab:' "${root}/etc/passwd" 2>/dev/null; then
+        echo legacy     # bare edgelab user: still never a second user next to it
+    else
+        echo new
+    fi
+}
+
+# apply_install_names <new|legacy> -- sets every name that differs between the two.
+apply_install_names() {
+    case "$1" in
+        new)
+            AGENT_USER="neurootdel"
+            INSTALL_TAG="neurootdel-install"
+            CONFIG_ROOT="/etc/vladimir-plugin"
+            SUDO_ALIAS="NEUROOTDEL"
+            ;;
+        legacy)
+            AGENT_USER="edgelab"
+            INSTALL_TAG="edgelab-install"
+            CONFIG_ROOT="/etc/dashi-plugin"
+            SUDO_ALIAS="EDGELAB"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    INSTALL_NAMES="$1"
+    AGENT_HOME="/home/${AGENT_USER}"
+    JARVIS_ENV_DIR="${CONFIG_ROOT}/jarvis"
+    CHANNEL_CONFIRM_BIN="/usr/local/lib/${AGENT_USER}/channel-confirm.sh"
+    CHANNEL_START_BIN="/usr/local/lib/${AGENT_USER}/channel-start.sh"
+    # Root-owned apt wrapper: the only apt path in sudoers (plain `apt-get *` = root).
+    APT_WRAPPER_BIN="/usr/local/sbin/${AGENT_USER}-apt-install"
+    SUDOERS_FILE="/etc/sudoers.d/${AGENT_USER}-agents"
+    LEGACY_BACKUP_ROOT="/var/backups/${INSTALL_TAG}"
+    INSTALL_STATE_ROOT="/var/lib/${INSTALL_TAG}"
+}
+
+# select_install_names [root] -- one place that decides all names, run at load time.
+select_install_names() {
+    apply_install_names "$(detect_install_names "${1:-}")"
+}
+
+import_legacy_env
+select_install_names ""   # "" = this server
+
+TEMPLATES_DIR="${NEUROOTDEL_TEMPLATES_DIR:-$TEMPLATES_DIR_DEFAULT}"
+INSTALLER_ROOT="${NEUROOTDEL_INSTALLER_ROOT:-$INSTALLER_ROOT_DEFAULT}"
 TEMPLATE_CLONE_DIR=""
 INSTALLER_SKILLS_DIR=""
+
+# «Агент за вечер» (--solo): the closed part of the agent is unlocked by a personal key
+# bound to this server. Without --solo none of this runs.
+readonly AZV_SALT="agent-za-vecher-v1"
+AZV_ACTIVATE_URL="${NEUROOTDEL_AZV_URL:-https://hooks.vladimir-izhmukov.ru/agent/activate}"
+AZV_MACHINE_ID_FILE="${NEUROOTDEL_AZV_MACHINE_ID_FILE:-/etc/machine-id}"
+AZV_STAGE_DIR="${NEUROOTDEL_AZV_STAGE_DIR:-${INSTALL_STATE_ROOT}/azv}"
+AZV_AGENT_DIR="${NEUROOTDEL_AZV_AGENT_DIR:-${AGENT_HOME}/.claude-lab/jarvis/.claude/azv}"
+SOLO=0
 
 # =============================================================================
 # TERMINAL OUTPUT
@@ -96,15 +185,13 @@ step() {
 }
 
 banner() {
-    printf '\n%b' "$C_YELLOW"
-    cat <<'EOF'
-   ____    _           _          _                        _       _ _
-  | ___|__| | __ _  __| |   __ _ | |      _ __   ___  _   _| |_    | | |
-  |___ \ / _` |/ _` |/ _` |  / _` || |_    | '_ \ / _ \| | | | __|___| | |
-   ___) | (_| | (_| | (_| | | (_| ||  _|   | | | |  __/| |_| | |_|___|_|_|
-  |____/ \__,_|\__,_|\__,_|  \__,_| |_|    |_| |_|\___| \__,_|\__|   (_|_)
-
-                   edgelab-install v3.0.1 -- 3-Claude edition
+    printf '
+%b' "$C_YELLOW"
+    cat <<EOF
+  ==============================================================
+     НЕЙРООТДЕЛ AI Agent
+     neurootdel-install v${INSTALLER_VERSION} -- 3-Claude edition
+  ==============================================================
 EOF
     printf '%b\n' "$C_NC"
 }
@@ -141,7 +228,7 @@ _cleanup() {
 trap _cleanup EXIT
 
 is_noninteractive() {
-    [[ "${EDGELAB_NONINTERACTIVE:-0}" == "1" ]] || [[ ! -t 0 ]]
+    [[ "$(env_value NONINTERACTIVE)" == "1" ]] || [[ ! -t 0 ]]
 }
 
 # prompt_or_env VAR ENV_NAME "prompt" [default] [--secret]
@@ -153,6 +240,10 @@ prompt_or_env() {
     local default=${4:-}
     local secret=${5:-}
     local env_val="${!env_name:-}"
+    # Old name still accepted: NEUROOTDEL_X falls back to EDGELAB_X.
+    if [[ -z "$env_val" && "$env_name" == NEUROOTDEL_* ]]; then
+        env_val="$(env_value "${env_name#NEUROOTDEL_}")"
+    fi
 
     if [[ -n "$env_val" ]]; then
         out_ref="$env_val"
@@ -212,8 +303,8 @@ PY
     mv "$tmp" "$dst"
 }
 
-as_edgelab() {
-    sudo -u "$EDGELAB_USER" -H -- env -C "$EDGELAB_HOME" "$@"
+as_agent() {
+    sudo -u "$AGENT_USER" -H -- env -C "$AGENT_HOME" "$@"
 }
 
 # Install a file at dst owned by a specific user, 0600 by default.
@@ -222,23 +313,104 @@ install_as_user() {
     install -m "$mode" -o "$owner" -g "$owner" "$src" "$dst"
 }
 
-# write_as_user: copy SRC to DST owned by EDGELAB_USER. Works even when SRC is
-# a root-owned 0600 mktemp file that edgelab cannot read.
+# write_as_user: copy SRC to DST owned by AGENT_USER. Works even when SRC is
+# a root-owned 0600 mktemp file that the agent user cannot read.
 write_as_user() {
     local src="$1" dst="$2" mode="${3:-0644}"
     local dst_dir
     dst_dir=$(dirname "$dst")
     if [[ ! -d "$dst_dir" ]]; then
-        install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$dst_dir"
+        install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$dst_dir"
     fi
-    install -o "$EDGELAB_USER" -g "$EDGELAB_USER" -m "$mode" "$src" "$dst"
+    install -o "$AGENT_USER" -g "$AGENT_USER" -m "$mode" "$src" "$dst"
 }
 
-# fix_owner: recursively chown to edgelab (-h affects symlinks).
+# fix_owner: recursively chown to the agent user (-h affects symlinks).
 fix_owner() {
     local path="$1"
     [[ -e "$path" ]] || return 0
-    chown -RhP "${EDGELAB_USER}:${EDGELAB_USER}" "$path"
+    chown -RhP "${AGENT_USER}:${AGENT_USER}" "$path"
+}
+
+# ---------------------------------------------------------------------------
+# «Агент за вечер» activation (--solo only)
+# ---------------------------------------------------------------------------
+
+# azv_machine_hash -- sha256(machine-id + product salt): what the key gets bound to.
+azv_machine_hash() {
+    [[ -r "$AZV_MACHINE_ID_FILE" ]] || return 1
+    local mid
+    mid=$(tr -d '[:space:]' < "$AZV_MACHINE_ID_FILE")
+    [[ -n "$mid" ]] || return 1
+    printf '%s%s' "$mid" "$AZV_SALT" | sha256sum | cut -d' ' -f1
+}
+
+# azv_archive_safe <tar.gz> -- only regular files and dirs, relative paths, no "..".
+azv_archive_safe() {
+    local listing names
+    listing=$(tar -tvzf "$1" 2>/dev/null) || return 1
+    names=$(tar -tzf "$1" 2>/dev/null) || return 1
+    [[ -n "$names" ]] || return 1
+    if grep -qv '^[-d]' <<<"$listing"; then
+        return 1
+    fi
+    if grep -qE '(^/|(^|/)\.\.(/|$))' <<<"$names"; then
+        return 1
+    fi
+}
+
+# azv_activate -- step 0b of --solo: no valid key for this server, no install.
+azv_activate() {
+    step 0b "Активация личного ключа «Агент за вечер»"
+    local key="" mhash body code archive msg
+    prompt_or_env key NEUROOTDEL_AZV_KEY "Личный ключ (AZV-XXXX-XXXX-XXXX-XXXX)" "" --secret
+    key="${key//[[:space:]]/}"
+    if [[ -z "$key" ]]; then
+        die "Без личного ключа установка не продолжается. Ключ пришёл в чат после оплаты. Запусти так: sudo NEUROOTDEL_AZV_KEY=<ключ> bash /root/neurootdel-install.sh --solo"
+    fi
+    if [[ ! "$key" =~ ^[A-Za-z0-9-]{16,40}$ ]]; then
+        die "Ключ выглядит неверно, ожидается вид AZV-XXXX-XXXX-XXXX-XXXX. Скопируй его из чата целиком."
+    fi
+    mhash=$(azv_machine_hash) \
+        || die "Не удалось прочитать ${AZV_MACHINE_ID_FILE}, без него ключ к серверу не привязать. Напиши куратору."
+    archive=$(mktemp)
+    TMPFILES+=("$archive")
+    body=$(printf '{"key":"%s","machine_hash":"%s"}' "$key" "$mhash")
+    # No --retry: a POST may already have bound the key, and 429 retries burn the limit.
+    code=$(curl -sS --max-time 60 -o "$archive" -w '%{http_code}' \
+        -H 'Content-Type: application/json' --data-binary "$body" \
+        "$AZV_ACTIVATE_URL" 2>/dev/null) || code="000"
+    case "$code" in
+        200) ;;
+        000)
+            die "Сервер активации не отвечает. Проверь интернет на сервере и запусти установщик снова."
+            ;;
+        *)
+            msg=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("message", ""))' \
+                "$archive" 2>/dev/null || true)
+            die "Активация не прошла (код ${code}). ${msg:-Напиши куратору.}"
+            ;;
+    esac
+    azv_archive_safe "$archive" \
+        || die "Архив от сервера активации повреждён. Запусти установщик снова или напиши куратору."
+    rm -rf "${AZV_STAGE_DIR:?}"
+    install -d -m 0700 "$AZV_STAGE_DIR"
+    tar -xzf "$archive" -C "$AZV_STAGE_DIR" --no-same-owner --no-same-permissions \
+        || die "Не удалось распаковать материалы. Запусти установщик снова."
+    ok "Ключ принят, личные материалы агента получены"
+}
+
+# azv_install_payload -- the unlocked part goes into the agent workspace (after install_jarvis).
+azv_install_payload() {
+    step 9b "Раскладываю личные материалы агента"
+    [[ -d "$AZV_STAGE_DIR" ]] || die "Нет материалов активации (${AZV_STAGE_DIR}). Запусти установщик с --solo снова."
+    # Written as the agent user, never as root: the target is in the agent's own
+    # workspace, and a symlink planted there must not turn this into a root write.
+    as_agent mkdir -p -m 0755 "$AZV_AGENT_DIR" \
+        || die "Не удалось создать ${AZV_AGENT_DIR}. Напиши куратору."
+    tar -C "$AZV_STAGE_DIR" -cf - . | as_agent tar -xf - -C "$AZV_AGENT_DIR" --no-same-owner \
+        || die "Не удалось разложить материалы в ${AZV_AGENT_DIR}. Напиши куратору."
+    ok "Материалы лежат в ${AZV_AGENT_DIR}"
 }
 
 # ---------------------------------------------------------------------------
@@ -286,7 +458,7 @@ locate_installer_skills() {
     dir=$(mktemp -d)
     TMPDIRS+=("$dir")
     log "Cloning installer bundled skills..." >&2
-    if ! git clone --quiet --depth 1 "https://github.com/izmukovvladimir-cyber/edgelab-install.git" "$dir" >&2; then
+    if ! git clone --quiet --depth 1 "https://github.com/izmukovvladimir-cyber/neurootdel-install.git" "$dir" >&2; then
         err "Failed to clone installer repo for bundled skills."
         return 1
     fi
@@ -382,10 +554,10 @@ preflight() {
             ok "Ubuntu ${VERSION_ID} detected."
             ;;
         *)
-            if [[ "${EDGELAB_ALLOW_UNTESTED_UBUNTU:-0}" == "1" ]]; then
-                warn "Ubuntu ${VERSION_ID:-?} is untested. Continuing (EDGELAB_ALLOW_UNTESTED_UBUNTU=1)."
+            if [[ "${NEUROOTDEL_ALLOW_UNTESTED_UBUNTU:-0}" == "1" ]]; then
+                warn "Ubuntu ${VERSION_ID:-?} is untested. Continuing (NEUROOTDEL_ALLOW_UNTESTED_UBUNTU=1)."
             else
-                die "Ubuntu ${VERSION_ID:-?} is untested. Require 22.04 or 24.04, or set EDGELAB_ALLOW_UNTESTED_UBUNTU=1."
+                die "Ubuntu ${VERSION_ID:-?} is untested. Require 22.04 or 24.04, or set NEUROOTDEL_ALLOW_UNTESTED_UBUNTU=1."
             fi
             ;;
     esac
@@ -412,14 +584,14 @@ preflight() {
         clone_dir=$(mktemp -d)
         TMPDIRS+=("$clone_dir")
         log "Templates not found at ${TEMPLATES_DIR}; cloning installer repo..."
-        if ! git clone --quiet --depth 1 --branch "${EDGELAB_INSTALL_REF:-main}" \
-                https://github.com/izmukovvladimir-cyber/edgelab-install.git "$clone_dir"; then
-            warn "Clone of branch ${EDGELAB_INSTALL_REF:-main} failed; falling back to default branch."
+        if ! git clone --quiet --depth 1 --branch "${NEUROOTDEL_INSTALL_REF:-main}" \
+                https://github.com/izmukovvladimir-cyber/neurootdel-install.git "$clone_dir"; then
+            warn "Clone of branch ${NEUROOTDEL_INSTALL_REF:-main} failed; falling back to default branch."
             rm -rf "$clone_dir"
             clone_dir=$(mktemp -d)
             TMPDIRS+=("$clone_dir")
             git clone --quiet --depth 1 \
-                https://github.com/izmukovvladimir-cyber/edgelab-install.git "$clone_dir" \
+                https://github.com/izmukovvladimir-cyber/neurootdel-install.git "$clone_dir" \
                 || die "Failed to clone installer repo for templates/skills."
         fi
         TEMPLATES_DIR="${clone_dir}/templates"
@@ -520,7 +692,7 @@ apt_install_missing() {
 }
 
 # Packages later steps cannot do without (checked by dpkg status, whoever
-# installed them): downloads, clones, JSON, skills rsync, as_edgelab, the
+# installed them): downloads, clones, JSON, skills rsync, as_agent, the
 # tmux unit, bun's unzip, crontab, Richard's venv + the embedded helpers.
 APT_REQUIRED=(ca-certificates curl git jq rsync sudo tmux unzip cron)
 APT_REQUIRED_PY=(python3 python3-venv)
@@ -609,16 +781,16 @@ install_node() {
     ok "Node.js $(node -v) installed."
 }
 
-# check_node_for_edgelab -- warn only. No installer step needs node (Claude
+# check_node_for_agent -- warn only. No installer step needs node (Claude
 # CLI is a native binary, the plugin runs on Bun); a node the agent cannot run
 # (symlink into a 0700 /root) is reported, never replaced.
-check_node_for_edgelab() {
-    if as_edgelab node -v >/dev/null 2>&1; then
+check_node_for_agent() {
+    if as_agent node -v >/dev/null 2>&1; then
         return 0
     fi
     local where
     where=$(command -v node 2>/dev/null || echo "not on PATH")
-    warn "node does not run as ${EDGELAB_USER} (${where} -> $(readlink -f "$where" 2>/dev/null || echo '?')). Left as is: the install does not need it; agents that call node will fail until it is fixed."
+    warn "node does not run as ${AGENT_USER} (${where} -> $(readlink -f "$where" 2>/dev/null || echo '?')). Left as is: the install does not need it; agents that call node will fail until it is fixed."
 }
 
 # =============================================================================
@@ -626,14 +798,14 @@ check_node_for_edgelab() {
 # =============================================================================
 
 install_claude_cli() {
-    step 3 "Installing Claude Code CLI (per-user for ${EDGELAB_USER})"
+    step 3 "Installing Claude Code CLI (per-user for ${AGENT_USER})"
 
-    local claude_bin="${EDGELAB_HOME}/.local/bin/claude"
+    local claude_bin="${AGENT_HOME}/.local/bin/claude"
 
     if [[ -x "$claude_bin" ]]; then
         ok "Claude CLI already installed at ${claude_bin}."
         # Best-effort update; never block install on update failure.
-        as_edgelab "$claude_bin" update >/dev/null 2>&1 || warn "claude update non-zero; continuing."
+        as_agent "$claude_bin" update >/dev/null 2>&1 || warn "claude update non-zero; continuing."
         _ensure_path_export
         return 0
     fi
@@ -646,34 +818,34 @@ install_claude_cli() {
         || die "Failed to download Claude Code installer."
     chmod 644 "$installer_tmp"
 
-    # Run Anthropic's installer as edgelab so binary lands at ~/.local/bin/claude.
-    as_edgelab bash "$installer_tmp"
+    # Run Anthropic's installer as the agent user so binary lands at ~/.local/bin/claude.
+    as_agent bash "$installer_tmp"
 
     if [[ ! -x "$claude_bin" ]]; then
         die "Claude CLI install failed -- ${claude_bin} not found."
     fi
 
     local ver
-    ver=$(as_edgelab "$claude_bin" --version 2>/dev/null || echo "unknown")
+    ver=$(as_agent "$claude_bin" --version 2>/dev/null || echo "unknown")
     ok "Claude CLI v${ver} installed at ${claude_bin}."
 
     _ensure_path_export
 }
 
-# Expose ~/.local/bin on edgelab's PATH for non-interactive SSH + systemd.
+# Expose ~/.local/bin on the agent user's PATH for non-interactive SSH + systemd.
 # .bashrc aborts on non-interactive shells, so prepend before the PS1 guard.
 # .profile runs in full for login shells -- append is fine.
 _ensure_path_export() {
-    local marker='# Added by edgelab-install: expose ~/.local/bin'
+    local marker="# Added by ${INSTALL_TAG}: expose ~/.local/bin"
     local export_line='export PATH="$HOME/.local/bin:$PATH"'
 
     local rc_entry rc placement
-    for rc_entry in "${EDGELAB_HOME}/.bashrc:prepend" "${EDGELAB_HOME}/.profile:append"; do
+    for rc_entry in "${AGENT_HOME}/.bashrc:prepend" "${AGENT_HOME}/.profile:append"; do
         rc="${rc_entry%:*}"
         placement="${rc_entry##*:}"
 
         if [[ ! -f "$rc" ]]; then
-            as_edgelab touch "$rc"
+            as_agent touch "$rc"
         fi
 
         if grep -Fq "$marker" "$rc" 2>/dev/null; then
@@ -688,20 +860,20 @@ _ensure_path_export() {
         else
             { cat "$rc"; echo ''; echo "$marker"; echo "$export_line"; } >"$tmp"
         fi
-        install -o "$EDGELAB_USER" -g "$EDGELAB_USER" -m 0644 "$tmp" "$rc"
+        install -o "$AGENT_USER" -g "$AGENT_USER" -m 0644 "$tmp" "$rc"
     done
 }
 
 # =============================================================================
-# STEP 3b: BUN (runtime of the dashi-plugin channel)
+# STEP 3b: BUN (runtime of the Telegram channel plugin)
 # =============================================================================
 
 install_bun() {
-    step 3b "Installing Bun (per-user for ${EDGELAB_USER})"
+    step 3b "Installing Bun (per-user for ${AGENT_USER})"
 
-    local bun_bin="${EDGELAB_HOME}/.bun/bin/bun"
+    local bun_bin="${AGENT_HOME}/.bun/bin/bun"
     if [[ -x "$bun_bin" ]]; then
-        ok "Bun $(as_edgelab "$bun_bin" --version 2>/dev/null || echo '?') already installed."
+        ok "Bun $(as_agent "$bun_bin" --version 2>/dev/null || echo '?') already installed."
         return 0
     fi
 
@@ -717,35 +889,38 @@ install_bun() {
         || die "Failed to download Bun installer."
     chmod 644 "$installer_tmp"
 
-    # As edgelab, so the binary lands at ~/.bun/bin/bun (the unit PATH has it).
-    as_edgelab bash "$installer_tmp" >/dev/null
+    # As the agent user, so the binary lands at ~/.bun/bin/bun (the unit PATH has it).
+    as_agent bash "$installer_tmp" >/dev/null
 
     if [[ ! -x "$bun_bin" ]]; then
         die "Bun install failed -- ${bun_bin} not found."
     fi
-    ok "Bun $(as_edgelab "$bun_bin" --version 2>/dev/null || echo '?') installed at ${bun_bin}."
+    ok "Bun $(as_agent "$bun_bin" --version 2>/dev/null || echo '?') installed at ${bun_bin}."
 }
 
 # =============================================================================
-# STEP 4: EDGELAB USER
+# STEP 4: AGENT USER
 # =============================================================================
 
-ensure_edgelab_user() {
-    step 4 "Ensuring '${EDGELAB_USER}' system user"
+ensure_agent_user() {
+    step 4 "Ensuring '${AGENT_USER}' system user"
+    if [[ "$INSTALL_NAMES" == "legacy" ]]; then
+        log "Existing ${AGENT_USER} install found: keeping user ${AGENT_USER} and its paths (${JARVIS_ENV_DIR})."
+    fi
 
-    if id -u "$EDGELAB_USER" &>/dev/null; then
-        ok "User '${EDGELAB_USER}' already exists."
+    if id -u "$AGENT_USER" &>/dev/null; then
+        ok "User '${AGENT_USER}' already exists."
     else
-        useradd --create-home --shell /bin/bash "$EDGELAB_USER"
-        ok "User '${EDGELAB_USER}' created."
+        useradd --create-home --shell /bin/bash "$AGENT_USER"
+        ok "User '${AGENT_USER}' created."
     fi
 
     # Make sure home is usable.
-    if [[ ! -d "$EDGELAB_HOME" ]]; then
-        die "Home dir ${EDGELAB_HOME} missing after useradd."
+    if [[ ! -d "$AGENT_HOME" ]]; then
+        die "Home dir ${AGENT_HOME} missing after useradd."
     fi
-    chown "${EDGELAB_USER}:${EDGELAB_USER}" "$EDGELAB_HOME"
-    chmod 0755 "$EDGELAB_HOME"
+    chown "${AGENT_USER}:${AGENT_USER}" "$AGENT_HOME"
+    chmod 0755 "$AGENT_HOME"
 }
 
 # =============================================================================
@@ -766,7 +941,7 @@ collect_inputs() {
     step 5 "Collecting operator inputs"
 
     # Interactive flow (TTY present): installer asks the student for all values.
-    # Non-interactive flow (EDGELAB_NONINTERACTIVE=1 or no TTY): env overrides
+    # Non-interactive flow (NEUROOTDEL_NONINTERACTIVE=1 or no TTY): env overrides
     # required for tokens; operator profile falls back to safe defaults.
     if ! is_noninteractive; then
         cat <<'BRIEF'
@@ -778,22 +953,22 @@ The installer will now ask a few questions. You need TWO Telegram bots ready
 BRIEF
     fi
 
-    prompt_or_env OPERATOR_NAME     EDGELAB_USER_NAME  "Как к вам обращаться?"                "friend"
-    prompt_or_env OPERATOR_LANGUAGE EDGELAB_LANGUAGE   "Язык общения (English / Russian / ...)" "Russian"
-    prompt_or_env OPERATOR_TIMEZONE EDGELAB_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "Europe/Moscow"
+    prompt_or_env OPERATOR_NAME     NEUROOTDEL_USER_NAME  "Как к вам обращаться?"                "friend"
+    prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "Russian"
+    prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "Europe/Moscow"
 
-    prompt_or_env JARVIS_BOT_TOKEN  EDGELAB_JARVIS_BOT_TOKEN \
+    prompt_or_env JARVIS_BOT_TOKEN  NEUROOTDEL_JARVIS_BOT_TOKEN \
         "Jarvis bot token (from @BotFather, формат 1234567890:ABC...)" \
         "" --secret
-    prompt_or_env RICHARD_BOT_TOKEN EDGELAB_RICHARD_BOT_TOKEN \
+    prompt_or_env RICHARD_BOT_TOKEN NEUROOTDEL_RICHARD_BOT_TOKEN \
         "Richard bot token (ДРУГОЙ бот, не совпадает с Jarvis)" \
         "" --secret
-    prompt_or_env TG_USER_ID        EDGELAB_TG_USER_ID \
+    prompt_or_env TG_USER_ID        NEUROOTDEL_TG_USER_ID \
         "Ваш Telegram numeric user ID (from @userinfobot)" \
         ""
 
-    JARVIS_BOT_USERNAME="${EDGELAB_JARVIS_BOT_USER:-}"
-    RICHARD_BOT_USERNAME="${EDGELAB_RICHARD_BOT_USER:-}"
+    JARVIS_BOT_USERNAME="${NEUROOTDEL_JARVIS_BOT_USER:-}"
+    RICHARD_BOT_USERNAME="${NEUROOTDEL_RICHARD_BOT_USER:-}"
 
     # Validate Jarvis token.
     if [[ -n "$JARVIS_BOT_TOKEN" ]]; then
@@ -846,22 +1021,22 @@ BRIEF
 # =============================================================================
 
 install_jarvis() {
-    step 6 "Installing Jarvis (dashi-plugin, systemd: ${JARVIS_UNIT})"
+    step 6 "Installing Jarvis (Telegram channel plugin, systemd: ${JARVIS_UNIT})"
 
-    local wsroot="${EDGELAB_HOME}/.claude-lab/jarvis/.claude"
+    local wsroot="${AGENT_HOME}/.claude-lab/jarvis/.claude"
     local plugin_root="${wsroot}/dashi-plugin-claude-code"
     local plugin_dir="${plugin_root}/plugin"
-    local state_dir="${EDGELAB_HOME}/.claude-lab/shared/state/jarvis/telegram"
+    local state_dir="${AGENT_HOME}/.claude-lab/shared/state/jarvis/telegram"
     local env_file="${JARVIS_ENV_DIR}/channel.env"
 
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" \
-        "${EDGELAB_HOME}/.claude-lab" \
-        "${EDGELAB_HOME}/.claude-lab/jarvis" \
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
+        "${AGENT_HOME}/.claude-lab" \
+        "${AGENT_HOME}/.claude-lab/jarvis" \
         "$wsroot" \
-        "${EDGELAB_HOME}/.claude-lab/shared" \
-        "${EDGELAB_HOME}/.claude-lab/shared/state"
-    install -d -m 0700 -o "$EDGELAB_USER" -g "$EDGELAB_USER" \
-        "${EDGELAB_HOME}/.claude-lab/shared/state/jarvis" \
+        "${AGENT_HOME}/.claude-lab/shared" \
+        "${AGENT_HOME}/.claude-lab/shared/state"
+    install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" \
+        "${AGENT_HOME}/.claude-lab/shared/state/jarvis" \
         "$state_dir"
 
     # Full agent workspace (CLAUDE.md + core/USER.md + stub cold memory).
@@ -872,12 +1047,12 @@ install_jarvis() {
     # up the agent CLAUDE.md from the parent dirs.
     if [[ -d "${plugin_root}/.git" ]]; then
         log "Plugin repo exists -- pulling latest ${PLUGIN_REF}."
-        as_edgelab git -C "$plugin_root" pull --ff-only || warn "git pull failed; continuing with existing checkout."
+        as_agent git -C "$plugin_root" pull --ff-only || warn "git pull failed; continuing with existing checkout."
     else
-        as_edgelab git clone --depth 1 --branch "$PLUGIN_REF" "$PLUGIN_REPO" "$plugin_root"
+        as_agent git clone --depth 1 --branch "$PLUGIN_REF" "$PLUGIN_REPO" "$plugin_root"
     fi
     [[ -f "${plugin_dir}/.mcp.json" ]] || die "Plugin checkout has no plugin/.mcp.json (${plugin_root})."
-    as_edgelab env -C "$plugin_dir" "${EDGELAB_HOME}/.bun/bin/bun" install \
+    as_agent env -C "$plugin_dir" "${AGENT_HOME}/.bun/bin/bun" install \
         || die "bun install failed in ${plugin_dir}."
 
     # Server that still runs the old gateway: reuse its token / allowlist.
@@ -888,8 +1063,8 @@ install_jarvis() {
     # Without it the folder-trust prompt sits on "No, exit", the Enter from
     # channel-confirm closes claude and the unit restarts in a loop. Both the
     # repo root (claude 2.1.x takes the git root as the project) and plugin/.
-    if ! _accept_trust_dialog "${EDGELAB_HOME}/.claude.json" "$plugin_root" "$plugin_dir"; then
-        warn "Could not mark ${plugin_root} as trusted in ${EDGELAB_HOME}/.claude.json -- Jarvis may stop on the trust prompt."
+    if ! _accept_trust_dialog "${AGENT_HOME}/.claude.json" "$plugin_root" "$plugin_dir"; then
+        warn "Could not mark ${plugin_root} as trusted in ${AGENT_HOME}/.claude.json -- Jarvis may stop on the trust prompt."
     fi
     # Pre-approve the channel MCP server from plugin/.mcp.json: otherwise the
     # first start shows the approval dialog, the Enter from channel-confirm
@@ -906,15 +1081,15 @@ install_jarvis() {
     unit_tmp=$(mktemp)
     TMPFILES+=("$unit_tmp")
     render_template "${TEMPLATES_DIR}/${JARVIS_UNIT}.service" "$unit_tmp" \
-        USER           "$EDGELAB_USER" \
-        HOME           "$EDGELAB_HOME" \
+        USER           "$AGENT_USER" \
+        HOME           "$AGENT_HOME" \
         PLUGIN_DIR     "$plugin_dir" \
         ENV_FILE       "$env_file" \
         CONFIRM_SCRIPT "$CHANNEL_CONFIRM_BIN" \
         START_SCRIPT   "$CHANNEL_START_BIN"
     install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${JARVIS_UNIT}.service"
 
-    fix_owner "${EDGELAB_HOME}/.claude-lab"
+    fix_owner "${AGENT_HOME}/.claude-lab"
     ok "Jarvis installed: plugin ${plugin_dir}, env ${env_file}, unit ${JARVIS_UNIT}"
 }
 
@@ -931,9 +1106,9 @@ _env_has_value() {
 
 _collect_jarvis_channel_inputs() {
     local env_file=${1:-}
-    local legacy_dir="${EDGELAB_HOME}/${LEGACY_GATEWAY_DIR_NAME}"
+    local legacy_dir="${AGENT_HOME}/${LEGACY_GATEWAY_DIR_NAME}"
     local legacy_cfg="${legacy_dir}/config.json"
-    local shared_groq="${EDGELAB_HOME}/.claude-lab/shared/secrets/groq-api-key"
+    local shared_groq="${AGENT_HOME}/.claude-lab/shared/secrets/groq-api-key"
     local legacy_groq="${legacy_dir}/secrets/groq-api-key"
 
     JARVIS_ALLOWED_IDS="$TG_USER_ID"
@@ -972,7 +1147,7 @@ _collect_jarvis_channel_inputs() {
 }
 
 # _write_channel_env <env_file> <state_dir> <workspace_root>
-# root:edgelab 0640 -- systemd reads it for the unit, the agent may read it.
+# root:<agent user> 0640 -- systemd reads it for the unit, the agent may read it.
 _write_channel_env() {
     local env_file=$1 state_dir=$2 ws_root=$3
     local tmp
@@ -984,8 +1159,8 @@ _write_channel_env() {
         || die "Could not build ${env_file}."
 
     install -d -m 0755 -o root -g root "$(dirname "$JARVIS_ENV_DIR")"
-    install -d -m 0750 -o root -g "$EDGELAB_USER" "$JARVIS_ENV_DIR"
-    install -m 0640 -o root -g "$EDGELAB_USER" "$tmp" "$env_file"
+    install -d -m 0750 -o root -g "$AGENT_USER" "$JARVIS_ENV_DIR"
+    install -m 0640 -o root -g "$AGENT_USER" "$tmp" "$env_file"
 }
 
 # render_channel_env <existing_env|""> <user_ids_csv> <groq_key_file|""> <state_dir> <workspace_root>
@@ -1058,7 +1233,7 @@ for key, value in managed.items():
         sys.exit(f"channel.env: {key} contains whitespace or quotes")
 
 out = [
-    "# Jarvis channel (dashi-plugin). Written by edgelab-install; a re-run keeps your values.",
+    "# Jarvis Telegram channel. Written by the installer; a re-run keeps your values.",
     "# Fill the three TELEGRAM_* lines (bot token from @BotFather, your numeric id",
     "# from @userinfobot in BOTH id lines), then restart:",
     "#   sudo systemctl enable channel-jarvis && sudo systemctl restart channel-jarvis",
@@ -1149,7 +1324,7 @@ PY
 # projects[<dir>].hasTrustDialogAccepted=true for each dir and takes
 # dashi-channel off its disabledMcpjsonServers; keeps every other key.
 _accept_trust_dialog() {
-    as_edgelab python3 - "$@" <<'PY'
+    as_agent python3 - "$@" <<'PY'
 import json
 import os
 import shutil
@@ -1168,7 +1343,7 @@ if path.exists():
     if not isinstance(data, dict):
         sys.exit(f"{path}: top level is not an object; left untouched")
     mode = path.stat().st_mode & 0o777
-    backup = path.with_name(path.name + ".bak-edgelab-install")
+    backup = path.with_name(path.name + ".bak-install")
     if not backup.exists():
         shutil.copy2(path, backup)
 
@@ -1199,7 +1374,7 @@ PY
 # into enabledMcpjsonServers, out of disabledMcpjsonServers (repairs a first
 # start that rejected it); every other key kept. Mirrors the live agents.
 _approve_channel_mcp() {
-    as_edgelab python3 - "$@" <<'PY'
+    as_agent python3 - "$@" <<'PY'
 import json
 import os
 import sys
@@ -1253,7 +1428,7 @@ _write_if_absent() {
 _write_agent_workspace() {
     local ws="$1"
 
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" \
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
         "$ws" \
         "${ws}/core" \
         "${ws}/core/hot" \
@@ -1331,15 +1506,15 @@ REOF
 install_richard() {
     step 7 "Installing Richard (claude-code-telegram)"
 
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$RICHARD_HOME"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$RICHARD_HOME"
 
     local venv="${RICHARD_HOME}/venv"
     if [[ ! -x "${venv}/bin/python" ]]; then
-        sudo -u "$EDGELAB_USER" -H -- env -C "$RICHARD_HOME" python3 -m venv "$venv"
+        sudo -u "$AGENT_USER" -H -- env -C "$RICHARD_HOME" python3 -m venv "$venv"
     fi
 
-    sudo -u "$EDGELAB_USER" -H -- env -C "$RICHARD_HOME" "${venv}/bin/pip" install --upgrade pip --quiet
-    sudo -u "$EDGELAB_USER" -H -- env -C "$RICHARD_HOME" "${venv}/bin/pip" install "$RICHARD_REPO_SPEC" --quiet
+    sudo -u "$AGENT_USER" -H -- env -C "$RICHARD_HOME" "${venv}/bin/pip" install --upgrade pip --quiet
+    sudo -u "$AGENT_USER" -H -- env -C "$RICHARD_HOME" "${venv}/bin/pip" install "$RICHARD_REPO_SPEC" --quiet
 
     if [[ ! -x "${venv}/bin/claude-telegram-bot" ]]; then
         die "Richard install did not produce 'claude-telegram-bot' binary in ${venv}/bin/."
@@ -1360,7 +1535,7 @@ install_richard() {
         RICHARD_BOT_TOKEN    "$RICHARD_BOT_TOKEN" \
         RICHARD_BOT_USERNAME "$RICHARD_BOT_USERNAME" \
         TG_USER_ID           "$TG_USER_ID" \
-        USER                 "$EDGELAB_USER"
+        USER                 "$AGENT_USER"
     # Re-run (migration): an Enter on the token / id questions must not
     # blank a working Richard -- merge with the existing .env, back it up.
     local richard_env="${RICHARD_HOME}/.env"
@@ -1379,19 +1554,19 @@ install_richard() {
             die "Could not merge ${richard_env}."
         fi
         if ! cmp -s "$merged_tmp" "$richard_env"; then
-            install -m 0600 -o "$EDGELAB_USER" -g "$EDGELAB_USER" \
+            install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" \
                 "$richard_env" "${richard_env}.bak-$(date +%Y%m%d-%H%M%S)"
         fi
         mv "$merged_tmp" "$env_tmp"
     fi
-    install_as_user "$env_tmp" "$richard_env" "$EDGELAB_USER" 0600
+    install_as_user "$env_tmp" "$richard_env" "$AGENT_USER" 0600
     rm -f "$env_tmp"
 
     # systemd unit
     local unit_tmp
     unit_tmp=$(mktemp)
     render_template "${TEMPLATES_DIR}/claude-richard.service" "$unit_tmp" \
-        USER "$EDGELAB_USER"
+        USER "$AGENT_USER"
     install -m 0644 -o root -g root "$unit_tmp" /etc/systemd/system/claude-richard.service
     rm -f "$unit_tmp"
 
@@ -1448,11 +1623,11 @@ ensure_starter_rules() {
 }
 
 setup_global_claude() {
-    step 8 "Setting up ${EDGELAB_HOME}/.claude/ (shared OAuth dir)"
+    step 8 "Setting up ${AGENT_HOME}/.claude/ (shared OAuth dir)"
 
-    local claude_dir="${EDGELAB_HOME}/.claude"
-    install -d -m 0700 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$claude_dir"
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "${claude_dir}/plugins"
+    local claude_dir="${AGENT_HOME}/.claude"
+    install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$claude_dir"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "${claude_dir}/plugins"
 
     local settings_json="${claude_dir}/settings.json"
     if [[ ! -f "$settings_json" ]]; then
@@ -1487,7 +1662,7 @@ SJEOF
         write_as_user "$tmp" "$mcp_json" 0644
     fi
 
-    # Global CLAUDE.md -- loaded by every Claude Code session under edgelab user.
+    # Global CLAUDE.md -- loaded by every Claude Code session under the agent user.
     # Shared by Jarvis (chat agent) and Richard (server-doctor) so Richard is
     # not blind about the owner, language, and safety rules.
     local global_claude_md="${claude_dir}/CLAUDE.md"
@@ -1496,7 +1671,7 @@ SJEOF
         tmp=$(mktemp)
         TMPFILES+=("$tmp")
         render_template "${TEMPLATES_DIR}/global-CLAUDE.md" "$tmp" \
-            USER       "$EDGELAB_USER" \
+            USER       "$AGENT_USER" \
             USER_NAME  "$OPERATOR_NAME" \
             TG_ID      "$TG_USER_ID" \
             LANGUAGE   "$OPERATOR_LANGUAGE" \
@@ -1518,8 +1693,8 @@ SJEOF
 install_skills() {
     step 9 "Installing ${#SKILLS_FROM_TEMPLATE[@]} template + ${#SKILLS_FROM_INSTALLER[@]} bundled skills"
 
-    local dst_parent="${EDGELAB_HOME}/.claude-lab/jarvis/.claude/skills"
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$dst_parent"
+    local dst_parent="${AGENT_HOME}/.claude-lab/jarvis/.claude/skills"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$dst_parent"
 
     local installed=()
 
@@ -1561,7 +1736,7 @@ install_skills() {
     fi
 
     fix_owner "$dst_parent"
-    link_skills_into_plugin "$dst_parent" "${EDGELAB_HOME}/.claude-lab/jarvis/.claude/dashi-plugin-claude-code"
+    link_skills_into_plugin "$dst_parent" "${AGENT_HOME}/.claude-lab/jarvis/.claude/dashi-plugin-claude-code"
     ok "Skills installed: ${installed[*]:-<none>} (${#installed[@]}/10)"
 }
 
@@ -1577,9 +1752,9 @@ link_skills_into_plugin() {
         warn "${link} is a real directory -- left as is; skills in ${skills_dir} may not be visible to Jarvis."
         return 0
     fi
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "${plugin_root}/.claude"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "${plugin_root}/.claude"
     ln -sfnT "$skills_dir" "$link"
-    chown -h "${EDGELAB_USER}:${EDGELAB_USER}" "$link" 2>/dev/null || true
+    chown -h "${AGENT_USER}:${AGENT_USER}" "$link" 2>/dev/null || true
     log "Skills linked into the session: ${link} -> ${skills_dir}"
 }
 
@@ -1590,24 +1765,24 @@ link_skills_into_plugin() {
 install_superpowers() {
     step 10 "Installing Superpowers plugin @ ${SUPERPOWERS_SHA:0:8}"
 
-    local plugins_dir="${EDGELAB_HOME}/.claude/plugins"
+    local plugins_dir="${AGENT_HOME}/.claude/plugins"
     local sp_dir="${plugins_dir}/superpowers"
     local cfg="${plugins_dir}/config.json"
 
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$plugins_dir"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$plugins_dir"
 
     if [[ -d "$sp_dir" ]]; then
         log "Superpowers already present -- pinning SHA."
-        as_edgelab git -C "$sp_dir" fetch --depth=1 origin "$SUPERPOWERS_SHA" 2>/dev/null \
+        as_agent git -C "$sp_dir" fetch --depth=1 origin "$SUPERPOWERS_SHA" 2>/dev/null \
             || warn "Superpowers fetch failed -- keeping existing checkout."
-        as_edgelab git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
+        as_agent git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
             || warn "Superpowers checkout of pinned SHA failed."
     else
-        as_edgelab git clone --quiet --depth 1 "$SUPERPOWERS_REPO" "$sp_dir" \
+        as_agent git clone --quiet --depth 1 "$SUPERPOWERS_REPO" "$sp_dir" \
             || { warn "Failed to clone Superpowers -- skipping."; return 0; }
-        as_edgelab git -C "$sp_dir" fetch --depth=1 origin "$SUPERPOWERS_SHA" 2>/dev/null \
+        as_agent git -C "$sp_dir" fetch --depth=1 origin "$SUPERPOWERS_SHA" 2>/dev/null \
             || warn "Superpowers fetch of pinned SHA failed -- using HEAD."
-        as_edgelab git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
+        as_agent git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
             || warn "Superpowers checkout of pinned SHA failed -- using HEAD."
     fi
 
@@ -1650,17 +1825,17 @@ install_superpowers() {
 # STEP 11: SUDOERS (passwordless narrow-scope for agent self-repair)
 # =============================================================================
 
-# render_sudoers -- prints the sudoers file for 'edgelab' to stdout.
+# render_sudoers -- prints the sudoers file for the agent user to stdout.
 # apt is NOT listed: `sudo apt-get *` takes -o APT::Update::Pre-Invoke::=<cmd>
 # and is full root. Package installs go through ${APT_WRAPPER_BIN} only.
 render_sudoers() {
     cat <<SUDOERS
-# edgelab-install v${EDGELAB_VERSION} -- passwordless sudo for 'edgelab'.
+# ${INSTALL_TAG} v${INSTALLER_VERSION} -- passwordless sudo for '${AGENT_USER}'.
 # Scope: systemctl + journalctl for the agent units, plus package installs
 # through ${APT_WRAPPER_BIN} (plain package names only, no apt options).
 # claude-gateway stays listed: it is the --rollback target on migrated servers.
 
-Cmnd_Alias EDGELAB_SYSTEMCTL = \\
+Cmnd_Alias ${SUDO_ALIAS}_SYSTEMCTL = \\
     /usr/bin/systemctl start claude-gateway, \\
     /usr/bin/systemctl stop claude-gateway, \\
     /usr/bin/systemctl restart claude-gateway, \\
@@ -1684,7 +1859,7 @@ Cmnd_Alias EDGELAB_SYSTEMCTL = \\
     /usr/bin/systemctl disable claude-richard, \\
     /usr/bin/systemctl daemon-reload
 
-Cmnd_Alias EDGELAB_JOURNAL = \\
+Cmnd_Alias ${SUDO_ALIAS}_JOURNAL = \\
     /usr/bin/journalctl -u claude-gateway, \\
     /usr/bin/journalctl -u claude-gateway *, \\
     /usr/bin/journalctl -u ${JARVIS_UNIT}, \\
@@ -1692,16 +1867,16 @@ Cmnd_Alias EDGELAB_JOURNAL = \\
     /usr/bin/journalctl -u claude-richard, \\
     /usr/bin/journalctl -u claude-richard *
 
-Cmnd_Alias EDGELAB_APT = ${APT_WRAPPER_BIN}
+Cmnd_Alias ${SUDO_ALIAS}_APT = ${APT_WRAPPER_BIN}
 
-${EDGELAB_USER} ALL=(root) NOPASSWD: EDGELAB_SYSTEMCTL, EDGELAB_JOURNAL, EDGELAB_APT
+${AGENT_USER} ALL=(root) NOPASSWD: ${SUDO_ALIAS}_SYSTEMCTL, ${SUDO_ALIAS}_JOURNAL, ${SUDO_ALIAS}_APT
 SUDOERS
 }
 
 install_sudoers() {
-    step 11 "Granting edgelab narrow passwordless sudo"
+    step 11 "Granting ${AGENT_USER} narrow passwordless sudo"
 
-    local sudoers_file="/etc/sudoers.d/edgelab-agents"
+    local sudoers_file="$SUDOERS_FILE"
     local tmp
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
@@ -1717,7 +1892,7 @@ install_sudoers() {
     # Wrapper first: the sudoers rule must never point at a missing or
     # user-writable file. /usr/local/sbin is root-owned.
     install -d -m 0755 -o root -g root "$(dirname "$APT_WRAPPER_BIN")"
-    install -m 0755 -o root -g root "${TEMPLATES_DIR}/edgelab-apt-install.sh" "$APT_WRAPPER_BIN"
+    install -m 0755 -o root -g root "${TEMPLATES_DIR}/agent-apt-install.sh" "$APT_WRAPPER_BIN"
 
     install -m 0440 -o root -g root "$tmp" "$sudoers_file"
     ok "Sudoers installed at ${sudoers_file} (0440), apt only via ${APT_WRAPPER_BIN}."
@@ -1728,7 +1903,7 @@ install_sudoers() {
 # =============================================================================
 
 # Install the 5 memory-rotation scripts into the jarvis workspace and register
-# them with edgelab's crontab. Matches the Day 2 self-diagnostic contract: a
+# them with the agent user's crontab. Matches the Day 2 self-diagnostic contract: a
 # healthy agent has rotate-warm / trim-hot / compress-warm / ov-session-sync /
 # memory-rotate on cron.
 install_memory_cron() {
@@ -1742,11 +1917,11 @@ install_memory_cron() {
         return 0
     fi
 
-    local scripts_dst="${EDGELAB_HOME}/.claude-lab/jarvis/scripts"
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$scripts_dst"
+    local scripts_dst="${AGENT_HOME}/.claude-lab/jarvis/scripts"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$scripts_dst"
 
-    local logs_dst="${EDGELAB_HOME}/.claude-lab/jarvis/logs"
-    install -d -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$logs_dst"
+    local logs_dst="${AGENT_HOME}/.claude-lab/jarvis/logs"
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$logs_dst"
 
     local name
     local installed=()
@@ -1760,7 +1935,7 @@ install_memory_cron() {
             err "Memory script '${name}.sh' missing at ${src} -- refusing partial install."
             return 1
         fi
-        install -m 0755 -o "$EDGELAB_USER" -g "$EDGELAB_USER" "$src" "${scripts_dst}/${name}.sh"
+        install -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$src" "${scripts_dst}/${name}.sh"
         installed+=("$name")
     done
 
@@ -1769,9 +1944,9 @@ install_memory_cron() {
     systemctl enable --now cron 2>/dev/null \
         || warn "cron service not started -- memory rotation will run after next reboot."
 
-    # Merge cron lines with edgelab's existing crontab without clobbering it.
+    # Merge cron lines with the agent user's existing crontab without clobbering it.
     # Marker lets us update on reinstall instead of duplicating entries.
-    local marker="# edgelab-install v${EDGELAB_VERSION}: memory rotation"
+    local marker="# ${INSTALL_TAG} v${INSTALLER_VERSION}: memory rotation"
     local cron_block
     # CRON_TZ pins the schedule to UTC so the Day-2 diagnostic contract
     # (04:30/05:00/06:00/06:30/21:00 UTC) fires at the same wall-clock moment
@@ -1781,13 +1956,13 @@ install_memory_cron() {
     cron_block=$(cat <<CRON
 ${marker}
 CRON_TZ=UTC
-HOME=${EDGELAB_HOME}
+HOME=${AGENT_HOME}
 30 4 * * * ${scripts_dst}/rotate-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 5 * * *  ${scripts_dst}/trim-hot.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 6 * * *  ${scripts_dst}/compress-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
 30 6 * * * ${scripts_dst}/ov-session-sync.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 21 * * * ${scripts_dst}/memory-rotate.sh >> ${logs_dst}/memory-cron.log 2>&1
-# edgelab-install memory rotation end
+# ${INSTALL_TAG} memory rotation end
 CRON
 )
 
@@ -1797,7 +1972,7 @@ CRON
     TMPFILES+=("$current_tmp" "$new_tmp")
 
     # Fetch current crontab (empty is fine on first run).
-    crontab -u "$EDGELAB_USER" -l 2>/dev/null > "$current_tmp" || true
+    crontab -u "$AGENT_USER" -l 2>/dev/null > "$current_tmp" || true
 
     # Strip any previous managed block so we can re-insert the current one.
     python3 - "$current_tmp" "$new_tmp" <<'PY'
@@ -1806,7 +1981,7 @@ src, dst = sys.argv[1], sys.argv[2]
 with open(src, encoding='utf-8') as f:
     text = f.read()
 cleaned = re.sub(
-    r'# edgelab-install v[0-9.]+: memory rotation.*?# edgelab-install memory rotation end\n?',
+    r'# (?:edgelab|neurootdel)-install v[0-9.]+: memory rotation.*?# (?:edgelab|neurootdel)-install memory rotation end\n?',
     '',
     text,
     flags=re.DOTALL,
@@ -1817,13 +1992,13 @@ PY
     # Append new block.
     printf '%s\n' "$cron_block" >> "$new_tmp"
 
-    if ! crontab -u "$EDGELAB_USER" "$new_tmp" 2>/dev/null; then
-        err "Failed to install crontab for ${EDGELAB_USER} -- memory rotation will not run. Day-2 self-diagnostic will flag this as a failure."
+    if ! crontab -u "$AGENT_USER" "$new_tmp" 2>/dev/null; then
+        err "Failed to install crontab for ${AGENT_USER} -- memory rotation will not run. Day-2 self-diagnostic will flag this as a failure."
         return 1
     fi
 
     # Verify the block actually landed so a silent crontab discard doesn't slip through.
-    if ! crontab -u "$EDGELAB_USER" -l 2>/dev/null | grep -q "edgelab-install memory rotation end"; then
+    if ! crontab -u "$AGENT_USER" -l 2>/dev/null | grep -q "${INSTALL_TAG} memory rotation end"; then
         err "crontab accepted the file but memory-rotation block is not visible on read-back."
         return 1
     fi
@@ -1841,7 +2016,7 @@ enable_services() {
     systemctl daemon-reload
 
     local oauth_ready="no"
-    if [[ -f "${EDGELAB_HOME}/.claude/.credentials.json" ]]; then
+    if [[ -f "${AGENT_HOME}/.claude/.credentials.json" ]]; then
         oauth_ready="yes"
     fi
 
@@ -1864,7 +2039,7 @@ enable_services() {
                 warn "${JARVIS_UNIT} enabled, but start failed -- check 'journalctl -u ${JARVIS_UNIT}'."
             fi
         else
-            log "${JARVIS_UNIT} enabled -- will start after OAuth under edgelab."
+            log "${JARVIS_UNIT} enabled -- will start after OAuth under ${AGENT_USER}."
         fi
     fi
 
@@ -1877,7 +2052,7 @@ enable_services() {
                 warn "claude-richard enabled, but start failed -- check 'journalctl -u claude-richard'."
             fi
         else
-            log "claude-richard enabled -- will start after OAuth under edgelab."
+            log "claude-richard enabled -- will start after OAuth under ${AGENT_USER}."
         fi
     else
         log "claude-richard NOT enabled (no token)."
@@ -1890,7 +2065,7 @@ enable_services() {
 # or the stop fails.
 _retire_legacy_gateway() {
     local unit_file="/etc/systemd/system/${LEGACY_GATEWAY_UNIT}.service"
-    local legacy_dir="${EDGELAB_HOME}/${LEGACY_GATEWAY_DIR_NAME}"
+    local legacy_dir="${AGENT_HOME}/${LEGACY_GATEWAY_DIR_NAME}"
     if [[ ! -f "$unit_file" ]]; then
         return 0
     fi
@@ -1907,7 +2082,7 @@ _retire_legacy_gateway() {
         err "Backup of ${unit_file} to ${backup_dir} failed."
         return 1
     fi
-    if [[ -d "$legacy_dir" ]] && ! tar -C "$EDGELAB_HOME" --exclude="${LEGACY_GATEWAY_DIR_NAME}/.venv" \
+    if [[ -d "$legacy_dir" ]] && ! tar -C "$AGENT_HOME" --exclude="${LEGACY_GATEWAY_DIR_NAME}/.venv" \
             -czf "${backup_dir}/claude-gateway-dir.tgz" "$LEGACY_GATEWAY_DIR_NAME"; then
         err "Backup of ${legacy_dir} to ${backup_dir} failed."
         return 1
@@ -1967,29 +2142,29 @@ final_instructions() {
     cat <<EOF
 
 $(printf '%b' "$C_GREEN")================================================================================
-  edgelab-install v${EDGELAB_VERSION} complete.  Agent-native flow: the root-Claude
+  НЕЙРООТДЕЛ: neurootdel-install v${INSTALLER_VERSION} complete.  Agent-native flow: the root-Claude
   agent will configure the rest.  Do NOT run commands by hand below.
 ================================================================================$(printf '%b' "$C_NC")
 
 Installed on this VPS:
-  - User:      ${EDGELAB_USER} (${EDGELAB_HOME})
-  - Claude:    ${EDGELAB_HOME}/.local/bin/claude  (per-user, on PATH)
-  - Jarvis:    ${EDGELAB_HOME}/.claude-lab/jarvis/.claude/dashi-plugin-claude-code  (systemd: ${JARVIS_UNIT})
+  - User:      ${AGENT_USER} (${AGENT_HOME})
+  - Claude:    ${AGENT_HOME}/.local/bin/claude  (per-user, on PATH)
+  - Jarvis:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/  (systemd: ${JARVIS_UNIT})
                env: ${JARVIS_ENV_DIR}/channel.env
   - Richard:   ${RICHARD_HOME}                       (systemd: claude-richard)
-  - Skills:    ${EDGELAB_HOME}/.claude-lab/jarvis/.claude/skills/  (10 skills)
-  - Plugin:    ${EDGELAB_HOME}/.claude/plugins/superpowers/
-  - Sudoers:   /etc/sudoers.d/edgelab-agents  (narrow, 0440)
+  - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  (10 skills)
+  - Plugin:    ${AGENT_HOME}/.claude/plugins/superpowers/
+  - Sudoers:   ${SUDOERS_FILE}  (narrow, 0440)
 
 $(printf '%b' "$C_BOLD")Tokens filled during install:$(printf '%b' "$C_NC") ${tokens_filled}
 
 $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not the student:$(printf '%b' "$C_NC")
 
-  $(printf '%b' "$C_YELLOW")1.$(printf '%b' "$C_NC") One-time Anthropic OAuth under edgelab (interactive -- opens browser):
+  $(printf '%b' "$C_YELLOW")1.$(printf '%b' "$C_NC") One-time Anthropic OAuth under ${AGENT_USER} (interactive -- opens browser):
 
-        sudo -u ${EDGELAB_USER} -i bash -lc 'claude auth login'
+        sudo -u ${AGENT_USER} -i bash -lc 'claude auth login'
 
-      Credentials land in ${EDGELAB_HOME}/.claude/ and are shared by both agents.
+      Credentials land in ${AGENT_HOME}/.claude/ and are shared by both agents.
 
   $(printf '%b' "$C_YELLOW")2.$(printf '%b' "$C_NC") If tokens were skipped during install, fill them now and restart:
 
@@ -2003,7 +2178,7 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         sudo systemctl restart ${JARVIS_UNIT} claude-richard
         sudo systemctl status  ${JARVIS_UNIT} claude-richard --no-pager
         sudo journalctl -u ${JARVIS_UNIT} -f       # Jarvis logs
-        sudo -u ${EDGELAB_USER} tmux -L ${JARVIS_UNIT} capture-pane -p -t ${JARVIS_UNIT} | tail -30   # Jarvis screen
+        sudo -u ${AGENT_USER} tmux -L ${JARVIS_UNIT} capture-pane -p -t ${JARVIS_UNIT} | tail -30   # Jarvis screen
 
       Undo the switch to the plugin (servers that had claude-gateway):
 
@@ -2011,16 +2186,16 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
 
   $(printf '%b' "$C_YELLOW")3.$(printf '%b' "$C_NC") Smoke-checks:
 
-        id ${EDGELAB_USER}                                      # uid >= 1000
+        id ${AGENT_USER}                                      # uid >= 1000
         node -v                                                 # v22+
         python3 --version                                       # 3.12+
-        sudo -u ${EDGELAB_USER} bash -lc 'which claude'         # ${EDGELAB_HOME}/.local/bin/claude
-        ls ${EDGELAB_HOME}/.claude-lab/jarvis/.claude/          # CLAUDE.md, core/, skills/
+        sudo -u ${AGENT_USER} bash -lc 'which claude'         # ${AGENT_HOME}/.local/bin/claude
+        ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/          # CLAUDE.md, core/, skills/
         systemctl is-active ${JARVIS_UNIT}                       # active (after steps 1+2)
         systemctl is-active claude-richard                      # active (after steps 1+2)
-        ls -la /etc/sudoers.d/edgelab-agents                    # exists, 0440
-        ls ${EDGELAB_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # 10
-        ls ${EDGELAB_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
+        ls -la ${SUDOERS_FILE}                    # exists, 0440
+        ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # 10
+        ls ${AGENT_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
 
   $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
       If Jarvis dies, the student messages Richard:  ${richard_label}
@@ -2037,14 +2212,20 @@ main() {
         rollback_to_gateway
         return 0
     fi
+    if [[ "${1:-}" == "--solo" ]]; then
+        SOLO=1
+    fi
 
     banner
     preflight
+    if [[ "$SOLO" == "1" ]]; then
+        azv_activate
+    fi
     install_apt_deps
     require_step_packages
     install_node
-    ensure_edgelab_user
-    check_node_for_edgelab
+    ensure_agent_user
+    check_node_for_agent
     install_claude_cli
     install_bun
     collect_inputs
@@ -2052,6 +2233,9 @@ main() {
     install_richard
     setup_global_claude
     install_skills
+    if [[ "$SOLO" == "1" ]]; then
+        azv_install_payload
+    fi
     install_superpowers
     install_sudoers
     install_memory_cron

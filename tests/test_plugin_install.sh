@@ -34,27 +34,30 @@ check() {
 has()    { grep -qxF -- "$2" "$1"; }
 hasnt()  { ! grep -qE -- "$2" "$1"; }
 
-# A copy of install.sh whose EDGELAB_HOME points into the sandbox.
+# A copy of install.sh whose agent home points into the sandbox (set after sourcing).
 FAKE_HOME="${TDIR}/home"
 mkdir -p "$FAKE_HOME"
 # Root-only paths (/etc, /var/backups) and the root check are pointed into
 # the sandbox too, so the switch-over logic runs as a normal user.
 mkdir -p "${TDIR}/systemd" "${TDIR}/etc-jarvis" "${TDIR}/backups"
-sed -e "s#^readonly EDGELAB_HOME=.*#readonly EDGELAB_HOME=\"${FAKE_HOME}\"#" \
-    -e "s#^readonly JARVIS_ENV_DIR=.*#readonly JARVIS_ENV_DIR=\"${TDIR}/etc-jarvis\"#" \
-    -e "s#^readonly LEGACY_BACKUP_ROOT=.*#readonly LEGACY_BACKUP_ROOT=\"${TDIR}/backups\"#" \
-    -e "s#^readonly RICHARD_HOME=.*#readonly RICHARD_HOME=\"${TDIR}/richard\"#" \
+sed -e "s#^readonly RICHARD_HOME=.*#readonly RICHARD_HOME=\"${TDIR}/richard\"#" \
     -e "s#/etc/systemd/system/#${TDIR}/systemd/#g" \
-    -e "s#/usr/local/lib/edgelab/#${TDIR}/libexec/#g" \
     -e 's#\$EUID -ne 0 ]]#$EUID -ne 0 \&\& -z "${TEST_AS_ROOT:-}" ]]#' \
     "${REPO}/install.sh" >"${TDIR}/install.sh"
 
 export INSTALL_SH_SOURCED_FOR_TESTING=1
-export EDGELAB_TEMPLATES_DIR="${REPO}/templates"
+export NEUROOTDEL_TEMPLATES_DIR="${REPO}/templates"
 # shellcheck disable=SC1091
 source "${TDIR}/install.sh"
 set +e    # the checks below report failures themselves
-as_edgelab() { "$@"; }
+# New-install names, then every root path pointed into the sandbox.
+apply_install_names new
+AGENT_HOME="$FAKE_HOME"
+JARVIS_ENV_DIR="${TDIR}/etc-jarvis"
+LEGACY_BACKUP_ROOT="${TDIR}/backups"
+CHANNEL_CONFIRM_BIN="${TDIR}/libexec/channel-confirm.sh"
+CHANNEL_START_BIN="${TDIR}/libexec/channel-start.sh"
+as_agent() { "$@"; }
 
 TOKEN="123456789:AAHabcdefghijklmnopqrstuvwxyz0123456"
 TOKEN2="987654321:BBHabcdefghijklmnopqrstuvwxyz0123456"
@@ -142,7 +145,7 @@ check "trust: other keys kept" \
 check "trust: explicit onboarding value kept" \
     python3 -c "import json,sys; d=json.load(open('$CJ')); sys.exit(0 if d['hasCompletedOnboarding'] is False else 1)"
 check "trust: mode 600 kept"      test "$(stat -c %a "$CJ")" = "600"
-check "trust: backup written"     test -f "${CJ}.bak-edgelab-install"
+check "trust: backup written"     test -f "${CJ}.bak-install"
 _accept_trust_dialog "$CJ" "/p/plugin"
 check "trust: idempotent" \
     python3 -c "import json,sys; d=json.load(open('$CJ')); sys.exit(0 if len(d['projects'])==2 else 1)"
@@ -419,7 +422,7 @@ PR="${FAKE_HOME}/.claude-lab/jarvis/.claude/dashi-plugin-claude-code"
 mkdir -p "${PR}/.git" "${PR}/plugin" "${PR}/.claude"; printf '{}' >"${PR}/plugin/.mcp.json"
 # What a rejected first start leaves behind (seen live, Claude Code 2.1.283).
 printf '{"disabledMcpjsonServers":["dashi-channel"]}\n' >"${PR}/.claude/settings.local.json"
-as_edgelab() { case "$1" in git|env) return 0 ;; *) "$@" ;; esac; }
+as_agent() { case "$1" in git|env) return 0 ;; *) "$@" ;; esac; }
 install() {
     local args=()
     while (($#)); do case $1 in -o|-g|-m) shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -438,7 +441,7 @@ check "jarvis: repo root + plugin trusted" \
 check "jarvis: start script installed"  test -x "${TDIR}/libexec/channel-start.sh"
 check "jarvis: unit uses start script"  grep -q "^ExecStart=/bin/bash ${TDIR}/libexec/channel-start.sh channel-jarvis " "${TDIR}/systemd/channel-jarvis.service"
 unset -f install fix_owner
-as_edgelab() { "$@"; }
+as_agent() { "$@"; }
 
 # --- workspace: a re-run keeps the agent's files --------------------------------
 WS="${TDIR}/ws"
@@ -458,14 +461,20 @@ check "workspace: existing file kept" test "$(cat "${WS}/core/hot/handoff.md")" 
 check "workspace: missing file written" test "$(cat "${WS}/core/new.md")" = "stub"
 
 # --- prompt_or_env without a tty: like Enter, never dies -----------------------
-unset EDGELAB_TEST_ANSWER
-R1=$( (EDGELAB_NONINTERACTIVE=1 prompt_or_env V EDGELAB_TEST_ANSWER "q" "" --secret </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
+unset NEUROOTDEL_TEST_ANSWER
+R1=$( (NEUROOTDEL_NONINTERACTIVE=1 prompt_or_env V NEUROOTDEL_TEST_ANSWER "q" "" --secret </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
 check "no tty, no default: rc 0, empty" test "$R1" = "rc=0 v=[]"
-R2=$( (prompt_or_env V EDGELAB_TEST_ANSWER "q" "Russian" </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
+R2=$( (prompt_or_env V NEUROOTDEL_TEST_ANSWER "q" "Russian" </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
 check "no tty, default used"            test "$R2" = "rc=0 v=[Russian]"
-R3=$( (EDGELAB_TEST_ANSWER=from_env prompt_or_env V EDGELAB_TEST_ANSWER "q" "" </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
+R3=$( (NEUROOTDEL_TEST_ANSWER=from_env prompt_or_env V NEUROOTDEL_TEST_ANSWER "q" "" </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
 check "no tty, env wins"                test "$R3" = "rc=0 v=[from_env]"
-R4=$( (EDGELAB_NONINTERACTIVE=1 collect_inputs </dev/null >/dev/null 2>&1; printf 'rc=%s' "$?") )
+R3b=$( (EDGELAB_TEST_ANSWER=old_name prompt_or_env V NEUROOTDEL_TEST_ANSWER "q" "" </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
+check "no tty, old EDGELAB_ name accepted" test "$R3b" = "rc=0 v=[old_name]"
+R3c=$( (EDGELAB_TEST_ANSWER=old NEUROOTDEL_TEST_ANSWER=new prompt_or_env V NEUROOTDEL_TEST_ANSWER "q" "" </dev/null 2>/dev/null; printf 'rc=%s v=[%s]' "$?" "$V") )
+check "no tty, new name wins over old"  test "$R3c" = "rc=0 v=[new]"
+R3d=$( (unset NEUROOTDEL_NONINTERACTIVE; EDGELAB_NONINTERACTIVE=1 is_noninteractive </dev/null; printf 'rc=%s' "$?") )
+check "old EDGELAB_NONINTERACTIVE honoured" test "$R3d" = "rc=0"
+R4=$( (NEUROOTDEL_NONINTERACTIVE=1 collect_inputs </dev/null >/dev/null 2>&1; printf 'rc=%s' "$?") )
 check "no tty: collect_inputs survives with no tokens" test "$R4" = "rc=0"
 
 # --- merge_env_file ---------------------------------------------------------------
@@ -696,7 +705,7 @@ check "gate: after apt-get -> passes"          test "$OUT" = "rc=0"
 
 # main: with the gate failing no agent step runs; re-run goes all the way
 STEPS="${TDIR}/steps"
-main_steps=(banner preflight install_apt_deps install_node ensure_edgelab_user check_node_for_edgelab
+main_steps=(banner preflight install_apt_deps install_node ensure_agent_user check_node_for_agent
     install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude
     install_skills install_superpowers install_sudoers install_memory_cron enable_services final_instructions)
 run_main_stubbed() {
@@ -710,7 +719,7 @@ run_main_stubbed
 check "main: gate stops the run"               test $? -ne 0
 check "main: no Jarvis after stop"             bash -c "! grep -q install_jarvis '$STEPS'"
 check "main: no Richard after stop"            bash -c "! grep -q install_richard '$STEPS'"
-check "main: no user/claude/bun after stop"    bash -c "! grep -qE 'ensure_edgelab_user|install_claude_cli|install_bun' '$STEPS'"
+check "main: no user/claude/bun after stop"    bash -c "! grep -qE 'ensure_agent_user|install_claude_cli|install_bun' '$STEPS'"
 INSTALLED="${INSTALLED}python3-venv "; : >"$STEPS"
 run_main_stubbed
 check "main: re-run passes"                    test $? -eq 0
@@ -734,12 +743,12 @@ NODE_VER="v100.0.0"; : >"$CURL_LOG"; ( install_node ) >/dev/null 2>&1
 check "node v100: numeric compare, left" test ! -s "$CURL_LOG"
 unset -f curl apt_get
 
-as_edgelab() { return 1; }
-OUT=$( (check_node_for_edgelab; printf 'rc=%s' "$?") 2>&1 )
+as_agent() { return 1; }
+OUT=$( (check_node_for_agent; printf 'rc=%s' "$?") 2>&1 )
 check "node as edgelab fails: warns"     grep -q 'does not run as' <<<"$OUT"
 check "node as edgelab fails: rc 0"      grep -q 'rc=0$' <<<"$OUT"
-as_edgelab() { "$@"; }
-OUT=$( (check_node_for_edgelab; printf 'rc=%s' "$?") 2>&1 )
+as_agent() { "$@"; }
+OUT=$( (check_node_for_agent; printf 'rc=%s' "$?") 2>&1 )
 check "node as edgelab ok: silent"       test "$OUT" = "rc=0"
 unset -f node
 

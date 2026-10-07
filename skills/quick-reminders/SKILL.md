@@ -30,12 +30,15 @@ reminder fires (it never lands in crontab), from the first source that exists
 (`scripts/tg-target.sh`):
 
 1. `$TELEGRAM_BOT_TOKEN_FILE` -- a file with just the token (explicit override).
-2. `/etc/dashi-plugin/jarvis/channel.env`, line `TELEGRAM_BOT_TOKEN=` -- where
-   edgelab-install puts it (root:edgelab 0640, the agent reads it via its group).
+2. `/etc/vladimir-plugin/jarvis/channel.env` (servers installed before the
+   rename: `/etc/dashi-plugin/jarvis/channel.env`), line `TELEGRAM_BOT_TOKEN=` --
+   where the installer puts it (root:<agent user> 0640, the agent reads it via its group).
 3. `$HOME/claude-gateway/secrets/bot-token` -- old gateway installs.
 
 ```bash
-TOKEN=$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' /etc/dashi-plugin/jarvis/channel.env | head -n1)
+ENV_FILE=/etc/vladimir-plugin/jarvis/channel.env
+[ -e "$ENV_FILE" ] || ENV_FILE=/etc/dashi-plugin/jarvis/channel.env
+TOKEN=$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' "$ENV_FILE" | head -n1)
 curl -fsSL --max-time 30 \
   -d "chat_id=${TG_ID}" -d "text=${MESSAGE}" \
   "https://api.telegram.org/bot${TOKEN}/sendMessage"

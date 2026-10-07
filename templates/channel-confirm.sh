@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installed by edgelab-install as /usr/local/lib/edgelab/channel-confirm.sh; copied
-# from the live edgelab fleet (owner name made generic). Deliberately `set -u` only: it must never
+# Installed by the installer as /usr/local/lib/<agent user>/channel-confirm.sh; copied
+# from the live fleet (owner name made generic). Deliberately `set -u` only: it must never
 # fail the unit (ExecStartPost), every tmux call is best-effort.
 # channel-confirm.sh <tmux-session>
 # Надёжно проходит интерактивные welcome-промты claude (их 2:

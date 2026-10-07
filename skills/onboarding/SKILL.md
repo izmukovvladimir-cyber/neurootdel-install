@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: First-run personalisation wizard for a fresh EdgeLab agent. Invoke when the operator says "onboard me", "set up my agent", "personalise", or immediately after a clean install.
+description: First-run personalisation wizard for a fresh НЕЙРООТДЕЛ agent. Invoke when the operator says "onboard me", "set up my agent", "personalise", or immediately after a clean install.
 ---
 
 # onboarding
@@ -11,7 +11,7 @@ classifier stack arrives on Day-N.
 
 ## When to use
 
-- Operator just ran `curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/edgelab-install/main/install.sh -o install.sh && sudo bash install.sh`.
+- Operator just ran `curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/neurootdel-install/main/install.sh -o /root/neurootdel-install.sh && sudo bash /root/neurootdel-install.sh`.
 - Operator asks to redo onboarding after changing their role / timezone.
 - USER.md or CLAUDE.md still has installer defaults (e.g. `boss`, `UTC`, `jarvis`).
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Jarvis -- dashi-plugin channel (Telegram -> Claude Code)
+Description=Jarvis -- Telegram channel (Telegram -> Claude Code)
 After=network-online.target
 Wants=network-online.target
 

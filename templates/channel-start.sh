@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# channel-start.sh <session> <command...> -- installed by edgelab-install as
-# /usr/local/lib/edgelab/channel-start.sh, ExecStart of channel-<agent>.
+# channel-start.sh <session> <command...> -- installed by the installer as
+# /usr/local/lib/<agent user>/channel-start.sh, ExecStart of channel-<agent>.
 #
 # The plugin checks getMe against TELEGRAM_EXPECTED_BOT_ID and, when it is not
 # set, against a hard-coded upstream bot id -> "bot_id mismatch" for every

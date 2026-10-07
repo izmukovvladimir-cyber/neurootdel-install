@@ -1,4 +1,4 @@
-# EdgeLab AI Agent -- Quick Start
+# НЕЙРООТДЕЛ AI Agent -- Quick Start
 
 Установщик персонального AI-агента на базе Claude Code с Telegram-интерфейсом.
 
@@ -7,7 +7,7 @@
 ## Установка
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/edgelab-install/main/install.sh -o install.sh && sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/neurootdel-install/main/install.sh -o /root/neurootdel-install.sh && sudo bash /root/neurootdel-install.sh
 ```
 
 ## Что устанавливается
@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/edgelab-insta
 | Node.js | 22.x | Среда для Claude Code CLI |
 | Python | 3.12+ | Скрипты |
 | Claude Code | latest | AI-агент (Anthropic, Opus -- код/ревью, Sonnet -- субагенты) |
-| Bun + [dashi-plugin](https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code) | latest (main) | Связь агента с Telegram |
+| Bun + [Telegram-плагин](https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code) | latest (main) | Связь агента с Telegram |
 | Caddy | latest | Веб-сервер для вебхуков |
 | UFW + fail2ban | -- | Безопасность сервера |
 
@@ -26,9 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/edgelab-insta
 ## Архитектура
 
 ```
-Telegram --> Bot API --> dashi-plugin (MCP-канал) --> Claude Code --> ответ
-                                  |
-                           channel.env
+Telegram --> Bot API --> Telegram-плагин (MCP-канал) --> Claude Code --> ответ
+                                     |
+                              channel.env
                            (bot token,
                             user ID,
                             workspace)
@@ -40,7 +40,7 @@ Telegram --> Bot API --> dashi-plugin (MCP-канал) --> Claude Code --> от�
 
 1. **Авторизуйте Claude Code** -- запустите `claude` в терминале, пройдите OAuth-авторизацию (Anthropic Max подписка, $100-200/мес)
 
-2. **Настройте бота** -- откройте `/etc/dashi-plugin/jarvis/channel.env` (от root):
+2. **Настройте бота** -- откройте `/etc/vladimir-plugin/jarvis/channel.env` (от root; на серверах, поставленных до переименования, `/etc/dashi-plugin/jarvis/channel.env`):
    - Создайте бота через [@BotFather](https://t.me/BotFather) в Telegram
    - `TELEGRAM_BOT_TOKEN=<токен бота>`
    - Свой Telegram user ID (из [@userinfobot](https://t.me/userinfobot)) впишите в ОБЕ строки:
@@ -77,6 +77,9 @@ Telegram --> Bot API --> dashi-plugin (MCP-канал) --> Claude Code --> от�
 
 ## Структура файлов (v2.2.0 dual-path)
 
+Пользователь агента `neurootdel` (`/home/neurootdel`). Сервер, где уже стоит прежняя
+установка с пользователем `edgelab`, при повторном запуске остаётся на `edgelab` и старых путях.
+
 ```
 ~/.claude/                     # Anthropic CLI home
   CLAUDE.md                    # stub, указывает на agent workspace
@@ -112,7 +115,7 @@ Telegram --> Bot API --> dashi-plugin (MCP-канал) --> Claude Code --> от�
 
 ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/   # Telegram-канал (плагин)
   plugin/                      # рабочий каталог сессии Claude Code
-/etc/dashi-plugin/jarvis/channel.env   # токен бота, ваш ID, ключ Groq
+/etc/vladimir-plugin/jarvis/channel.env   # токен бота, ваш ID, ключ Groq
 /etc/systemd/system/channel-jarvis.service
 ```
 
@@ -166,7 +169,7 @@ sudo systemctl status channel-jarvis
 sudo journalctl -u channel-jarvis -f
 
 # Экран сессии Claude Code
-sudo -u edgelab tmux -L channel-jarvis capture-pane -p -t channel-jarvis | tail -30
+sudo -u neurootdel tmux -L channel-jarvis capture-pane -p -t channel-jarvis | tail -30
 
 # Перезапуск после изменения channel.env
 sudo systemctl restart channel-jarvis
@@ -178,15 +181,9 @@ sudo bash install.sh --rollback
 claude update
 ```
 
-## Полное руководство
+## Сайт
 
-Пошаговый гайд с настройкой VPS, домена и агента:
-**[https://guides.edgelab.su/guides/vps-ai-agent-setup/](https://guides.edgelab.su/guides/vps-ai-agent-setup/)**
-
-## Сообщество
-
-- Сайт: [https://edgelab.su](https://edgelab.su)
-- Документация: [https://guides.edgelab.su](https://guides.edgelab.su)
+[https://vladimir-izhmukov.ru](https://vladimir-izhmukov.ru)
 
 ## Лицензия
 

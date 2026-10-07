@@ -15,7 +15,7 @@ if [[ ! -f "$FILE" ]]; then
     exit 1
 fi
 
-# Token source and owner id: see tg-target.sh (channel.env from edgelab-install,
+# Token source and owner id: see tg-target.sh (channel.env from the installer,
 # then the old gateway path).
 # shellcheck source=tg-target.sh
 source "$(dirname "${BASH_SOURCE[0]}")/tg-target.sh"

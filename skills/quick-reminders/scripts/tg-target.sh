@@ -7,15 +7,21 @@
 #
 # Token source, first match wins:
 #   1. $TELEGRAM_BOT_TOKEN_FILE                      -- raw token file, explicit override
-#   2. channel.env written by edgelab-install        -- /etc/dashi-plugin/jarvis/channel.env
-#      (override the path with $EDGELAB_CHANNEL_ENV); root:edgelab 0640, the agent reads it via its group
+#   2. channel.env written by the installer          -- /etc/vladimir-plugin/jarvis/channel.env,
+#      on servers installed before the rename /etc/dashi-plugin/jarvis/channel.env
+#      (override the path with $NEUROOTDEL_CHANNEL_ENV, old name $EDGELAB_CHANNEL_ENV);
+#      root:<agent user> 0640, the agent reads it via its group
 #   3. $HOME/claude-gateway/secrets/bot-token         -- old gateway installs
 #   4. $HOME/.secrets/telegram-bot-token              -- manual setup
 # Owner chat id: caller's TG_ID -> $TELEGRAM_CHAT_ID -> first TELEGRAM_ALLOWED_USER_IDS
 # in channel.env -> allowlist_user_ids[0] in $HOME/claude-gateway/config.json.
 
 tg_resolve_target() {
-    local env_file="${EDGELAB_CHANNEL_ENV:-/etc/dashi-plugin/jarvis/channel.env}"
+    local env_file="${NEUROOTDEL_CHANNEL_ENV:-${EDGELAB_CHANNEL_ENV:-}}"
+    if [[ -z "$env_file" ]]; then
+        env_file=/etc/vladimir-plugin/jarvis/channel.env
+        [[ -e "$env_file" ]] || env_file=/etc/dashi-plugin/jarvis/channel.env
+    fi
     local legacy_dir="${HOME}/claude-gateway"
     TG_TOKEN_KIND=""
     TG_TOKEN_FILE=""

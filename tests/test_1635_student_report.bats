@@ -107,7 +107,7 @@ wrapper_with_stub() {
 printf '%s\n' "\$@" > "$TDIR/apt.args"
 EOF
     chmod +x "$TDIR/bin/apt-get"
-    sed "s#/usr/bin/apt-get#$TDIR/bin/apt-get#g" "$REPO/templates/edgelab-apt-install.sh" > "$TDIR/wrapper"
+    sed "s#/usr/bin/apt-get#$TDIR/bin/apt-get#g" "$REPO/templates/agent-apt-install.sh" > "$TDIR/wrapper"
     chmod +x "$TDIR/wrapper"
 }
 
@@ -145,6 +145,7 @@ EOF
     export INSTALL_SH_SOURCED_FOR_TESTING=1
     # shellcheck disable=SC1091
     source "$REPO/install.sh"
+    apply_install_names legacy
     render_sudoers > "$TDIR/sudoers"
     run grep -E '/usr/bin/apt(-get)?([ ,]|$)' "$TDIR/sudoers"
     [ "$status" -eq 1 ]
