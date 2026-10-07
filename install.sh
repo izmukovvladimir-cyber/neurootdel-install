@@ -16,6 +16,8 @@
 #   # or
 #   sudo ./install.sh
 #   sudo ./install.sh --rollback   # Jarvis back to the old claude-gateway unit
+#   sudo ./install.sh --solo       # «Агент за вечер»: asks for the personal key first
+#                                  # (or EDGELAB_AZV_KEY=...), stops without a valid one
 #
 # Env overrides (non-interactive):
 #   EDGELAB_JARVIS_BOT_TOKEN   Jarvis Telegram bot token
@@ -72,6 +74,15 @@ TEMPLATES_DIR="${EDGELAB_TEMPLATES_DIR:-$TEMPLATES_DIR_DEFAULT}"
 INSTALLER_ROOT="${EDGELAB_INSTALLER_ROOT:-$INSTALLER_ROOT_DEFAULT}"
 TEMPLATE_CLONE_DIR=""
 INSTALLER_SKILLS_DIR=""
+
+# «Агент за вечер» (--solo): the closed part of the agent is unlocked by a personal key
+# bound to this server. Without --solo none of this runs.
+readonly AZV_SALT="agent-za-vecher-v1"
+AZV_ACTIVATE_URL="${EDGELAB_AZV_URL:-https://hooks.vladimir-izhmukov.ru/agent/activate}"
+AZV_MACHINE_ID_FILE="${EDGELAB_AZV_MACHINE_ID_FILE:-/etc/machine-id}"
+AZV_STAGE_DIR="${EDGELAB_AZV_STAGE_DIR:-/var/lib/edgelab-install/azv}"
+AZV_AGENT_DIR="${EDGELAB_AZV_AGENT_DIR:-${EDGELAB_HOME}/.claude-lab/jarvis/.claude/azv}"
+SOLO=0
 
 # =============================================================================
 # TERMINAL OUTPUT
@@ -239,6 +250,84 @@ fix_owner() {
     local path="$1"
     [[ -e "$path" ]] || return 0
     chown -RhP "${EDGELAB_USER}:${EDGELAB_USER}" "$path"
+}
+
+# ---------------------------------------------------------------------------
+# «Агент за вечер» activation (--solo only)
+# ---------------------------------------------------------------------------
+
+# azv_machine_hash -- sha256(machine-id + product salt): what the key gets bound to.
+azv_machine_hash() {
+    [[ -r "$AZV_MACHINE_ID_FILE" ]] || return 1
+    local mid
+    mid=$(tr -d '[:space:]' < "$AZV_MACHINE_ID_FILE")
+    [[ -n "$mid" ]] || return 1
+    printf '%s%s' "$mid" "$AZV_SALT" | sha256sum | cut -d' ' -f1
+}
+
+# azv_archive_safe <tar.gz> -- only regular files and dirs, relative paths, no "..".
+azv_archive_safe() {
+    local listing names
+    listing=$(tar -tvzf "$1" 2>/dev/null) || return 1
+    names=$(tar -tzf "$1" 2>/dev/null) || return 1
+    [[ -n "$names" ]] || return 1
+    if grep -qv '^[-d]' <<<"$listing"; then
+        return 1
+    fi
+    if grep -qE '(^/|(^|/)\.\.(/|$))' <<<"$names"; then
+        return 1
+    fi
+}
+
+# azv_activate -- step 0b of --solo: no valid key for this server, no install.
+azv_activate() {
+    step 0b "Активация личного ключа «Агент за вечер»"
+    local key="" mhash body code archive msg
+    prompt_or_env key EDGELAB_AZV_KEY "Личный ключ (AZV-XXXX-XXXX-XXXX-XXXX)" "" --secret
+    key="${key//[[:space:]]/}"
+    if [[ -z "$key" ]]; then
+        die "Без личного ключа установка не продолжается. Ключ пришёл в чат после оплаты. Запусти так: EDGELAB_AZV_KEY=<ключ> sudo bash install.sh --solo"
+    fi
+    if [[ ! "$key" =~ ^[A-Za-z0-9-]{16,40}$ ]]; then
+        die "Ключ выглядит неверно, ожидается вид AZV-XXXX-XXXX-XXXX-XXXX. Скопируй его из чата целиком."
+    fi
+    mhash=$(azv_machine_hash) \
+        || die "Не удалось прочитать ${AZV_MACHINE_ID_FILE}, без него ключ к серверу не привязать. Напиши куратору."
+    archive=$(mktemp)
+    TMPFILES+=("$archive")
+    body=$(printf '{"key":"%s","machine_hash":"%s"}' "$key" "$mhash")
+    # No --retry: a POST may already have bound the key, and 429 retries burn the limit.
+    code=$(curl -sS --max-time 60 -o "$archive" -w '%{http_code}' \
+        -H 'Content-Type: application/json' --data-binary "$body" \
+        "$AZV_ACTIVATE_URL" 2>/dev/null) || code="000"
+    case "$code" in
+        200) ;;
+        000)
+            die "Сервер активации не отвечает. Проверь интернет на сервере и запусти установщик снова."
+            ;;
+        *)
+            msg=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("message", ""))' \
+                "$archive" 2>/dev/null || true)
+            die "Активация не прошла (код ${code}). ${msg:-Напиши куратору.}"
+            ;;
+    esac
+    azv_archive_safe "$archive" \
+        || die "Архив от сервера активации повреждён. Запусти установщик снова или напиши куратору."
+    rm -rf "${AZV_STAGE_DIR:?}"
+    install -d -m 0700 "$AZV_STAGE_DIR"
+    tar -xzf "$archive" -C "$AZV_STAGE_DIR" --no-same-owner --no-same-permissions \
+        || die "Не удалось распаковать материалы. Запусти установщик снова."
+    ok "Ключ принят, личные материалы агента получены"
+}
+
+# azv_install_payload -- the unlocked part goes into the agent workspace (after install_jarvis).
+azv_install_payload() {
+    step 9b "Раскладываю личные материалы агента"
+    [[ -d "$AZV_STAGE_DIR" ]] || die "Нет материалов активации (${AZV_STAGE_DIR}). Запусти установщик с --solo снова."
+    install -d -m 0755 "$AZV_AGENT_DIR"
+    cp -a "${AZV_STAGE_DIR}/." "${AZV_AGENT_DIR}/"
+    fix_owner "$AZV_AGENT_DIR"
+    ok "Материалы лежат в ${AZV_AGENT_DIR}"
 }
 
 # ---------------------------------------------------------------------------
@@ -2037,9 +2126,15 @@ main() {
         rollback_to_gateway
         return 0
     fi
+    if [[ "${1:-}" == "--solo" ]]; then
+        SOLO=1
+    fi
 
     banner
     preflight
+    if [[ "$SOLO" == "1" ]]; then
+        azv_activate
+    fi
     install_apt_deps
     require_step_packages
     install_node
@@ -2052,6 +2147,9 @@ main() {
     install_richard
     setup_global_claude
     install_skills
+    if [[ "$SOLO" == "1" ]]; then
+        azv_install_payload
+    fi
     install_superpowers
     install_sudoers
     install_memory_cron
