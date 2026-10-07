@@ -92,9 +92,9 @@ SERVER_PID=$!
 read -r PORT <&3
 
 printf 'abc123machineid\n' > "${TDIR}/machine-id"
-export EDGELAB_AZV_URL="http://127.0.0.1:${PORT}/agent/activate"
-export EDGELAB_AZV_MACHINE_ID_FILE="${TDIR}/machine-id"
-export EDGELAB_NONINTERACTIVE=1
+export NEUROOTDEL_AZV_URL="http://127.0.0.1:${PORT}/agent/activate"
+export NEUROOTDEL_AZV_MACHINE_ID_FILE="${TDIR}/machine-id"
+export NEUROOTDEL_NONINTERACTIVE=1
 export INSTALL_SH_SOURCED_FOR_TESTING=1
 
 # run_step <out-prefix> <key> <fn...>: runs fns in a subshell with install.sh sourced.
@@ -102,9 +102,9 @@ run_step() {
     local out=$1 key=$2; shift 2
     local rc=0
     (
-        export EDGELAB_AZV_KEY="$key"
-        export EDGELAB_AZV_STAGE_DIR="${TDIR}/${out}/stage"
-        export EDGELAB_AZV_AGENT_DIR="${TDIR}/${out}/agent/azv"
+        export NEUROOTDEL_AZV_KEY="$key"
+        export NEUROOTDEL_AZV_STAGE_DIR="${TDIR}/${out}/stage"
+        export NEUROOTDEL_AZV_AGENT_DIR="${TDIR}/${out}/agent/azv"
         mkdir -p "${TDIR}/${out}"
         # shellcheck disable=SC1091
         source "${REPO}/install.sh"
@@ -166,17 +166,17 @@ check "symlink archive: refused" test "$rc" != 0
 check "symlink archive: nothing unpacked" test ! -e "${TDIR}/link/stage"
 
 # --- server down
-rc=$(EDGELAB_AZV_URL="http://127.0.0.1:1/agent/activate" run_step down "$GOOD_KEY" azv_activate)
+rc=$(NEUROOTDEL_AZV_URL="http://127.0.0.1:1/agent/activate" run_step down "$GOOD_KEY" azv_activate)
 check "server down: non-zero exit" test "$rc" != 0
 check "server down: says not answering" grep -qF "не отвечает" "${TDIR}/down.err"
 
 # --- missing machine-id
-rc=$(EDGELAB_AZV_MACHINE_ID_FILE="${TDIR}/nope" run_step nomid "$GOOD_KEY" azv_activate)
+rc=$(NEUROOTDEL_AZV_MACHINE_ID_FILE="${TDIR}/nope" run_step nomid "$GOOD_KEY" azv_activate)
 check "no machine-id: non-zero exit" test "$rc" != 0
 
 # --- main(): without --solo the old order is untouched, with --solo the key comes first
-STEPS=(banner preflight install_apt_deps require_step_packages install_node ensure_edgelab_user
-       check_node_for_edgelab install_claude_cli install_bun collect_inputs install_jarvis
+STEPS=(banner preflight install_apt_deps require_step_packages install_node ensure_agent_user
+       check_node_for_agent install_claude_cli install_bun collect_inputs install_jarvis
        install_richard setup_global_claude install_skills install_superpowers install_sudoers
        install_memory_cron enable_services final_instructions azv_activate azv_install_payload)
 trace_main() {
@@ -191,7 +191,7 @@ trace_main() {
 }
 plain=$(trace_main | tr '\n' ' ')
 solo=$(trace_main --solo | tr '\n' ' ')
-expected_plain="banner preflight install_apt_deps require_step_packages install_node ensure_edgelab_user check_node_for_edgelab install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude install_skills install_superpowers install_sudoers install_memory_cron enable_services final_instructions "
+expected_plain="banner preflight install_apt_deps require_step_packages install_node ensure_agent_user check_node_for_agent install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude install_skills install_superpowers install_sudoers install_memory_cron enable_services final_instructions "
 check "no --solo: old step order unchanged" test "$plain" = "$expected_plain"
 check "no --solo: activation never runs" test "${plain/azv_/}" = "$plain"
 check "--solo: activation right after preflight" \

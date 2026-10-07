@@ -27,15 +27,15 @@ count_is() { [[ "$(grep -cF -- "$2" "$1")" -eq "$3" ]]; }
 FAKE_HOME="${TDIR}/home"
 mkdir -p "$FAKE_HOME"
 ME="$(id -un)"
-sed -e "s#^readonly EDGELAB_HOME=.*#readonly EDGELAB_HOME=\"${FAKE_HOME}\"#" \
-    -e "s#^readonly EDGELAB_USER=.*#readonly EDGELAB_USER=\"${ME}\"#" \
-    "${REPO}/install.sh" >"${TDIR}/install.sh"
+cp "${REPO}/install.sh" "${TDIR}/install.sh"
 
 export INSTALL_SH_SOURCED_FOR_TESTING=1
-export EDGELAB_TEMPLATES_DIR="${REPO}/templates"
+export NEUROOTDEL_TEMPLATES_DIR="${REPO}/templates"
 # shellcheck disable=SC1091
 source "${TDIR}/install.sh"
 set +e    # the checks below report failures themselves
+AGENT_HOME="$FAKE_HOME"
+AGENT_USER="$ME"
 fix_owner() { :; }
 
 OPERATOR_NAME="Tester"

@@ -32,7 +32,7 @@ MON=$(date -d "@${TARGET_EPOCH}" +%m)
 
 # One-shot: run at specific minute/hour/day/month, then remove its own cron line.
 NONCE=$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')
-# Token source and owner id: see tg-target.sh (channel.env from edgelab-install,
+# Token source and owner id: see tg-target.sh (channel.env from the installer,
 # then the old gateway path). The token is read by the cron line at run time.
 # shellcheck source=tg-target.sh
 source "$(dirname "${BASH_SOURCE[0]}")/tg-target.sh"
