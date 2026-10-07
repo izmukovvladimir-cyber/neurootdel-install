@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2317  # globals read by sourced fns, test overrides
 # Tests for the «Агент за вечер» activation step (--solo) of install.sh, no root needed.
 # A fake activation server (python3 http.server on 127.0.0.1) answers like the real one:
 # 200 + tar.gz for a good key, 403 + JSON message otherwise, plus hostile archives.
@@ -109,6 +110,7 @@ run_step() {
         # shellcheck disable=SC1091
         source "${REPO}/install.sh"
         fix_owner() { :; }   # chown needs root; ownership is not under test here
+        as_agent() { "$@"; }  # sudo -u needs root; the user switch is not under test here
         for fn in "$@"; do
             "$fn"
         done
@@ -131,6 +133,18 @@ check "good key: exit 0" test "$rc" = 0
 check "good key: stage has soul/CLAUDE.md" test -f "${TDIR}/good/stage/soul/CLAUDE.md"
 check "good key: agent dir has skills/task-01.md" test -f "${TDIR}/good/agent/azv/skills/task-01.md"
 check "good key: stage dir is 0700" test "$(stat -c %a "${TDIR}/good/stage")" = 700
+# payload is written as the agent user (mkdir + tar), never by root directly
+(
+    # shellcheck disable=SC1091
+    source "${REPO}/install.sh"
+    AZV_STAGE_DIR="${TDIR}/good/stage"
+    AZV_AGENT_DIR="${TDIR}/via/azv"
+    as_agent() { echo "AS_AGENT $1" >> "${TDIR}/via.log"; "$@"; }
+    azv_install_payload
+) >/dev/null 2>&1 || true
+check "payload: dir made as agent"   grep -qx "AS_AGENT mkdir" "${TDIR}/via.log"
+check "payload: files unpacked as agent" grep -qx "AS_AGENT tar" "${TDIR}/via.log"
+check "payload: files arrived"       test -f "${TDIR}/via/azv/soul/CLAUDE.md"
 check "request carries key and machine_hash" \
     grep -qF "{\"key\":\"${GOOD_KEY}\",\"machine_hash\":\"${expected}\"}" "$REQ_LOG"
 

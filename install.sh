@@ -404,9 +404,12 @@ azv_activate() {
 azv_install_payload() {
     step 9b "Раскладываю личные материалы агента"
     [[ -d "$AZV_STAGE_DIR" ]] || die "Нет материалов активации (${AZV_STAGE_DIR}). Запусти установщик с --solo снова."
-    install -d -m 0755 "$AZV_AGENT_DIR"
-    cp -a "${AZV_STAGE_DIR}/." "${AZV_AGENT_DIR}/"
-    fix_owner "$AZV_AGENT_DIR"
+    # Written as the agent user, never as root: the target is in the agent's own
+    # workspace, and a symlink planted there must not turn this into a root write.
+    as_agent mkdir -p -m 0755 "$AZV_AGENT_DIR" \
+        || die "Не удалось создать ${AZV_AGENT_DIR}. Напиши куратору."
+    tar -C "$AZV_STAGE_DIR" -cf - . | as_agent tar -xf - -C "$AZV_AGENT_DIR" --no-same-owner \
+        || die "Не удалось разложить материалы в ${AZV_AGENT_DIR}. Напиши куратору."
     ok "Материалы лежат в ${AZV_AGENT_DIR}"
 }
 
