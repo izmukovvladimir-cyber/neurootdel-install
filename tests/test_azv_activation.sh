@@ -64,6 +64,10 @@ class H(BaseHTTPRequestHandler):
         key = json.loads(body).get("key", "")
         if key == "AZV-GOOD-0000-0000-0001":
             self.reply(200, tgz([("soul/CLAUDE.md", "f", "# Душа\n"),
+                                 ("soul/rules.md", "f", "# Правила\n"),
+                                 ("soul/_README.md", "f", "служебное\n"),
+                                 ("skills/_README.md", "f", "служебное\n"),
+                                 ("skills/task-02/SKILL.md", "f", "---\nname: t2\n---\n"),
                                  ("skills/task-01.md", "f", "задача\n")]), "application/gzip")
         elif key == "AZV-EVIL-0000-0000-0003":
             self.reply(200, tgz([("../escaped.md", "f", "x")]), "application/gzip")
@@ -147,6 +151,52 @@ check "payload: files unpacked as agent" grep -qx "AS_AGENT tar" "${TDIR}/via.lo
 check "payload: files arrived"       test -f "${TDIR}/via/azv/soul/CLAUDE.md"
 check "request carries key and machine_hash" \
     grep -qF "{\"key\":\"${GOOD_KEY}\",\"machine_hash\":\"${expected}\"}" "$REQ_LOG"
+
+# --- payload wired into the session: skills symlinked, soul @-included in CLAUDE.md
+GA="${TDIR}/good/agent"
+check "wire: skill symlinked into workspace skills" \
+    test "$(readlink "${GA}/skills/task-02")" = "${GA}/azv/skills/task-02"
+check "wire: skill readable through the link" test -f "${GA}/skills/task-02/SKILL.md"
+check "wire: _README not linked" test ! -e "${GA}/skills/_README.md"
+check "wire: CLAUDE.md includes soul/CLAUDE.md" grep -qx "@azv/soul/CLAUDE.md" "${GA}/CLAUDE.md"
+check "wire: CLAUDE.md includes soul/rules.md" grep -qx "@azv/soul/rules.md" "${GA}/CLAUDE.md"
+check "wire: soul _README not included" bash -c "! grep -q '_README' '${GA}/CLAUDE.md'"
+
+# re-run on a workspace with its own CLAUDE.md, own skill and a foreign link
+W="${TDIR}/rewire"
+mkdir -p "${W}/skills/task-02" "${W}/skills/other-target"
+cp -r "${GA}/azv" "${W}/azv"
+printf '# Agent\n@core/USER.md\n' > "${W}/CLAUDE.md"
+echo own > "${W}/skills/task-02/SKILL.md"
+mkdir -p "${W}/azv/skills/task-03" && printf -- '---\nname: t3\n---\n' > "${W}/azv/skills/task-03/SKILL.md"
+ln -s "${W}/skills/other-target" "${W}/skills/task-03"
+printf '# Душа\n@rules.md\n' > "${W}/azv/soul/CLAUDE.md"
+wire() {
+    (
+        # shellcheck disable=SC1091
+        source "${REPO}/install.sh"
+        AZV_AGENT_DIR="${W}/azv"
+        as_agent() { "$@"; }
+        azv_wire_payload
+    ) > "${TDIR}/rewire.out" 2> "${TDIR}/rewire.err"
+}
+wire; wire
+check "rewire: exit 0 twice" test $? = 0
+check "rewire: own CLAUDE.md content kept" grep -qx "@core/USER.md" "${W}/CLAUDE.md"
+check "rewire: one azv block after two runs" test "$(grep -c 'azv:begin' "${W}/CLAUDE.md")" = 1
+check "rewire: soul include not duplicated" test "$(grep -c '^@azv/soul/CLAUDE.md$' "${W}/CLAUDE.md")" = 1
+check "rewire: rules.md not included twice (soul includes it)" bash -c "! grep -q 'soul/rules.md' '${W}/CLAUDE.md'"
+check "rewire: own skill dir untouched" test "$(cat "${W}/skills/task-02/SKILL.md")" = own
+check "rewire: own skill not replaced by link" test ! -L "${W}/skills/task-02"
+check "rewire: foreign link kept" test "$(readlink "${W}/skills/task-03")" = "${W}/skills/other-target"
+check "rewire: warns about skipped skills" test "$(grep -c 'оставляю как есть' "${TDIR}/rewire.err")" = 2
+check "rewire: no tmp file left" test ! -e "${W}/CLAUDE.md.azv-tmp"
+# payload update: an old azv link is repointed, a removed soul file leaves the block
+rm -f "${W}/skills/task-03"; ln -s "${W}/azv/skills/gone" "${W}/skills/task-03"
+printf '# Душа\n' > "${W}/azv/soul/CLAUDE.md"; rm -f "${W}/azv/soul/rules.md"
+wire
+check "update: stale azv link repointed" test "$(readlink "${W}/skills/task-03")" = "${W}/azv/skills/task-03"
+check "update: removed soul file dropped from block" bash -c "! grep -q 'soul/rules.md' '${W}/CLAUDE.md'"
 
 # --- refused key: server message shown, install stops
 before=$(requests)
