@@ -411,6 +411,71 @@ azv_install_payload() {
     tar -C "$AZV_STAGE_DIR" -cf - . | as_agent tar -xf - -C "$AZV_AGENT_DIR" --no-same-owner \
         || die "Не удалось разложить материалы в ${AZV_AGENT_DIR}. Напиши куратору."
     ok "Материалы лежат в ${AZV_AGENT_DIR}"
+    azv_wire_payload
+}
+
+# azv_wire_payload -- makes the session actually use the payload: each
+# azv/skills/<name>/ is symlinked into the workspace skills dir (the one the
+# plugin's .claude/skills points at), and azv/soul/*.md are @-included from the
+# workspace CLAUDE.md inside a marker block that is rewritten on every run.
+azv_wire_payload() {
+    local ws skills_dir claude_md rel src name link cur
+    ws=$(dirname "$AZV_AGENT_DIR")
+    skills_dir="${ws}/skills"
+    claude_md="${ws}/CLAUDE.md"
+    rel=$(basename "$AZV_AGENT_DIR")
+
+    as_agent mkdir -p "$skills_dir" || die "Не удалось создать ${skills_dir}. Напиши куратору."
+    for src in "${AZV_AGENT_DIR}"/skills/*/; do
+        [[ -f "${src}SKILL.md" ]] || continue
+        src=${src%/}
+        name=$(basename "$src")
+        [[ "$name" == _* ]] && continue
+        link="${skills_dir}/${name}"
+        if [[ -L "$link" ]]; then
+            cur=$(readlink "$link")
+            if [[ "$cur" != "${AZV_AGENT_DIR}/skills/"* ]]; then
+                warn "Навык ${name}: ${link} уже ссылается на ${cur}, оставляю как есть."
+                continue
+            fi
+        elif [[ -e "$link" ]]; then
+            warn "Навык ${name}: в ${skills_dir} уже есть свой ${name}, оставляю как есть."
+            continue
+        fi
+        as_agent ln -sfnT "$src" "$link" || die "Не удалось подключить навык ${name}. Напиши куратору."
+    done
+
+    local block f
+    block="<!-- azv:begin (written by neurootdel-install --solo, rewritten on re-run) -->"$'\n'
+    if [[ -f "${AZV_AGENT_DIR}/soul/CLAUDE.md" ]]; then
+        block+="@${rel}/soul/CLAUDE.md"$'\n'
+    fi
+    for f in "${AZV_AGENT_DIR}"/soul/*.md; do
+        [[ -f "$f" ]] || continue
+        name=$(basename "$f")
+        [[ "$name" == CLAUDE.md || "$name" == _* ]] && continue
+        # Already pulled in by soul/CLAUDE.md itself -- do not load it twice.
+        if [[ -f "${AZV_AGENT_DIR}/soul/CLAUDE.md" ]] \
+                && grep -qE "^@(\./)?${name//./\\.}[[:space:]]*$" "${AZV_AGENT_DIR}/soul/CLAUDE.md"; then
+            continue
+        fi
+        block+="@${rel}/soul/${name}"$'\n'
+    done
+    block+="<!-- azv:end -->"
+
+    # Read and write as the agent user: CLAUDE.md lives in the agent's workspace.
+    local current=""
+    if as_agent test -f "$claude_md"; then
+        current=$(as_agent cat "$claude_md") || die "Не удалось прочитать ${claude_md}. Напиши куратору."
+    fi
+    AZV_BLOCK="$block" python3 -c '
+import os, re, sys
+text, block = sys.stdin.read(), os.environ["AZV_BLOCK"]
+text = re.sub(r"\n*<!-- azv:begin[^\n]*-->.*?<!-- azv:end -->\n?", "\n", text, flags=re.S).rstrip("\n")
+sys.stdout.write((text + "\n\n" if text else "") + block + "\n")
+' <<<"$current" | as_agent sh -c 'cat > "$1.azv-tmp" && mv -f "$1.azv-tmp" "$1"' _ "$claude_md" \
+        || die "Не удалось записать ${claude_md}. Напиши куратору."
+    ok "Личные навыки подключены в ${skills_dir}, душа агента подключена в ${claude_md}"
 }
 
 # ---------------------------------------------------------------------------
@@ -794,11 +859,11 @@ check_node_for_agent() {
 }
 
 # =============================================================================
-# STEP 3: CLAUDE CODE CLI
+# STEP 4: CLAUDE CODE CLI
 # =============================================================================
 
 install_claude_cli() {
-    step 3 "Installing Claude Code CLI (per-user for ${AGENT_USER})"
+    step 4 "Installing Claude Code CLI (per-user for ${AGENT_USER})"
 
     local claude_bin="${AGENT_HOME}/.local/bin/claude"
 
@@ -865,11 +930,11 @@ _ensure_path_export() {
 }
 
 # =============================================================================
-# STEP 3b: BUN (runtime of the Telegram channel plugin)
+# STEP 4b: BUN (runtime of the Telegram channel plugin)
 # =============================================================================
 
 install_bun() {
-    step 3b "Installing Bun (per-user for ${AGENT_USER})"
+    step 4b "Installing Bun (per-user for ${AGENT_USER})"
 
     local bun_bin="${AGENT_HOME}/.bun/bin/bun"
     if [[ -x "$bun_bin" ]]; then
@@ -899,11 +964,11 @@ install_bun() {
 }
 
 # =============================================================================
-# STEP 4: AGENT USER
+# STEP 3: AGENT USER
 # =============================================================================
 
 ensure_agent_user() {
-    step 4 "Ensuring '${AGENT_USER}' system user"
+    step 3 "Ensuring '${AGENT_USER}' system user"
     if [[ "$INSTALL_NAMES" == "legacy" ]]; then
         log "Existing ${AGENT_USER} install found: keeping user ${AGENT_USER} and its paths (${JARVIS_ENV_DIR})."
     fi
@@ -2134,10 +2199,8 @@ rollback_to_gateway() {
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
-    local tokens_filled="no"
-    if [[ -n "$JARVIS_BOT_TOKEN" && -n "$RICHARD_BOT_TOKEN" && -n "$TG_USER_ID" ]]; then
-        tokens_filled="yes"
-    fi
+    local tokens_filled
+    tokens_filled="Jarvis token: $([[ -n "$JARVIS_BOT_TOKEN" ]] && echo yes || echo no), Richard token: $([[ -n "$RICHARD_BOT_TOKEN" ]] && echo yes || echo no), your user ID: $([[ -n "$TG_USER_ID" ]] && echo yes || echo no)"
 
     cat <<EOF
 
