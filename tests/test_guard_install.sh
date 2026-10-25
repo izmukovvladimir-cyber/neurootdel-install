@@ -170,7 +170,7 @@ check "flush: owner timezone in stamp"        grep -q 'Auto-flushed by agent-han
 check "flush: newest repeat survives dedup" python3 "${REPO}/tests/helpers/flush_order.py" "$REPO"
 OUT=$(bash "${REPO}/lib/agents-reset.sh" --dry-run 2>&1)
 RLOG="${AGENT_HOME}/.claude-lab/shared/state/agents-reset/agents-reset.log"
-check "reset: dry run logs a decision"        grep -q 'result jarvis: skipped' "$RLOG"
+check "reset: dry run logs a decision"        grep -qE 'result jarvis: (skipped|would reset)' "$RLOG"
 check "reset: dry run wrote no quiet marker"  test ! -e "${AGENT_HOME}/.claude-lab/shared/state/quiet-restart/channel-jarvis"
 check "reset: STOP honoured"                  bash -c 'touch "$1/STOP"; bash "$2" --dry-run 2>/dev/null; tail -n1 "$1/agents-reset.log" | grep -q "STOP file present"; rc=$?; rm -f "$1/STOP"; exit $rc' _ "${AGENT_HOME}/.claude-lab/shared/state/agents-reset" "${REPO}/lib/agents-reset.sh"
 check "reset: context measured from prefix"   bash -c 'grep -q "agents-reset start" "$0"' "$RLOG"

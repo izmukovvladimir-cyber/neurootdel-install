@@ -1090,8 +1090,11 @@ BRIEF
 # Plugin config.json defaults (TELEGRAM_STATE_DIR/config.json), one entry per
 # "section key json-value". A key is added only when it is missing: an owner
 # value is never changed, a section that is not an object is left alone.
+# webhook on: the agents guard nudges through it and the fallback-reply Stop hook posts to it
+# (127.0.0.1 only, bearer TELEGRAM_WEBHOOK_TOKEN from channel.env).
 readonly CHANNEL_CONFIG_DEFAULTS=(
     "hud enabled false"
+    "webhook enabled true"
 )
 
 # _channel_config_merge <cfg> -- prints the merged JSON. rc 0 = changed,
@@ -1305,6 +1308,8 @@ import re
 import sys
 from pathlib import Path
 
+import secrets
+
 existing_path, user_ids_new, groq_file, state_dir, ws_root = sys.argv[1:6]
 
 existing: dict[str, str] = {}
@@ -1347,6 +1352,8 @@ managed = {
     "TELEGRAM_STATE_DIR": existing.get("TELEGRAM_STATE_DIR") or state_dir,
     "TELEGRAM_WEBHOOK_HOST": existing.get("TELEGRAM_WEBHOOK_HOST") or "127.0.0.1",
     "TELEGRAM_WEBHOOK_PORT": existing.get("TELEGRAM_WEBHOOK_PORT") or "8089",
+    # Bearer of the local webhook (guard nudges, fallback replies); generated once, then kept.
+    "TELEGRAM_WEBHOOK_TOKEN": existing.get("TELEGRAM_WEBHOOK_TOKEN") or secrets.token_hex(24),
 }
 # "Allow this command?" prompts: pinned to the owner (the first id), so team
 # members added to TELEGRAM_ALLOWED_USER_IDS later by hand never get them.
@@ -2312,17 +2319,108 @@ _install_cron_file() {
     install -m 0644 -o root -g root "$tmp" "/etc/cron.d/${name}"
 }
 
+# add_hook <settings.json> <event> <matcher|""> <command> <timeout> [own-marker]
+# Adds one command hook unless an entry with the same matcher already runs the same
+# command (owner hooks are kept). own-regex matches OUR earlier command of that event
+# as a whole (anchored); such a command is replaced, so a changed port leaves one hook.
+# An owner command that merely calls the same script never matches the full pattern.
+add_hook() {
+    local file=$1 ev=$2 matcher=$3 cmd=$4 to=$5 own=${6:-}
+    merge_json_file "$file" '
+        .hooks = (.hooks // {})
+        | .hooks[$ev] = ((.hooks[$ev] // [])
+            | (if $own == "" then .
+               else map(if (.hooks | type) == "array"
+                        then .hooks |= map(select(((.command? // "") | test($own) and . != $cmd) | not))
+                        else . end)
+                    | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
+               end)
+            | if any(.[]?; ((.matcher // "") == $m) and any((.hooks // [])[]?; .command? == $cmd)) then .
+              else . + [((if $m == "" then {} else {matcher: $m} end)
+                         + {hooks: [{type: "command", command: $cmd, timeout: ($to | tonumber)}]})]
+              end)' \
+        --arg ev "$ev" --arg m "$matcher" --arg cmd "$cmd" --arg to "$to" --arg own "$own"
+}
+
+# _re_escape <text> -- the text as a literal inside a jq (Oniguruma) regex.
+_re_escape() {
+    printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'
+}
+
+# setup_agent_hooks -- every hook goes into a settings.json the session REALLY reads:
+#   user  ~/.claude/settings.json (every session of the agent user, Richard's too: his
+#         cwd is the home dir): compact reminder, dangerous-command and protected-file stops;
+#   main agent: <plugin>/plugin/.claude/settings.json (claude runs with cwd plugin/):
+#         correction capture, auto-recall, critical thinking, fact-check gate, fallback reply,
+#         lessons at start, pre-compaction flush.
+# A file under <workspace>/.claude/settings.json would never load: claude does not run there.
+setup_agent_hooks() {
+    step 12 "Switching the agent hooks on (user + plugin settings.json)"
+
+    local lib="$GUARD_LIB_DIR" hooks="${GUARD_LIB_DIR}/hooks"
+    local user_settings="${AGENT_HOME}/.claude/settings.json"
+    local ws="${AGENT_HOME}/.claude-lab/jarvis/.claude"
+    local plugin_dir="${ws}/dashi-plugin-claude-code/plugin"
+    local plugin_settings="${plugin_dir}/.claude/settings.json"
+    local fact_state="${AGENT_HOME}/.claude-lab/shared/state/jarvis/factcheck"
+    local fail=0
+
+    add_hook "$user_settings" SessionStart compact "python3 ${lib}/compact-open-items-reminder.py" 20 || fail=1
+    add_hook "$user_settings" SessionStart startup "python3 ${lib}/compact-open-items-reminder.py" 20 || fail=1
+    add_hook "$user_settings" PreToolUse Bash "python3 ${hooks}/block-dangerous.py" 10 || fail=1
+    add_hook "$user_settings" PreToolUse 'Edit|Write|MultiEdit' "bash ${hooks}/protect-files.sh" 10 || fail=1
+    merge_json_file "$user_settings" '.env = (.env // {}) | (if .env | has("CLAUDE_CODE_AUTO_COMPACT_WINDOW") then . else .env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "400000" end)' || fail=1
+
+    if [[ -d "$plugin_dir" ]]; then
+        as_agent mkdir -p "${plugin_dir}/.claude" "$fact_state" || fail=1
+        local port
+        port=$(sed -n 's/^TELEGRAM_WEBHOOK_PORT=\([0-9]*\)$/\1/p' "${JARVIS_ENV_DIR}/channel.env" 2>/dev/null | tail -n 1)
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/correction-detector.py ${ws}" 10 || fail=1
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/auto-recall.py jarvis" 10 || fail=1
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/critical-check.py" 5 || fail=1
+        add_hook "$plugin_settings" PreToolUse mcp__dashi-channel__reply "python3 ${hooks}/fact-check-gate.py ${fact_state}" 10 || fail=1
+        add_hook "$plugin_settings" Stop "" "TELEGRAM_FALLBACK_REPLY_URL='http://127.0.0.1:${port:-8089}/hooks/fallback-reply' ${AGENT_HOME}/.bun/bin/bun '${plugin_dir}/scripts/fallback-reply-hook.ts'" 30 \
+            "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
+        add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1
+        add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh jarvis" 40 || fail=1
+    else
+        warn "Plugin dir ${plugin_dir} missing -- main agent hooks NOT set."
+        fail=1
+    fi
+
+    if [[ "$fail" -ne 0 ]]; then
+        err "Some hooks were NOT switched on -- see the warnings above."
+        return 1
+    fi
+    ok "Hooks on: ${user_settings} (all sessions), ${plugin_settings} (main agent)."
+}
+
+# install_agents_guard_cron -- the root watchdog, once a minute (stall, login, limit,
+# owner unanswered, restart queue). Alerts follow ALERT_MODE in guard.conf.
+install_agents_guard_cron() {
+    install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-guard"
+    _install_cron_file "${AGENT_USER}-agents-guard" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: agents guard (stall/login/limit/owner unanswered/restart queue).
+# Stop: touch /var/lib/${AGENT_USER}-guard/STOP ; alerts: python3 ${GUARD_LIB_DIR}/agents-guard.py --drain
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * root /usr/bin/python3 ${GUARD_LIB_DIR}/agents-guard.py >/dev/null 2>>/var/log/${AGENT_USER}-guard.err
+CRON
+)"
+}
+
 install_guard() {
-    step 12 "Installing agent guard: session reset, memory backup (cron ON)"
+    step 12 "Installing agent guard: session reset, memory backup, watchdog (cron ON)"
 
     local src="${INSTALLER_ROOT}/lib"
     [[ -d "$src" ]] || die "lib/ directory missing at ${INSTALLER_ROOT} -- guard scripts cannot be installed."
 
     install -d -m 0755 -o root -g root "$GUARD_LIB_DIR"
+    install -d -m 0755 -o root -g root "${GUARD_LIB_DIR}/hooks"
     local f
-    for f in "$src"/*.py "$src"/*.sh; do
+    for f in "$src"/*.py "$src"/*.sh "$src"/hooks/*.py "$src"/hooks/*.sh; do
         [[ -f "$f" ]] || continue
-        install -m 0755 -o root -g root "$f" "${GUARD_LIB_DIR}/$(basename "$f")"
+        install -m 0755 -o root -g root "$f" "${GUARD_LIB_DIR}/${f#"$src"/}"
     done
 
     local conf="${GUARD_LIB_DIR}/guard.conf" conf_tmp
@@ -2366,7 +2464,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 CRON
 )"
 
-    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup}"
+    install_agents_guard_cron
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard}"
 }
 
 # =============================================================================
@@ -2601,6 +2700,7 @@ main() {
     install_sudoers
     install_memory_cron
     install_guard
+    setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
     enable_services
     final_instructions
 }

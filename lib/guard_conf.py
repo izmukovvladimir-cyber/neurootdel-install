@@ -22,11 +22,14 @@ def conf_path() -> Path:
 
 def read_raw(path: Path | None = None) -> dict[str, str]:
     out: dict[str, str] = {}
-    with (path or conf_path()).open(encoding="utf-8") as fh:
-        for line in fh:
-            m = _LINE.match(line.rstrip("\n"))
-            if m:
-                out[m.group(1)] = m.group(2)
+    try:
+        with (path or conf_path()).open(encoding="utf-8") as fh:
+            for line in fh:
+                m = _LINE.match(line.rstrip("\n"))
+                if m:
+                    out[m.group(1)] = m.group(2)
+    except (OSError, UnicodeDecodeError):
+        return {}   # no conf: defaults below; owner-bound hooks then stay silent
     return out
 
 
