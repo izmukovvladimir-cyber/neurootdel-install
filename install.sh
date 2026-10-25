@@ -2143,10 +2143,9 @@ install_sudoers() {
 # STEP 12: MEMORY ROTATION SCRIPTS + CRON
 # =============================================================================
 
-# Install the 5 memory-rotation scripts into the jarvis workspace and register
-# them with the agent user's crontab. Matches the Day 2 self-diagnostic contract: a
-# healthy agent has rotate-warm / trim-hot / compress-warm / ov-session-sync /
-# memory-rotate on cron.
+# Install the 4 memory-rotation scripts into the jarvis workspace and register
+# them with the agent user's crontab: rotate-warm / trim-hot / compress-warm /
+# memory-rotate. (ov-session-sync is not scheduled: it idles without OpenViking.)
 install_memory_cron() {
     step 12 "Installing memory-rotation scripts + cron"
 
@@ -2166,11 +2165,11 @@ install_memory_cron() {
 
     local name
     local installed=()
-    local required=(trim-hot rotate-warm compress-warm ov-session-sync memory-rotate)
+    local required=(trim-hot rotate-warm compress-warm memory-rotate)
     for name in "${required[@]}"; do
         local src="${scripts_src}/${name}.sh"
         if [[ ! -f "$src" ]]; then
-            # Day-2 self-diagnostic requires all 5 jobs on cron. A partial
+            # Every job of the block must be on cron. A partial
             # install would leave dead cron entries pointing at missing files
             # -- fail loud so the student doesn't ship a half-wired workspace.
             err "Memory script '${name}.sh' missing at ${src} -- refusing partial install."
@@ -2190,7 +2189,7 @@ install_memory_cron() {
     local marker="# ${INSTALL_TAG} v${INSTALLER_VERSION}: memory rotation"
     local cron_block
     # CRON_TZ pins the schedule to UTC so the Day-2 diagnostic contract
-    # (04:30/05:00/06:00/06:30/21:00 UTC) fires at the same wall-clock moment
+    # (04:30/05:00/06:00/21:00 UTC) fires at the same wall-clock moment
     # regardless of the host's system timezone. HOME= is set because scripts
     # rely on $HOME under `set -u`; on some minimal images cron does not
     # always export HOME to the user's actual home directory.
@@ -2201,7 +2200,6 @@ HOME=${AGENT_HOME}
 30 4 * * * ${scripts_dst}/rotate-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 5 * * *  ${scripts_dst}/trim-hot.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 6 * * *  ${scripts_dst}/compress-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
-30 6 * * * ${scripts_dst}/ov-session-sync.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 21 * * * ${scripts_dst}/memory-rotate.sh >> ${logs_dst}/memory-cron.log 2>&1
 # ${INSTALL_TAG} memory rotation end
 CRON
@@ -2349,7 +2347,8 @@ _re_escape() {
 
 # setup_agent_hooks -- every hook goes into a settings.json the session REALLY reads:
 #   user  ~/.claude/settings.json (every session of the agent user, Richard's too: his
-#         cwd is the home dir): compact reminder, dangerous-command and protected-file stops;
+#         cwd is the home dir): compact reminder, dangerous-command and protected-file stops,
+#         command log, review reminder;
 #   main agent: <plugin>/plugin/.claude/settings.json (claude runs with cwd plugin/):
 #         correction capture, auto-recall, critical thinking, fact-check gate, fallback reply,
 #         lessons at start, pre-compaction flush.
@@ -2369,6 +2368,8 @@ setup_agent_hooks() {
     add_hook "$user_settings" SessionStart startup "python3 ${lib}/compact-open-items-reminder.py" 20 || fail=1
     add_hook "$user_settings" PreToolUse Bash "python3 ${hooks}/block-dangerous.py" 10 || fail=1
     add_hook "$user_settings" PreToolUse 'Edit|Write|MultiEdit' "bash ${hooks}/protect-files.sh" 10 || fail=1
+    add_hook "$user_settings" PreToolUse Bash "bash ${hooks}/log-commands.sh" 5 || fail=1
+    add_hook "$user_settings" PostToolUse 'Edit|Write|MultiEdit' "bash ${hooks}/review-reminder.sh" 5 || fail=1
     merge_json_file "$user_settings" '.env = (.env // {}) | (if .env | has("CLAUDE_CODE_AUTO_COMPACT_WINDOW") then . else .env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "400000" end)' || fail=1
 
     if [[ -d "$plugin_dir" ]]; then
@@ -2405,6 +2406,30 @@ install_agents_guard_cron() {
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 * * * * * root /usr/bin/python3 ${GUARD_LIB_DIR}/agents-guard.py >/dev/null 2>>/var/log/${AGENT_USER}-guard.err
+CRON
+)"
+}
+
+# install_service_watch_cron <shared_state> -- the small watchdogs, all on from the start.
+# Alerts of the root ones go through outbox-put.py (ALERT_MODE in guard.conf).
+install_service_watch_cron() {
+    local st=$1 u="$AGENT_USER" lib="$GUARD_LIB_DIR"
+    as_agent mkdir -p "${st}/disk-clean" "${st}/claude-usage" "${st}/command-log" "${st}/review-reminder" \
+        || die "Could not create watchdog state dirs as ${u}."
+    _install_cron_file "${u}-service-watch" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: service watchdogs. Remove this file to uninstall all five.
+# Stops: resource   touch /var/lib/${u}-resource/STOP
+#        disk-clean touch ${st}/disk-clean/STOP
+#        manifest   touch /var/lib/${u}-cron-manifest/STOP
+#        autosync   touch /var/lib/${u}-autosync/STOP
+#        usage      touch ${st}/claude-usage/STOP   (report: python3 ${lib}/claude-usage-digest.py)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root /usr/bin/flock -n /run/${u}-resource.lock /bin/bash ${lib}/resource-watchdog.sh >/dev/null 2>>/var/log/${u}-resource.err
+*/10 * * * * ${u} /bin/bash ${lib}/disk-clean-old.sh >/dev/null 2>>${st}/disk-clean/cron.err
+23 * * * * root /bin/bash ${lib}/cron-manifest-watchdog.sh >/dev/null 2>>/var/log/${u}-cron-manifest.err
+*/30 * * * * root /usr/bin/flock -n /run/${u}-autosync.lock /bin/bash ${lib}/agents-git-autosync.sh >/dev/null 2>>/var/log/${u}-autosync.err
+17 * * * * ${u} [ -e ${st}/claude-usage/STOP ] || /usr/bin/timeout 900 /usr/bin/python3 ${lib}/claude-usage-collector.py >/dev/null 2>&1
 CRON
 )"
 }
@@ -2465,7 +2490,8 @@ CRON
 )"
 
     install_agents_guard_cron
-    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard}"
+    install_service_watch_cron "$shared_state"
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch}"
 }
 
 # _AGENT_FILE_PY -- runs AS THE AGENT USER (never root) on a path inside the agent's home,
