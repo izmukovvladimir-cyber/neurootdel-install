@@ -22,6 +22,7 @@ check() {
 jqtrue() { jq -e "$2" "$1" >/dev/null 2>&1; }
 
 export INSTALL_SH_SOURCED_FOR_TESTING=1
+export PYTHONDONTWRITEBYTECODE=1
 export NEUROOTDEL_TEMPLATES_DIR="${REPO}/templates"
 # shellcheck disable=SC1091
 source "${REPO}/install.sh"
@@ -119,6 +120,69 @@ check "sp: broken settings -> nonzero"        test "$sp_rc" -ne 0
 check "sp: broken settings left as is"        test "$(cat "$SET")" = 'not json'
 check "sp: broken settings -> CLI not called" test ! -s "${TDIR}/cli-calls"
 check "sp: no manifest -> refuses"            bash -c '! (source "$0" >/dev/null 2>&1; enable_superpowers /nonexistent)' "${REPO}/install.sh"
+
+# --- guard.conf ------------------------------------------------------------------
+INSTALL_TAG=neurootdel-install
+AGENT_USER=neurootdel
+GUARD_LIB_DIR="${REPO}/lib"
+CONFIG_ROOT="${TDIR}/etc"
+OPERATOR_NAME='Анна "Q" $x`y`'
+TG_USER_ID=555
+OPERATOR_TIMEZONE=Asia/Dubai
+GC="${TDIR}/guard.conf"
+render_guard_conf "" >"$GC"
+check "conf: owner name sanitized"            grep -qx 'OWNER_NAME="Анна Q xy"' "$GC"
+check "conf: default alert mode outbox"       grep -qx 'ALERT_MODE="outbox"' "$GC"
+check "conf: owner id"                        grep -qx 'OWNER_TG_ID="555"' "$GC"
+check "conf: bash can source it"              bash -c '. "$0" && [[ "$AGENT_HOME" == "$1" ]]' "$GC" "$AGENT_HOME"
+check "conf: python reads it"                 env NEUROOTDEL_GUARD_CONF="$GC" python3 -c "import sys; sys.path.insert(0, '${REPO}/lib'); import guard_conf as g; c = g.load(); assert c.owner_tg_id == '555' and c.channel_agents == ['jarvis'] and c.label('jarvis') == 'Jarvis', c"
+sed -i 's/^CHANNEL_AGENTS=.*/CHANNEL_AGENTS="jarvis coder"/; s/^ALERT_MODE=.*/ALERT_MODE="log"/' "$GC"
+render_guard_conf "$GC" >"${GC}.2"
+check "conf: re-run keeps agents list"        grep -qx 'CHANNEL_AGENTS="jarvis coder"' "${GC}.2"
+check "conf: re-run keeps alert mode"         grep -qx 'ALERT_MODE="log"' "${GC}.2"
+NEUROOTDEL_GUARD_ALERTS=telegram render_guard_conf "$GC" >"${GC}.3"
+check "conf: env alert mode wins"             grep -qx 'ALERT_MODE="telegram"' "${GC}.3"
+NEUROOTDEL_GUARD_ALERTS=bogus render_guard_conf "" >"${GC}.4"
+check "conf: bad alert mode -> outbox"        grep -qx 'ALERT_MODE="outbox"' "${GC}.4"
+render_guard_conf "" >"$GC"
+
+# --- lib scripts against a fake home -------------------------------------------
+export NEUROOTDEL_GUARD_CONF="$GC"
+WS="${AGENT_HOME}/.claude-lab/jarvis/.claude"
+mkdir -p "${WS}/core/hot" "${AGENT_HOME}/.claude-lab/shared/state"
+echo '# rules' >"${WS}/core/rules.md"
+printf '# handoff\n\n- open: something\n' >"${WS}/core/hot/handoff.md"
+PREFIX=$(printf '%s' "$WS" | sed 's/[^A-Za-z0-9]/-/g')
+PROJ="${AGENT_HOME}/.claude/projects/${PREFIX}-dashi-plugin-claude-code-plugin"
+mkdir -p "$PROJ"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+OLD=$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%S.000Z)
+cat >"${PROJ}/s1.jsonl" <<JL
+{"type":"assistant","timestamp":"${OLD}","message":{"usage":{"cache_read_input_tokens":300000},"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"${AGENT_HOME}/x.txt"}}]}}
+JL
+OUT=$(python3 "${REPO}/lib/agent-handoff-flush.py" --dry-run jarvis)
+check "flush: dry run sees the agent"         grep -q '^DRY jarvis: would write 1 entries' <<<"$OUT"
+OUT=$(python3 "${REPO}/lib/agent-handoff-flush.py" jarvis)
+check "flush: writes handoff"                 grep -q '^OK jarvis' <<<"$OUT"
+check "flush: hand-written part kept"         grep -q -- '- open: something' "${WS}/core/hot/handoff.md"
+check "flush: action listed, home-relative"   grep -q 'Edit x.txt' "${WS}/core/hot/handoff.md"
+check "flush: owner timezone in stamp"        grep -q 'Auto-flushed by agent-handoff-flush.py at .* +04' "${WS}/core/hot/handoff.md"
+check "flush: newest repeat survives dedup" python3 "${REPO}/tests/helpers/flush_order.py" "$REPO"
+OUT=$(bash "${REPO}/lib/agents-reset.sh" --dry-run 2>&1)
+RLOG="${AGENT_HOME}/.claude-lab/shared/state/agents-reset/agents-reset.log"
+check "reset: dry run logs a decision"        grep -q 'result jarvis: skipped' "$RLOG"
+check "reset: dry run wrote no quiet marker"  test ! -e "${AGENT_HOME}/.claude-lab/shared/state/quiet-restart/channel-jarvis"
+check "reset: STOP honoured"                  bash -c 'touch "$1/STOP"; bash "$2" --dry-run 2>/dev/null; tail -n1 "$1/agents-reset.log" | grep -q "STOP file present"; rc=$?; rm -f "$1/STOP"; exit $rc' _ "${AGENT_HOME}/.claude-lab/shared/state/agents-reset" "${REPO}/lib/agents-reset.sh"
+check "reset: context measured from prefix"   bash -c 'grep -q "agents-reset start" "$0"' "$RLOG"
+OUT=$(bash "${REPO}/lib/memory-backup.sh" 2>&1)
+check "backup: archive written"               grep -q '^.* OK .*memory-.*\.tar\.gz' <<<"$OUT"
+ARCH=$(ls "${AGENT_HOME}/backups/memory/"memory-*.tar.gz 2>/dev/null | head -n1)
+check "backup: rules.md inside"               bash -c 'tar -tzf "$0" | grep -qx ".claude-lab/jarvis/.claude/core/rules.md"' "$ARCH"
+check "backup: dir is private"                test "$(stat -c %a "${AGENT_HOME}/backups/memory")" = 700
+check "reset: --auto runs only on the owner's clock" bash "${REPO}/tests/helpers/auto_window.sh" "$RLOG" "${REPO}/lib/agents-reset.sh"
+OUT=$(python3 "${REPO}/lib/include_weight.py" "${AGENT_HOME}/.claude-lab" 2>&1)
+check "weight: measures the lab"              test -n "$OUT"
+unset NEUROOTDEL_GUARD_CONF
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

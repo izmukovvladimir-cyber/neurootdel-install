@@ -133,6 +133,8 @@ apply_install_names() {
     JARVIS_ENV_DIR="${CONFIG_ROOT}/jarvis"
     CHANNEL_CONFIRM_BIN="/usr/local/lib/${AGENT_USER}/channel-confirm.sh"
     CHANNEL_START_BIN="/usr/local/lib/${AGENT_USER}/channel-start.sh"
+    # Guard scripts (agents-reset, memory-backup, watchdog, hooks) + guard.conf.
+    GUARD_LIB_DIR="/usr/local/lib/${AGENT_USER}"
     # Root-owned apt wrapper: the only apt path in sudoers (plain `apt-get *` = root).
     APT_WRAPPER_BIN="/usr/local/sbin/${AGENT_USER}-apt-install"
     SUDOERS_FILE="/etc/sudoers.d/${AGENT_USER}-agents"
@@ -2239,6 +2241,135 @@ PY
 }
 
 # =============================================================================
+# STEP 12b: AGENT GUARD (session reset, memory backup, watchdog, hooks) -- ON
+# =============================================================================
+
+# Scripts from lib/ go to GUARD_LIB_DIR (root-owned: the watchdog runs as root and
+# must never execute a file the agent can edit). guard.conf next to them carries
+# the install names; it holds no secrets.
+
+# _guard_conf_value <value> -- drops what guard.conf cannot hold (quotes, \, $, `, newlines).
+_guard_conf_value() {
+    printf '%s' "$1" | tr -d '"\\$`\n\r'
+}
+
+# _guard_conf_get <file> <KEY> -- a value from an existing guard.conf, empty if none.
+_guard_conf_get() {
+    [[ -f "$1" ]] || return 0
+    sed -n "s/^${2}=\"\\([^\"]*\\)\"\$/\\1/p" "$1" | tail -n 1
+}
+
+# render_guard_conf [existing] -- prints guard.conf. Answers from this run win; the
+# owner's own choices in an existing file (agents list, labels, alert route) are kept
+# when this run gave none.
+render_guard_conf() {
+    local existing="${1:-}"
+    local agents labels mode chat
+    agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
+    labels=$(_guard_conf_get "$existing" AGENT_LABELS)
+    mode="$(env_value GUARD_ALERTS)"
+    [[ -n "$mode" ]] || mode=$(_guard_conf_get "$existing" ALERT_MODE)
+    case "${mode:-outbox}" in
+        outbox|telegram|log) mode="${mode:-outbox}" ;;
+        *) warn "NEUROOTDEL_GUARD_ALERTS='${mode}' is not outbox|telegram|log -- using outbox."; mode=outbox ;;
+    esac
+    chat="$(env_value GUARD_ALERT_CHAT_ID)"
+    [[ -n "$chat" ]] || chat=$(_guard_conf_get "$existing" ALERT_TG_CHAT_ID)
+    [[ -z "$chat" || "$chat" =~ ^-?[0-9]+$ ]] || { warn "Alert chat id '${chat}' is not a number -- ignored."; chat=""; }
+    cat <<EOF
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: settings of the agent guard scripts. No secrets here.
+# A re-run of the installer rewrites this file and keeps CHANNEL_AGENTS, AGENT_LABELS,
+# ALERT_MODE and ALERT_TG_CHAT_ID unless new values are given.
+# ALERT_MODE: outbox   = alerts are JSON files in /var/lib/${AGENT_USER}-guard/outbox
+#                        (read them: python3 ${GUARD_LIB_DIR}/agents-guard.py --drain),
+#                        plus the log /var/log/${AGENT_USER}-guard.log;
+#             telegram = the same, and each alert is also sent by the Richard bot
+#                        (token from RICHARD_ENV) to ALERT_TG_CHAT_ID (default: owner);
+#             log      = only the log.
+AGENT_USER="$(_guard_conf_value "$AGENT_USER")"
+AGENT_HOME="$(_guard_conf_value "$AGENT_HOME")"
+LIB_DIR="$(_guard_conf_value "$GUARD_LIB_DIR")"
+CONFIG_ROOT="$(_guard_conf_value "$CONFIG_ROOT")"
+CHANNEL_AGENTS="$(_guard_conf_value "${agents:-jarvis}")"
+MAIN_AGENT="jarvis"
+AGENT_LABELS="$(_guard_conf_value "${labels:-jarvis=Jarvis}")"
+OWNER_NAME="$(_guard_conf_value "$OPERATOR_NAME")"
+OWNER_TG_ID="$(_guard_conf_value "$TG_USER_ID")"
+OWNER_TIMEZONE="$(_guard_conf_value "${OPERATOR_TIMEZONE:-Europe/Moscow}")"
+RICHARD_UNIT="claude-richard"
+RICHARD_ENV="$(_guard_conf_value "${RICHARD_HOME}/.env")"
+ALERT_MODE="${mode}"
+ALERT_TG_CHAT_ID="$(_guard_conf_value "$chat")"
+EOF
+}
+
+# _install_cron_file <name> <body> -- /etc/cron.d/<name>, root 0644, written atomically.
+_install_cron_file() {
+    local name=$1 body=$2 tmp
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    printf '%s\n' "$body" > "$tmp"
+    install -m 0644 -o root -g root "$tmp" "/etc/cron.d/${name}"
+}
+
+install_guard() {
+    step 12 "Installing agent guard: session reset, memory backup (cron ON)"
+
+    local src="${INSTALLER_ROOT}/lib"
+    [[ -d "$src" ]] || die "lib/ directory missing at ${INSTALLER_ROOT} -- guard scripts cannot be installed."
+
+    install -d -m 0755 -o root -g root "$GUARD_LIB_DIR"
+    local f
+    for f in "$src"/*.py "$src"/*.sh; do
+        [[ -f "$f" ]] || continue
+        install -m 0755 -o root -g root "$f" "${GUARD_LIB_DIR}/$(basename "$f")"
+    done
+
+    local conf="${GUARD_LIB_DIR}/guard.conf" conf_tmp
+    conf_tmp=$(mktemp)
+    TMPFILES+=("$conf_tmp")
+    render_guard_conf "$conf" > "$conf_tmp"
+    install -m 0644 -o root -g root "$conf_tmp" "$conf"
+
+    # State and backup dirs live in the agent's home: created BY the agent user, so a
+    # path the agent swapped for a symlink never hands it a root-owned target.
+    local shared_state="${AGENT_HOME}/.claude-lab/shared/state"
+    as_agent mkdir -p "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
+        "${AGENT_HOME}/backups/memory" \
+        || die "Could not create guard state dirs as ${AGENT_USER}."
+    as_agent chmod 0700 "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
+        "${AGENT_HOME}/backups" "${AGENT_HOME}/backups/memory" || true
+
+    systemctl enable --now cron 2>/dev/null \
+        || warn "cron service not started -- guard jobs will run after next reboot."
+
+    local reset_state="${shared_state}/agents-reset"
+    _install_cron_file "${AGENT_USER}-agents-reset" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: session reset of the channel agents (agents-reset.sh).
+# Every 10 min; --auto picks the run by the owner's clock (OWNER_TIMEZONE in guard.conf),
+# so the server timezone does not matter: nightly 04:00, by context size 06:00-22:59.
+# Stop: touch ${reset_state}/STOP ; remove this file to uninstall. Log: ${reset_state}/agents-reset.log
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+*/10 * * * * ${AGENT_USER} /usr/bin/flock -n ${reset_state}/run.lock /bin/bash ${GUARD_LIB_DIR}/agents-reset.sh --auto >> ${reset_state}/cron.log 2>&1
+CRON
+)"
+
+    local bk="${AGENT_HOME}/backups/memory"
+    _install_cron_file "${AGENT_USER}-memory-backup" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: nightly local backup of the agents' memory (memory-backup.sh).
+# Hourly; --auto backs up only at 03:30 by the owner's clock, before the 04:00 reset.
+# Stop: touch ${bk}/STOP (or delete this file).
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+30 * * * * ${AGENT_USER} /bin/bash ${GUARD_LIB_DIR}/memory-backup.sh --auto >> ${bk}/backup.log 2>&1
+CRON
+)"
+
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup}"
+}
+
+# =============================================================================
 # STEP 13: SYSTEMD ENABLE (do not start yet -- OAuth + tokens required first)
 # =============================================================================
 
@@ -2469,6 +2600,7 @@ main() {
     install_superpowers
     install_sudoers
     install_memory_cron
+    install_guard
     enable_services
     final_instructions
 }
