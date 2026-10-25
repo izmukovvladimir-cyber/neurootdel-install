@@ -2468,6 +2468,152 @@ CRON
     ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard}"
 }
 
+# _AGENT_FILE_PY -- runs AS THE AGENT USER (never root) on a path inside the agent's home,
+# so a symlink the agent planted can only point root's work at the agent's own files.
+#   write  <dst> <mode> <if_absent 0|1>   content on stdin; atomic replace; rc 4 = kept as is
+#   block  <file> <tag> <name> <body>     the BEGIN/END block of <name>; bytes outside stay as
+#                                         they are; rc 3 = ambiguous markers, 4 = no change
+# The final path component must not be a symlink (O_NOFOLLOW); a missing file for "block" = 5.
+_AGENT_FILE_PY=$(cat <<'PY'
+import os, sys, tempfile
+
+def nofollow_read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+def atomic_write(path, data, mode):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".inst.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+op = sys.argv[1]
+if op == "write":
+    dst, mode, if_absent = sys.argv[2], int(sys.argv[3], 8), sys.argv[4] == "1"
+    if os.path.islink(dst):
+        sys.exit(3)
+    if if_absent and os.path.lexists(dst):
+        sys.exit(4)
+    atomic_write(dst, sys.stdin.buffer.read(), mode)
+    sys.exit(0)
+
+path, tag, name, body = sys.argv[2:6]
+if not os.path.lexists(path):
+    sys.exit(5)
+try:
+    text = nofollow_read(path)
+except OSError:
+    sys.exit(3)
+begin = f"<!-- BEGIN {tag}: {name} -->".encode()
+end = f"<!-- END {tag}: {name} -->".encode()
+lines = text.splitlines(keepends=True)
+bare = [ln.rstrip(b"\r\n") for ln in lines]
+bi = [i for i, ln in enumerate(bare) if ln == begin]
+ei = [i for i, ln in enumerate(bare) if ln == end]
+# Any other line carrying the marker text (inline, indented) is ambiguous too.
+loose = sum(1 for ln in bare if (begin in ln or end in ln) and ln not in (begin, end))
+nl = b"\r\n" if b"\r\n" in text else b"\n"
+block = [begin + nl] + [ln.encode() + nl for ln in body.rstrip("\n").split("\n")] + [end + nl]
+if loose or len(bi) > 1 or len(ei) > 1 or len(bi) != len(ei) or (bi and ei[0] < bi[0]):
+    sys.exit(3)
+if bi:
+    tail = lines[ei[0]]
+    if not tail.endswith((b"\n", b"\r")):
+        block[-1] = block[-1].rstrip(b"\r\n")
+    new = b"".join(lines[: bi[0]] + block + lines[ei[0] + 1 :])
+else:
+    sep = b"" if not text else (nl if text.endswith((b"\n", b"\r")) else nl + nl)
+    new = text + sep + b"".join(block)
+if new == text:
+    sys.exit(4)
+atomic_write(path, new, os.stat(path, follow_symlinks=False).st_mode & 0o7777)
+PY
+)
+
+# _agent_write <src> <dst> <mode> [if_absent 0|1] -- the file goes in BY the agent user.
+_agent_write() {
+    local src=$1 dst=$2 mode=$3 if_absent=${4:-0} rc=0
+    as_agent python3 -c "$_AGENT_FILE_PY" write "$dst" "$mode" "$if_absent" <"$src" || rc=$?
+    case "$rc" in
+        0|4) return 0 ;;
+        3) warn "${dst} is a symlink -- not written."; return 1 ;;
+        *) warn "${dst} not written."; return 1 ;;
+    esac
+}
+
+# _ensure_marked_block <file> <name> <body> -- the installer's own lines in a file the
+# owner also edits live ONLY between "<!-- BEGIN <tag>: <name> -->" and the matching END.
+# One clean pair: the body between them is replaced; no markers: the block is appended;
+# anything else (two BEGINs, END first, marker inside a line): left alone, rc 1.
+_ensure_marked_block() {
+    local file=$1 name=$2 body=$3 rc=0
+    as_agent python3 -c "$_AGENT_FILE_PY" block "$file" "$INSTALL_TAG" "$name" "$body" </dev/null || rc=$?
+    case "$rc" in
+        0|4) return 0 ;;
+        5) warn "${file} missing -- block '${name}' not added."; return 1 ;;
+        3) warn "${file}: markers of '${name}' are ambiguous or the file is a symlink -- left as it is."; return 1 ;;
+        *) warn "${file}: block '${name}' not written."; return 1 ;;
+    esac
+}
+
+# install_team_refs -- the shared team references, code style rules and the memory layout.
+#   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
+#                                      between markers in the agent's CLAUDE.md;
+#   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
+#     PARALLEL-AGENTS,LEARNINGS}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
+#     library/INDEX.md, core/archive/.
+# Every file lands through the agent user (_agent_write), never a root write into its home.
+install_team_refs() {
+    step 12 "Installing team rules, references, code style rules, memory layout"
+
+    local tdir="${TEMPLATES_DIR}"
+    local shared="${AGENT_HOME}/.claude-lab/shared"
+    local ws="${AGENT_HOME}/.claude-lab/jarvis/.claude"
+    # Auto memory sits under the git root the session runs in (the plugin clone).
+    local mem_dir
+    mem_dir="${AGENT_HOME}/.claude/projects/$(printf '%s' "${ws}/dashi-plugin-claude-code" | sed 's/[^A-Za-z0-9]/-/g')/memory"
+    local fail=0 f tmp
+
+    as_agent mkdir -p "$shared" "${AGENT_HOME}/.claude/rules" "$mem_dir" \
+        "${ws}/core/archive" "${ws}/library" || die "Could not create reference dirs as ${AGENT_USER}."
+
+    for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS; do
+        tmp=$(mktemp)
+        TMPFILES+=("$tmp")
+        render_template "${tdir}/shared/${f}.md" "$tmp" \
+            USER_NAME "$OPERATOR_NAME" LIB "$GUARD_LIB_DIR" CONFIG_ROOT "$CONFIG_ROOT" USER "$AGENT_USER"
+        if [[ "$f" == team-rules ]]; then
+            _agent_write "$tmp" "${shared}/${f}.md" 0644 0 || fail=1
+        else
+            _agent_write "$tmp" "${shared}/${f}.md" 0644 1 || fail=1
+        fi
+    done
+
+    for f in bash python typescript; do
+        _agent_write "${tdir}/rules/${f}.md" "${AGENT_HOME}/.claude/rules/${f}.md" 0644 1 || fail=1
+    done
+
+    for f in MEMORY index-work index-people index-content index-infra; do
+        _agent_write "${tdir}/memory/${f}.md" "${mem_dir}/${f}.md" 0644 1 || fail=1
+    done
+    _agent_write "${tdir}/memory/library-INDEX.md" "${ws}/library/INDEX.md" 0644 1 || fail=1
+
+    _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+
+    if [[ "$fail" -ne 0 ]]; then
+        err "Team references are not all in place -- see the warnings above."
+        return 1
+    fi
+    ok "Team rules on (@ in ${ws}/CLAUDE.md); references in ${shared}; memory layout in ${mem_dir}."
+}
+
 # =============================================================================
 # STEP 13: SYSTEMD ENABLE (do not start yet -- OAuth + tokens required first)
 # =============================================================================
@@ -2701,6 +2847,7 @@ main() {
     install_memory_cron
     install_guard
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
+    install_team_refs || die "Team references are not all in place; fix the warnings above and re-run the installer."
     enable_services
     final_instructions
 }

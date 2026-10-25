@@ -242,7 +242,7 @@ check "no machine-id: non-zero exit" test "$rc" != 0
 STEPS=(banner preflight install_apt_deps require_step_packages install_node ensure_agent_user
        check_node_for_agent install_claude_cli install_bun collect_inputs install_jarvis
        install_richard setup_global_claude install_skills install_superpowers install_sudoers
-       install_memory_cron install_guard setup_agent_hooks enable_services final_instructions azv_activate azv_install_payload)
+       install_memory_cron install_guard setup_agent_hooks install_team_refs enable_services final_instructions azv_activate azv_install_payload)
 trace_main() {
     (
         # shellcheck disable=SC1091
@@ -255,7 +255,7 @@ trace_main() {
 }
 plain=$(trace_main | tr '\n' ' ')
 solo=$(trace_main --solo | tr '\n' ' ')
-expected_plain="banner preflight install_apt_deps require_step_packages install_node ensure_agent_user check_node_for_agent install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude install_skills install_superpowers install_sudoers install_memory_cron install_guard setup_agent_hooks enable_services final_instructions "
+expected_plain="banner preflight install_apt_deps require_step_packages install_node ensure_agent_user check_node_for_agent install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude install_skills install_superpowers install_sudoers install_memory_cron install_guard setup_agent_hooks install_team_refs enable_services final_instructions "
 check "no --solo: old step order unchanged" test "$plain" = "$expected_plain"
 check "no --solo: activation never runs" test "${plain/azv_/}" = "$plain"
 check "--solo: activation right after preflight" \

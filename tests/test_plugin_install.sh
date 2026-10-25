@@ -707,7 +707,7 @@ check "gate: after apt-get -> passes"          test "$OUT" = "rc=0"
 STEPS="${TDIR}/steps"
 main_steps=(banner preflight install_apt_deps install_node ensure_agent_user check_node_for_agent
     install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude
-    install_skills install_superpowers install_sudoers install_memory_cron install_guard setup_agent_hooks enable_services final_instructions)
+    install_skills install_superpowers install_sudoers install_memory_cron install_guard setup_agent_hooks install_team_refs enable_services final_instructions)
 run_main_stubbed() {
     (
         for f in "${main_steps[@]}"; do eval "${f}() { echo ${f} >>'${STEPS}'; }"; done
