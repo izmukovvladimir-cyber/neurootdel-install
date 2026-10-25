@@ -31,7 +31,8 @@ def _post(url: str, headers: dict[str, str], payload: dict, timeout: float) -> t
 
 
 def call(agent: str, service: str, tool: str, args: dict, timeout: float = 60.0) -> tuple[bool, str]:
-    token = (SECRETS / f"gbrain-token-{agent}").read_text().strip()
+    token = next((ln.strip() for ln in (SECRETS / f"gbrain-token-{agent}").read_text().splitlines()
+                  if ln.strip() and not ln.lstrip().startswith("#")), "")  # a token file may carry # comment lines
     url = f"http://127.0.0.1:{PORTS[service]}/mcp"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                "Accept": "application/json, text/event-stream"}

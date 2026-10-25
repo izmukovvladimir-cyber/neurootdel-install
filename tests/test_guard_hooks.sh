@@ -87,6 +87,9 @@ check "lessons: top at session start"        grep -q 'Проверять ссы�
 OUT=$(owner_msg 555 "что мы решили по воронке на прошлой неделе" | python3 "${HK}/auto-recall.py" jarvis; echo "rc=$?")
 check "recall: no gbrain -> silent, rc 0"    test "$OUT" = "rc=0"
 
+OUT=$(python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("ar",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.clean(sys.argv[2],400))' "${HK}/auto-recall.py" '{"password": "very private words"} token='"'"'a b c'"'"' secret_x: "esc \" aped"')
+check "recall: quoted keys/values redacted"  bash -c '! grep -qE "private|a b c|esc|aped" <<<"$0"' "$OUT"
+
 # --- precompact-flush --------------------------------------------------------------------
 printf '# handoff\n- open item\n' >"${WS}/core/hot/handoff.md"
 mkdir -p "${H}/.claude/projects"

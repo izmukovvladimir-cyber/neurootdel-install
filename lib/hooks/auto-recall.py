@@ -18,7 +18,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-
 CALL = str(Path(__file__).resolve().parent.parent / "gbrain-call.py")
 AGENT_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 MIN_CHARS = 10
@@ -37,8 +36,9 @@ SECRET_RE = re.compile(
     r"|(?<![\w+/=])(?=[\w+/=]*\d)(?=[\w+/=]*[a-z])(?=[\w+/=]*[A-Z])[\w+/=]{24,}"          # mixed-case base64-like
     r"|(?<![\w+/=])(?=[a-z0-9_]*\d)(?=[a-z0-9_]*[a-z])[a-z0-9_]{32,}")                     # long hex-like
 # a value after a secret-ish key name is redacted whatever its shape (password=..., Authorization: Bearer ...)
-KEYED_RE = re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|authorization|bearer|"
-                      r"cookie|session|пароль|токен|ключ)(\s*[:=]\s*)(?:bearer\s+)?\S+|\b(bearer)(\s+)\S+")
+KEYED_RE = re.compile(r"(?is)\b((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|authorization|bearer|"
+                      r"cookie|session|пароль|токен|ключ)[\w-]*[\"']?)(\s*[:=]\s*)(?:bearer\s+)?(?:\"(?:[^\"\\]|\\.)*\"?|'(?:[^'\\]|\\.)*'?|\S+)"
+                      r"|\b(bearer)(\s+)(?:\"(?:[^\"\\]|\\.)*\"?|'(?:[^'\\]|\\.)*'?|\S+)")  # quoted values redacted whole
 MARKER_RE = re.compile(r"[\[\]<>]")
 
 
@@ -87,16 +87,17 @@ TAIL = "[end auto-recall]"
 
 def render(hits: list[dict]) -> str:
     lines: list[str] = []
-    budget = INJECT_MAX - len(HEAD) - len(TAIL) - 2
-    for h in hits:
+    nbytes = lambda x: len(x.encode("utf-8"))   # the cap is in bytes: Cyrillic is 2 bytes a char
+    budget = INJECT_MAX - nbytes(HEAD) - nbytes(TAIL) - 2
+    for h in hits[:LIMIT]:                        # the server limit is not trusted
         snippet = clean(h.get("snippet", ""), SNIPPET_MAX)
         if not snippet:
             continue
         line = f"- {clean(h.get('path', '?'), 160)}: {snippet}"
-        if len(line) + 1 > budget:
+        if nbytes(line) + 1 > budget:
             break
         lines.append(line)
-        budget -= len(line) + 1
+        budget -= nbytes(line) + 1
     if not lines:
         return ""
     return "\n".join([HEAD, *lines, TAIL])
