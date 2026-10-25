@@ -1085,6 +1085,66 @@ BRIEF
 # STEP 6: INSTALL JARVIS
 # =============================================================================
 
+# Plugin config.json defaults (TELEGRAM_STATE_DIR/config.json), one entry per
+# "section key json-value". A key is added only when it is missing: an owner
+# value is never changed, a section that is not an object is left alone.
+readonly CHANNEL_CONFIG_DEFAULTS=(
+    "hud enabled false"
+)
+
+# _channel_config_merge <cfg> -- prints the merged JSON. rc 0 = changed,
+# 1 = nothing to add, 3 = the file is not exactly one JSON object.
+_channel_config_merge() {
+    python3 - "$1" "${CHANNEL_CONFIG_DEFAULTS[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, defaults = Path(sys.argv[1]), sys.argv[2:]
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        sys.exit(3)
+    if not isinstance(data, dict):
+        sys.exit(3)
+changed = not path.exists()
+for spec in defaults:
+    section, key, raw = spec.split(" ", 2)
+    value = json.loads(raw)
+    if section not in data:
+        data[section] = {key: value}
+        changed = True
+        continue
+    sec = data[section]
+    if isinstance(sec, dict):
+        if key not in sec:
+            sec[key] = value
+            changed = True
+    else:
+        print(f"{section} is not an object, {section}.{key} left unset", file=sys.stderr)
+print(json.dumps(data, ensure_ascii=False, indent=2))
+sys.exit(0 if changed else 1)
+PY
+}
+
+# ensure_channel_config_defaults <cfg> -- writes the defaults into the plugin config.
+ensure_channel_config_defaults() {
+    local cfg="$1" tmp rc=0 mode=0600
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    _channel_config_merge "$cfg" > "$tmp" || rc=$?
+    case "$rc" in
+        0)
+            [[ -e "$cfg" ]] && mode=$(stat -c %a "$cfg")
+            write_as_user "$tmp" "$cfg" "$mode"
+            ;;
+        1) ;;
+        *) warn "Cannot parse ${cfg}; plugin defaults (${CHANNEL_CONFIG_DEFAULTS[*]}) not applied." ;;
+    esac
+}
+
 install_jarvis() {
     step 6 "Installing Jarvis (Telegram channel plugin, systemd: ${JARVIS_UNIT})"
 
@@ -1103,6 +1163,10 @@ install_jarvis() {
     install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" \
         "${AGENT_HOME}/.claude-lab/shared/state/jarvis" \
         "$state_dir"
+
+    # Pinned HUD status message off: a restart re-sends it and the user reads
+    # it as a duplicate reply. Only a missing key is added; an owner value is kept.
+    ensure_channel_config_defaults "${state_dir}/config.json"
 
     # Full agent workspace (CLAUDE.md + core/USER.md + stub cold memory).
     # Existing files are kept, so a re-run never wipes the agent's memory.
@@ -1540,6 +1604,14 @@ UEOF
 - Never commit secrets. Never print tokens/keys in plain text.
 - On each correction: update LEARNINGS.md so the mistake does not repeat.
 - Prefer small, reversible changes.
+
+## One reply per question
+
+- На один вопрос человека одно сообщение. Промежуточные статусы человеку не слать. Итог «готово» один раз, в конце.
+- Уже ответил по теме: дополнение только если появилось новое. Повторять «готово» другими словами нельзя.
+- Побудка из группы = ответ в группу, в личку тот же ответ не дублировать.
+- Отправил человеку сообщение из handoff = сразу вычеркни этот пункт в handoff, в том же ходе.
+- После рестарта, прежде чем отправлять что-то из handoff, открой этот чат и проверь, не ушло ли уже. Ушло = вычеркни, не повторяй.
 REOF
     _write_if_absent "$rules_tmp" "${ws}/core/rules.md" 0644
 
