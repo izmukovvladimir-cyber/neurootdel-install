@@ -1899,6 +1899,97 @@ link_skills_into_plugin() {
 # STEP 10: SUPERPOWERS PLUGIN
 # =============================================================================
 
+# merge_json_file <file> <jq filter> [jq args...] -- applies the filter to a JSON
+# object file owned by the agent user and writes it back only when it changed.
+# A missing file starts as {}. A file that is not one JSON object is left as it is.
+# The first change is backed up to <file>.bak-install.
+merge_json_file() {
+    local file=$1 filter=$2
+    shift 2
+    local tmp mode=0644
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    if [[ -e "$file" ]]; then
+        if ! jq -s -e 'length == 1 and (.[0] | type) == "object"' "$file" >/dev/null 2>&1; then
+            warn "${file} is not one JSON object -- left as it is."
+            return 1
+        fi
+        mode=$(stat -c %a "$file")
+        jq "$@" "$filter" "$file" > "$tmp" || { warn "jq failed on ${file} -- left as it is."; return 1; }
+        if jq -e --slurpfile new "$tmp" '. == $new[0]' "$file" >/dev/null 2>&1; then
+            return 0
+        fi
+        [[ -e "${file}.bak-install" ]] || cp -p "$file" "${file}.bak-install"
+    else
+        jq -n "$@" "{} | ${filter}" > "$tmp" || { warn "jq failed for new ${file}."; return 1; }
+    fi
+    write_as_user "$tmp" "$file" "$mode"
+}
+
+# enable_superpowers <checkout> -- switches the plugin ON for the agent user.
+# Claude Code reads enabledPlugins in ~/.claude/settings.json; plugins/config.json
+# alone (what earlier versions wrote) leaves the plugin installed but off.
+# The checkout is registered as a local (directory) marketplace and installed
+# through the CLI; settings.json gets the same two keys directly, so the plugin
+# is on even when the CLI step failed. An explicit owner "false" is kept.
+enable_superpowers() {
+    local sp_dir=$1
+    local manifest="${sp_dir}/.claude-plugin/marketplace.json"
+    local settings="${AGENT_HOME}/.claude/settings.json"
+    local installed="${AGENT_HOME}/.claude/plugins/installed_plugins.json"
+    local claude_bin="${AGENT_HOME}/.local/bin/claude"
+    local mname pname pid
+
+    if [[ ! -f "$manifest" ]]; then
+        warn "Superpowers checkout has no .claude-plugin/marketplace.json -- plugin NOT enabled."
+        return 1
+    fi
+    mname=$(jq -er '.name' "$manifest" 2>/dev/null) || mname=""
+    pname=$(jq -er '.plugins[0].name' "$manifest" 2>/dev/null) || pname=""
+    if [[ ! "$mname" =~ ^[A-Za-z0-9._-]+$ || ! "$pname" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        warn "Superpowers marketplace.json has no usable names -- plugin NOT enabled."
+        return 1
+    fi
+    pid="${pname}@${mname}"
+
+    # Settings are checked BEFORE the CLI touches them: a broken file stays as it
+    # is, and an owner "false" is never turned back on by `plugin install`.
+    if [[ -e "$settings" ]] && ! jq -s -e 'length == 1 and (.[0] | type) == "object"' "$settings" >/dev/null 2>&1; then
+        warn "${settings} is not one JSON object -- left as it is, ${pid} NOT enabled."
+        return 1
+    fi
+    if [[ -e "$settings" ]] && jq -e --arg id "$pid" '.enabledPlugins[$id]? == false' "$settings" >/dev/null 2>&1; then
+        warn "${pid} is set to false in ${settings} by the owner -- left off."
+        return 0
+    fi
+
+    if [[ -x "$claude_bin" ]]; then
+        as_agent "$claude_bin" plugin marketplace add "$sp_dir" --scope user >/dev/null 2>&1 \
+            || log "claude plugin marketplace add: not added (already known or CLI refused)."
+        if ! jq -e --arg id "$pid" '(.plugins[$id] // []) | any(.scope? == "user")' "$installed" >/dev/null 2>&1; then
+            as_agent "$claude_bin" plugin install "$pid" --scope user >/dev/null 2>&1 \
+                || warn "claude plugin install ${pid} failed -- enabling through settings.json only."
+        fi
+    else
+        warn "claude CLI not found at ${claude_bin} -- enabling through settings.json only."
+    fi
+
+    merge_json_file "$settings" '
+        .enabledPlugins = (.enabledPlugins // {})
+        | (if .enabledPlugins | has($id) then . else .enabledPlugins[$id] = true end)
+        | .extraKnownMarketplaces = (.extraKnownMarketplaces // {})
+        | (if .extraKnownMarketplaces | has($m) then .
+           else .extraKnownMarketplaces[$m] = {source: {source: "directory", path: $p}} end)' \
+        --arg id "$pid" --arg m "$mname" --arg p "$sp_dir" \
+        || { warn "Could not write ${settings} -- ${pid} NOT enabled."; return 1; }
+
+    if jq -e --arg id "$pid" '.enabledPlugins[$id] == true' "$settings" >/dev/null 2>&1; then
+        ok "Superpowers enabled: ${pid} (enabledPlugins in ${settings})."
+    else
+        warn "${pid} is set to false in ${settings} by the owner -- left off."
+    fi
+}
+
 install_superpowers() {
     step 10 "Installing Superpowers plugin @ ${SUPERPOWERS_SHA:0:8}"
 
@@ -1922,6 +2013,10 @@ install_superpowers() {
         as_agent git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
             || warn "Superpowers checkout of pinned SHA failed -- using HEAD."
     fi
+
+    # Switch it on (enabledPlugins). Before the legacy config.json below, whose
+    # early returns must not leave the plugin installed but off.
+    enable_superpowers "$sp_dir" || true
 
     # Defensive jq merge of plugins config.
     local tmp
