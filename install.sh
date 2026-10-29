@@ -6,7 +6,7 @@
 #     has an edgelab install keeps the edgelab user and its paths
 #     (see select_install_names)
 #   - Node.js 22 + Python 3.12 + Claude Code CLI
-#   - Jarvis: izmukovvladimir-cyber/dashi-plugin-claude-code (main) -> systemd unit channel-jarvis
+#   - Jarvis: izmukovvladimir-cyber/dashi-plugin-claude-code (pinned commit, PLUGIN_COMMIT_DEFAULT) -> systemd unit channel-jarvis
 #     (a server that still runs the old claude-gateway is migrated; see --rollback)
 #   - Richard: izmukovvladimir-cyber/claude-code-telegram v1.6.0 -> systemd unit claude-richard
 #
@@ -28,6 +28,8 @@
 #   NEUROOTDEL_RICHARD_BOT_TOKEN  Richard Telegram bot token
 #   NEUROOTDEL_RICHARD_BOT_USER   Richard bot @username (no @)
 #   NEUROOTDEL_TG_USER_ID         Operator Telegram numeric ID
+#   NEUROOTDEL_SUPERVISOR_TG_ID   Optional second trusted Telegram numeric ID (installer
+#                                 supervisor) for the starter secrets rule; empty = none
 #   NEUROOTDEL_USER_NAME          Operator display name (for Jarvis CLAUDE.md)
 #   NEUROOTDEL_LANGUAGE           Operator language (default: Russian)
 #   NEUROOTDEL_TIMEZONE           Operator timezone (default: Europe/Moscow)
@@ -40,7 +42,9 @@ set -euo pipefail
 
 readonly INSTALLER_VERSION="3.1.0"
 readonly PLUGIN_REPO="https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code.git"
-readonly PLUGIN_REF="main"
+# Every install gets the SAME plugin code: one pinned commit of the fork (owner-only
+# service commands, d846493). NEUROOTDEL_PLUGIN_COMMIT overrides it (40 hex chars).
+readonly PLUGIN_COMMIT_DEFAULT="d846493201d02b92399404c9b2a89a6dbcd89ab5"
 readonly JARVIS_UNIT="channel-jarvis"
 # Pre-plugin Jarvis (v3.0.x). Kept on disk for --rollback, never deleted.
 readonly LEGACY_GATEWAY_UNIT="claude-gateway"
@@ -75,6 +79,7 @@ import_legacy_env() {
     local old new
     for old in $(compgen -v EDGELAB_ || true); do
         new="NEUROOTDEL_${old#EDGELAB_}"
+        [[ "$old" == EDGELAB_FACT_GATE_* ]] && continue   # new keys: NEUROOTDEL_ only, "" must clear
         if [[ -z "${!new:-}" && -n "${!old:-}" ]]; then
             export "${new}=${!old}"
         fi
@@ -133,6 +138,8 @@ apply_install_names() {
     JARVIS_ENV_DIR="${CONFIG_ROOT}/jarvis"
     CHANNEL_CONFIRM_BIN="/usr/local/lib/${AGENT_USER}/channel-confirm.sh"
     CHANNEL_START_BIN="/usr/local/lib/${AGENT_USER}/channel-start.sh"
+    # Guard scripts (agents-reset, memory-backup, watchdog, hooks) + guard.conf.
+    GUARD_LIB_DIR="/usr/local/lib/${AGENT_USER}"
     # Root-owned apt wrapper: the only apt path in sudoers (plain `apt-get *` = root).
     APT_WRAPPER_BIN="/usr/local/sbin/${AGENT_USER}-apt-install"
     SUDOERS_FILE="/etc/sudoers.d/${AGENT_USER}-agents"
@@ -998,6 +1005,8 @@ JARVIS_BOT_USERNAME=""
 RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
 TG_USER_ID=""
+# Optional second trusted id (installer supervisor), NEUROOTDEL_SUPERVISOR_TG_ID; empty = none.
+SUPERVISOR_TG_ID=""
 OPERATOR_NAME=""
 OPERATOR_LANGUAGE=""
 OPERATOR_TIMEZONE=""
@@ -1032,6 +1041,7 @@ BRIEF
         "Ваш Telegram numeric user ID (from @userinfobot)" \
         ""
 
+    SUPERVISOR_TG_ID="$(env_value SUPERVISOR_TG_ID)"
     JARVIS_BOT_USERNAME="${NEUROOTDEL_JARVIS_BOT_USER:-}"
     RICHARD_BOT_USERNAME="${NEUROOTDEL_RICHARD_BOT_USER:-}"
 
@@ -1077,6 +1087,9 @@ BRIEF
     if [[ -n "$TG_USER_ID" && ! "$TG_USER_ID" =~ ^[0-9]+$ ]]; then
         die "Telegram user ID must be a positive integer (got: ${TG_USER_ID})."
     fi
+    if [[ -n "$SUPERVISOR_TG_ID" && ! "$SUPERVISOR_TG_ID" =~ ^[0-9]+$ ]]; then
+        die "NEUROOTDEL_SUPERVISOR_TG_ID must be a positive integer (got: ${SUPERVISOR_TG_ID})."
+    fi
 
     ok "Inputs collected: name=${OPERATOR_NAME}, tz=${OPERATOR_TIMEZONE}, lang=${OPERATOR_LANGUAGE}"
 }
@@ -1084,6 +1097,105 @@ BRIEF
 # =============================================================================
 # STEP 6: INSTALL JARVIS
 # =============================================================================
+
+# Plugin config.json defaults (TELEGRAM_STATE_DIR/config.json), one entry per
+# "section key json-value". A key is added only when it is missing: an owner
+# value is never changed, a section that is not an object is left alone.
+# webhook on: the agents guard nudges through it and the fallback-reply Stop hook posts to it
+# (127.0.0.1 only, bearer TELEGRAM_WEBHOOK_TOKEN from channel.env).
+readonly CHANNEL_CONFIG_DEFAULTS=(
+    "hud enabled false"
+    "webhook enabled true"
+)
+
+# _channel_config_merge <cfg> -- prints the merged JSON. rc 0 = changed,
+# 1 = nothing to add, 3 = the file is not exactly one JSON object.
+_channel_config_merge() {
+    python3 - "$1" "${CHANNEL_CONFIG_DEFAULTS[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, defaults = Path(sys.argv[1]), sys.argv[2:]
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        sys.exit(3)
+    if not isinstance(data, dict):
+        sys.exit(3)
+changed = not path.exists()
+for spec in defaults:
+    section, key, raw = spec.split(" ", 2)
+    value = json.loads(raw)
+    if section not in data:
+        data[section] = {key: value}
+        changed = True
+        continue
+    sec = data[section]
+    if isinstance(sec, dict):
+        if key not in sec:
+            sec[key] = value
+            changed = True
+    else:
+        print(f"{section} is not an object, {section}.{key} left unset", file=sys.stderr)
+print(json.dumps(data, ensure_ascii=False, indent=2))
+sys.exit(0 if changed else 1)
+PY
+}
+
+# ensure_channel_config_defaults <cfg> -- writes the defaults into the plugin config.
+ensure_channel_config_defaults() {
+    local cfg="$1" tmp rc=0 mode=0600
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    _channel_config_merge "$cfg" > "$tmp" || rc=$?
+    case "$rc" in
+        0)
+            [[ -e "$cfg" ]] && mode=$(stat -c %a "$cfg")
+            write_as_user "$tmp" "$cfg" "$mode"
+            ;;
+        1) ;;
+        *) warn "Cannot parse ${cfg}; plugin defaults (${CHANNEL_CONFIG_DEFAULTS[*]}) not applied." ;;
+    esac
+}
+
+# plugin_commit -- the pinned plugin commit (NEUROOTDEL_PLUGIN_COMMIT or the default).
+plugin_commit() {
+    local c
+    c="$(env_value PLUGIN_COMMIT)"
+    c="${c:-$PLUGIN_COMMIT_DEFAULT}"
+    [[ "$c" =~ ^[0-9a-f]{40}$ ]] || die "NEUROOTDEL_PLUGIN_COMMIT must be a full 40-char commit id."
+    printf '%s' "$c"
+}
+
+# checkout_plugin <plugin_root> -- the plugin at exactly the pinned commit (detached HEAD).
+# A fresh install clones it; a re-run moves a clean checkout to the pin and keeps a
+# checkout with local edits as it is (warning), so an owner's hand change is never lost.
+checkout_plugin() {
+    local root=$1 pin head
+    pin="$(plugin_commit)"
+    if [[ ! -d "${root}/.git" ]]; then
+        as_agent git init -q "$root" || die "git init failed in ${root}."
+        as_agent git -C "$root" remote add origin "$PLUGIN_REPO" || die "git remote add failed in ${root}."
+    fi
+    head="$(as_agent git -C "$root" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    if [[ "$head" == "$pin" ]]; then
+        ok "Plugin already at pinned commit ${pin:0:12}."
+        return 0
+    fi
+    if [[ -n "$head" && -n "$(as_agent git -C "$root" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        warn "Plugin checkout ${root} has local edits -- kept at ${head:0:12}, pinned ${pin:0:12} NOT applied."
+        return 0
+    fi
+    log "Plugin: checking out pinned commit ${pin:0:12}."
+    as_agent git -C "$root" fetch -q --depth 1 origin "$pin" \
+        || die "Could not fetch plugin commit ${pin} from ${PLUGIN_REPO}."
+    as_agent git -C "$root" -c advice.detachedHead=false checkout -q --detach "$pin" \
+        || die "Could not check out plugin commit ${pin}."
+    [[ "$(as_agent git -C "$root" rev-parse HEAD)" == "$pin" ]] || die "Plugin HEAD is not the pinned commit."
+}
 
 install_jarvis() {
     step 6 "Installing Jarvis (Telegram channel plugin, systemd: ${JARVIS_UNIT})"
@@ -1104,18 +1216,17 @@ install_jarvis() {
         "${AGENT_HOME}/.claude-lab/shared/state/jarvis" \
         "$state_dir"
 
+    # Pinned HUD status message off: a restart re-sends it and the user reads
+    # it as a duplicate reply. Only a missing key is added; an owner value is kept.
+    ensure_channel_config_defaults "${state_dir}/config.json"
+
     # Full agent workspace (CLAUDE.md + core/USER.md + stub cold memory).
     # Existing files are kept, so a re-run never wipes the agent's memory.
     _write_agent_workspace "$wsroot"
 
     # The plugin lives inside the workspace: claude runs in plugin/ and picks
     # up the agent CLAUDE.md from the parent dirs.
-    if [[ -d "${plugin_root}/.git" ]]; then
-        log "Plugin repo exists -- pulling latest ${PLUGIN_REF}."
-        as_agent git -C "$plugin_root" pull --ff-only || warn "git pull failed; continuing with existing checkout."
-    else
-        as_agent git clone --depth 1 --branch "$PLUGIN_REF" "$PLUGIN_REPO" "$plugin_root"
-    fi
+    checkout_plugin "$plugin_root"
     [[ -f "${plugin_dir}/.mcp.json" ]] || die "Plugin checkout has no plugin/.mcp.json (${plugin_root})."
     as_agent env -C "$plugin_dir" "${AGENT_HOME}/.bun/bin/bun" install \
         || die "bun install failed in ${plugin_dir}."
@@ -1219,7 +1330,7 @@ _write_channel_env() {
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
 
-    CHANNEL_ENV_TOKEN="$JARVIS_BOT_TOKEN" render_channel_env \
+    CHANNEL_ENV_TOKEN="$JARVIS_BOT_TOKEN" CHANNEL_ENV_CMD_TRUSTED="$(env_value COMMAND_TRUSTED_IDS)" render_channel_env \
         "$env_file" "$JARVIS_ALLOWED_IDS" "$JARVIS_GROQ_KEY_FILE" "$state_dir" "$ws_root" >"$tmp" \
         || die "Could not build ${env_file}."
 
@@ -1238,6 +1349,8 @@ import os
 import re
 import sys
 from pathlib import Path
+
+import secrets
 
 existing_path, user_ids_new, groq_file, state_dir, ws_root = sys.argv[1:6]
 
@@ -1281,6 +1394,8 @@ managed = {
     "TELEGRAM_STATE_DIR": existing.get("TELEGRAM_STATE_DIR") or state_dir,
     "TELEGRAM_WEBHOOK_HOST": existing.get("TELEGRAM_WEBHOOK_HOST") or "127.0.0.1",
     "TELEGRAM_WEBHOOK_PORT": existing.get("TELEGRAM_WEBHOOK_PORT") or "8089",
+    # Bearer of the local webhook (guard nudges, fallback replies); generated once, then kept.
+    "TELEGRAM_WEBHOOK_TOKEN": existing.get("TELEGRAM_WEBHOOK_TOKEN") or secrets.token_hex(24),
 }
 # "Allow this command?" prompts: pinned to the owner (the first id), so team
 # members added to TELEGRAM_ALLOWED_USER_IDS later by hand never get them.
@@ -1290,6 +1405,21 @@ perm_ids = new_ids[0] if new_ids else (
     existing.get("TELEGRAM_PERMISSION_ALLOWED_USER_IDS", "") or (user_ids[0] if user_ids else ""))
 if perm_ids:
     managed["TELEGRAM_PERMISSION_ALLOWED_USER_IDS"] = perm_ids
+# Service commands (/new, /compact, /stop, /status, panel buttons...): only the owner,
+# plus the trusted ids given to the installer (NEUROOTDEL_COMMAND_TRUSTED_IDS). Same
+# pinning as above: a new owner answer re-pins, otherwise the existing value is kept.
+trusted = csv(os.environ.get("CHANNEL_ENV_CMD_TRUSTED", ""))
+for uid in trusted:
+    if not re.fullmatch(r"[0-9]+", uid):
+        sys.exit(f"channel.env: trusted command id {uid!r} is not a number")
+old_cmd = csv(existing.get("TELEGRAM_COMMAND_OWNER_IDS", ""))
+if new_ids and (not old_cmd or old_cmd[0] != new_ids[0]):
+    cmd_ids = [new_ids[0]]  # a new owner: the old trusted list belonged to someone else
+else:
+    cmd_ids = old_cmd or (user_ids[:1] if user_ids else [])  # same owner: hand-added ids stay
+cmd_ids += [t for t in trusted if t not in cmd_ids]
+if cmd_ids:
+    managed["TELEGRAM_COMMAND_OWNER_IDS"] = ",".join(cmd_ids)
 if groq:
     managed["GROQ_API_KEY"] = groq
 
@@ -1308,6 +1438,8 @@ out = [
     "# Permission prompts (\"allow this command?\") go ONLY to the owner:",
     "# TELEGRAM_PERMISSION_ALLOWED_USER_IDS is set once to the first id and kept, so",
     "# team members you add to TELEGRAM_ALLOWED_USER_IDS later never get them.",
+    "# Service commands (/new, /compact, /stop, /status, ...) and panel buttons obey",
+    "# ONLY TELEGRAM_COMMAND_OWNER_IDS (owner + trusted ids); others get one refusal line.",
     "# Without TELEGRAM_ALLOWED_USER_IDS the plugin refuses to start.",
 ]
 out += [f"{k}={v}" for k, v in managed.items()]
@@ -1540,6 +1672,14 @@ UEOF
 - Never commit secrets. Never print tokens/keys in plain text.
 - On each correction: update LEARNINGS.md so the mistake does not repeat.
 - Prefer small, reversible changes.
+
+## One reply per question
+
+- На один вопрос человека одно сообщение. Промежуточные статусы человеку не слать. Итог «готово» один раз, в конце.
+- Уже ответил по теме: дополнение только если появилось новое. Повторять «готово» другими словами нельзя.
+- Побудка из группы = ответ в группу, в личку тот же ответ не дублировать.
+- Отправил человеку сообщение из handoff = сразу вычеркни этот пункт в handoff, в том же ходе.
+- После рестарта, прежде чем отправлять что-то из handoff, открой этот чат и проверь, не ушло ли уже. Ушло = вычеркни, не повторяй.
 REOF
     _write_if_absent "$rules_tmp" "${ws}/core/rules.md" 0644
 
@@ -1649,12 +1789,28 @@ readonly STARTER_RULES_END='<!-- agent-rules-starter:end -->'
 # Phrase of rule 4; a file that already has it carries the rules in some form.
 readonly STARTER_RULES_PROBE='Понял так'
 
-# _starter_rules_block -- prints the starter rules wrapped in the markers.
+# _starter_rules_block -- prints the starter rules wrapped in the markers, with the
+# trusted ids filled in: owner = TG_USER_ID (empty -> "владелец." without an id),
+# supervisor = SUPERVISOR_TG_ID (empty -> its line is omitted). Ids are digits only.
 _starter_rules_block() {
-    local src="${TEMPLATES_DIR}/AGENT-RULES-STARTER.md"
+    local src="${TEMPLATES_DIR}/AGENT-RULES-STARTER.md" owner="${TG_USER_ID:-}" sup="${SUPERVISOR_TG_ID:-}"
     [[ -f "$src" ]] || die "Template not found: $src"
+    [[ -z "$owner" || "$owner" =~ ^[0-9]+$ ]] || die "Telegram user ID must be a positive integer (got: ${owner})."
+    [[ -z "$sup" || "$sup" =~ ^[0-9]+$ ]] || die "NEUROOTDEL_SUPERVISOR_TG_ID must be a positive integer (got: ${sup})."
     printf '\n%s\n' "$STARTER_RULES_BEGIN"
-    cat "$src"
+    awk -v owner="$owner" -v sup="$sup" '
+        function put(s, key, val,    i) {
+            while ((i = index(s, key)) > 0) s = substr(s, 1, i - 1) val substr(s, i + length(key))
+            return s
+        }
+        index($0, "{{SUPERVISOR_TG_ID}}") && sup == "" { next }
+        {
+            line = $0
+            if (owner == "") line = put(line, ", Telegram id {{OWNER_TG_ID}}", "")
+            line = put(line, "{{OWNER_TG_ID}}", owner)
+            line = put(line, "{{SUPERVISOR_TG_ID}}", sup)
+            print line
+        }' "$src"
     printf '%s\n' "$STARTER_RULES_END"
 }
 
@@ -1919,6 +2075,97 @@ link_skills_into_plugin() {
 # STEP 10: SUPERPOWERS PLUGIN
 # =============================================================================
 
+# merge_json_file <file> <jq filter> [jq args...] -- applies the filter to a JSON
+# object file owned by the agent user and writes it back only when it changed.
+# A missing file starts as {}. A file that is not one JSON object is left as it is.
+# The first change is backed up to <file>.bak-install.
+merge_json_file() {
+    local file=$1 filter=$2
+    shift 2
+    local tmp mode=0644
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    if [[ -e "$file" ]]; then
+        if ! jq -s -e 'length == 1 and (.[0] | type) == "object"' "$file" >/dev/null 2>&1; then
+            warn "${file} is not one JSON object -- left as it is."
+            return 1
+        fi
+        mode=$(stat -c %a "$file")
+        jq "$@" "$filter" "$file" > "$tmp" || { warn "jq failed on ${file} -- left as it is."; return 1; }
+        if jq -e --slurpfile new "$tmp" '. == $new[0]' "$file" >/dev/null 2>&1; then
+            return 0
+        fi
+        [[ -e "${file}.bak-install" ]] || cp -p "$file" "${file}.bak-install"
+    else
+        jq -n "$@" "{} | ${filter}" > "$tmp" || { warn "jq failed for new ${file}."; return 1; }
+    fi
+    write_as_user "$tmp" "$file" "$mode"
+}
+
+# enable_superpowers <checkout> -- switches the plugin ON for the agent user.
+# Claude Code reads enabledPlugins in ~/.claude/settings.json; plugins/config.json
+# alone (what earlier versions wrote) leaves the plugin installed but off.
+# The checkout is registered as a local (directory) marketplace and installed
+# through the CLI; settings.json gets the same two keys directly, so the plugin
+# is on even when the CLI step failed. An explicit owner "false" is kept.
+enable_superpowers() {
+    local sp_dir=$1
+    local manifest="${sp_dir}/.claude-plugin/marketplace.json"
+    local settings="${AGENT_HOME}/.claude/settings.json"
+    local installed="${AGENT_HOME}/.claude/plugins/installed_plugins.json"
+    local claude_bin="${AGENT_HOME}/.local/bin/claude"
+    local mname pname pid
+
+    if [[ ! -f "$manifest" ]]; then
+        warn "Superpowers checkout has no .claude-plugin/marketplace.json -- plugin NOT enabled."
+        return 1
+    fi
+    mname=$(jq -er '.name' "$manifest" 2>/dev/null) || mname=""
+    pname=$(jq -er '.plugins[0].name' "$manifest" 2>/dev/null) || pname=""
+    if [[ ! "$mname" =~ ^[A-Za-z0-9._-]+$ || ! "$pname" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        warn "Superpowers marketplace.json has no usable names -- plugin NOT enabled."
+        return 1
+    fi
+    pid="${pname}@${mname}"
+
+    # Settings are checked BEFORE the CLI touches them: a broken file stays as it
+    # is, and an owner "false" is never turned back on by `plugin install`.
+    if [[ -e "$settings" ]] && ! jq -s -e 'length == 1 and (.[0] | type) == "object"' "$settings" >/dev/null 2>&1; then
+        warn "${settings} is not one JSON object -- left as it is, ${pid} NOT enabled."
+        return 1
+    fi
+    if [[ -e "$settings" ]] && jq -e --arg id "$pid" '.enabledPlugins[$id]? == false' "$settings" >/dev/null 2>&1; then
+        warn "${pid} is set to false in ${settings} by the owner -- left off."
+        return 0
+    fi
+
+    if [[ -x "$claude_bin" ]]; then
+        as_agent "$claude_bin" plugin marketplace add "$sp_dir" --scope user >/dev/null 2>&1 \
+            || log "claude plugin marketplace add: not added (already known or CLI refused)."
+        if ! jq -e --arg id "$pid" '(.plugins[$id] // []) | any(.scope? == "user")' "$installed" >/dev/null 2>&1; then
+            as_agent "$claude_bin" plugin install "$pid" --scope user >/dev/null 2>&1 \
+                || warn "claude plugin install ${pid} failed -- enabling through settings.json only."
+        fi
+    else
+        warn "claude CLI not found at ${claude_bin} -- enabling through settings.json only."
+    fi
+
+    merge_json_file "$settings" '
+        .enabledPlugins = (.enabledPlugins // {})
+        | (if .enabledPlugins | has($id) then . else .enabledPlugins[$id] = true end)
+        | .extraKnownMarketplaces = (.extraKnownMarketplaces // {})
+        | (if .extraKnownMarketplaces | has($m) then .
+           else .extraKnownMarketplaces[$m] = {source: {source: "directory", path: $p}} end)' \
+        --arg id "$pid" --arg m "$mname" --arg p "$sp_dir" \
+        || { warn "Could not write ${settings} -- ${pid} NOT enabled."; return 1; }
+
+    if jq -e --arg id "$pid" '.enabledPlugins[$id] == true' "$settings" >/dev/null 2>&1; then
+        ok "Superpowers enabled: ${pid} (enabledPlugins in ${settings})."
+    else
+        warn "${pid} is set to false in ${settings} by the owner -- left off."
+    fi
+}
+
 install_superpowers() {
     step 10 "Installing Superpowers plugin @ ${SUPERPOWERS_SHA:0:8}"
 
@@ -1942,6 +2189,10 @@ install_superpowers() {
         as_agent git -C "$sp_dir" checkout --quiet "$SUPERPOWERS_SHA" 2>/dev/null \
             || warn "Superpowers checkout of pinned SHA failed -- using HEAD."
     fi
+
+    # Switch it on (enabledPlugins). Before the legacy config.json below, whose
+    # early returns must not leave the plugin installed but off.
+    enable_superpowers "$sp_dir" || true
 
     # Defensive jq merge of plugins config.
     local tmp
@@ -2059,10 +2310,9 @@ install_sudoers() {
 # STEP 12: MEMORY ROTATION SCRIPTS + CRON
 # =============================================================================
 
-# Install the 5 memory-rotation scripts into the jarvis workspace and register
-# them with the agent user's crontab. Matches the Day 2 self-diagnostic contract: a
-# healthy agent has rotate-warm / trim-hot / compress-warm / ov-session-sync /
-# memory-rotate on cron.
+# Install the 4 memory-rotation scripts into the jarvis workspace and register
+# them with the agent user's crontab: rotate-warm / trim-hot / compress-warm /
+# memory-rotate. (ov-session-sync is not scheduled: it idles without OpenViking.)
 install_memory_cron() {
     step 12 "Installing memory-rotation scripts + cron"
 
@@ -2082,11 +2332,11 @@ install_memory_cron() {
 
     local name
     local installed=()
-    local required=(trim-hot rotate-warm compress-warm ov-session-sync memory-rotate)
+    local required=(trim-hot rotate-warm compress-warm memory-rotate)
     for name in "${required[@]}"; do
         local src="${scripts_src}/${name}.sh"
         if [[ ! -f "$src" ]]; then
-            # Day-2 self-diagnostic requires all 5 jobs on cron. A partial
+            # Every job of the block must be on cron. A partial
             # install would leave dead cron entries pointing at missing files
             # -- fail loud so the student doesn't ship a half-wired workspace.
             err "Memory script '${name}.sh' missing at ${src} -- refusing partial install."
@@ -2106,7 +2356,7 @@ install_memory_cron() {
     local marker="# ${INSTALL_TAG} v${INSTALLER_VERSION}: memory rotation"
     local cron_block
     # CRON_TZ pins the schedule to UTC so the Day-2 diagnostic contract
-    # (04:30/05:00/06:00/06:30/21:00 UTC) fires at the same wall-clock moment
+    # (04:30/05:00/06:00/21:00 UTC) fires at the same wall-clock moment
     # regardless of the host's system timezone. HOME= is set because scripts
     # rely on $HOME under `set -u`; on some minimal images cron does not
     # always export HOME to the user's actual home directory.
@@ -2117,7 +2367,6 @@ HOME=${AGENT_HOME}
 30 4 * * * ${scripts_dst}/rotate-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 5 * * *  ${scripts_dst}/trim-hot.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 6 * * *  ${scripts_dst}/compress-warm.sh >> ${logs_dst}/memory-cron.log 2>&1
-30 6 * * * ${scripts_dst}/ov-session-sync.sh >> ${logs_dst}/memory-cron.log 2>&1
 0 21 * * * ${scripts_dst}/memory-rotate.sh >> ${logs_dst}/memory-cron.log 2>&1
 # ${INSTALL_TAG} memory rotation end
 CRON
@@ -2161,6 +2410,666 @@ PY
     fi
 
     ok "Memory cron installed: ${installed[*]}"
+}
+
+# =============================================================================
+# STEP 12b: AGENT GUARD (session reset, memory backup, watchdog, hooks) -- ON
+# =============================================================================
+
+# Scripts from lib/ go to GUARD_LIB_DIR (root-owned: the watchdog runs as root and
+# must never execute a file the agent can edit). guard.conf next to them carries
+# the install names; it holds no secrets.
+
+# _guard_conf_value <value> -- drops what guard.conf cannot hold (quotes, \, $, `, newlines).
+_guard_conf_value() {
+    printf '%s' "$1" | tr -d '"\\$`\n\r'
+}
+
+# _guard_conf_get <file> <KEY> -- a value from an existing guard.conf, empty if none.
+_guard_conf_get() {
+    [[ -f "$1" ]] || return 0
+    sed -n "s/^${2}=\"\\([^\"]*\\)\"\$/\\1/p" "$1" | tail -n 1
+}
+
+# _env_is_set <NAME> -- NEUROOTDEL_<NAME> is set, even to "" (FACT_GATE_* keys have no
+# EDGELAB_ name).
+_env_is_set() {
+    local new="NEUROOTDEL_$1"
+    [[ -n "${!new+x}" ]]
+}
+
+# _gate_conf_pick <existing> <KEY> -- NEUROOTDEL_<KEY> if set (an empty one clears), else the
+# value already in guard.conf.
+_gate_conf_pick() {
+    local new="NEUROOTDEL_$2"
+    if _env_is_set "$2"; then printf '%s' "${!new}"; else _guard_conf_get "$1" "$2"; fi
+}
+
+# _guard_conf_has <file> <KEY> -- the key is in an existing guard.conf (even with "").
+_guard_conf_has() {
+    [[ -f "$1" ]] && grep -q "^${2}=" "$1"
+}
+
+# render_guard_conf [existing] -- prints guard.conf. Answers from this run win; the
+# owner's own choices in an existing file (agents list, labels, alert route) are kept
+# when this run gave none.
+render_guard_conf() {
+    local existing="${1:-}"
+    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle
+    agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
+    wrules="$(env_value WEIGHT_RULES_KB)"
+    [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
+    [[ -z "$wrules" || "$wrules" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_RULES_KB '${wrules}' is not a number -- using 30."; wrules=""; }
+    wclaude="$(env_value WEIGHT_CLAUDE_KB)"
+    [[ -n "$wclaude" ]] || wclaude=$(_guard_conf_get "$existing" WEIGHT_CLAUDE_KB)
+    [[ -z "$wclaude" || "$wclaude" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_CLAUDE_KB '${wclaude}' is not a number -- using 40."; wclaude=""; }
+    labels=$(_guard_conf_get "$existing" AGENT_LABELS)
+    mode="$(env_value GUARD_ALERTS)"
+    [[ -n "$mode" ]] || mode=$(_guard_conf_get "$existing" ALERT_MODE)
+    case "${mode:-outbox}" in
+        outbox|telegram|log) mode="${mode:-outbox}" ;;
+        *) warn "NEUROOTDEL_GUARD_ALERTS='${mode}' is not outbox|telegram|log -- using outbox."; mode=outbox ;;
+    esac
+    chat="$(env_value GUARD_ALERT_CHAT_ID)"
+    [[ -n "$chat" ]] || chat=$(_guard_conf_get "$existing" ALERT_TG_CHAT_ID)
+    [[ -z "$chat" || "$chat" =~ ^-?[0-9]+$ ]] || { warn "Alert chat id '${chat}' is not a number -- ignored."; chat=""; }
+    # Fact-check gate: the agent's own bot id is the numeric part of its token (public, not a secret).
+    # Order: env (an empty one clears), then the key in guard.conf (an empty one stays empty),
+    # then, only when neither has it, the id from the token.
+    fself=$(_gate_conf_pick "$existing" FACT_GATE_SELF_IDS)
+    if ! _env_is_set FACT_GATE_SELF_IDS && ! _guard_conf_has "$existing" FACT_GATE_SELF_IDS && [[ "${JARVIS_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then fself="${BASH_REMATCH[1]}"; fi
+    [[ -z "$fself" || "$fself" =~ ^[0-9]+([\ ,]+[0-9]+)*$ ]] || { warn "FACT_GATE_SELF_IDS '${fself}' is not a list of ids -- ignored."; fself=""; }
+    fbots=$(_gate_conf_pick "$existing" FACT_GATE_BOT_IDS)
+    if ! _env_is_set FACT_GATE_BOT_IDS && ! _guard_conf_has "$existing" FACT_GATE_BOT_IDS && [[ "${RICHARD_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then fbots="${BASH_REMATCH[1]}"; fi
+    [[ -z "$fbots" || "$fbots" =~ ^[0-9]+([\ ,]+[0-9]+)*$ ]] || { warn "FACT_GATE_BOT_IDS '${fbots}' is not a list of ids -- ignored."; fbots=""; }
+    furl=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_URL)
+    [[ -z "$furl" || "$furl" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]] || { warn "FACT_GATE_CHIP_URL '${furl}' is not http(s)://host[:port] -- chip off."; furl=""; }
+    fenv=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_ENV)
+    [[ -z "$fenv" || "$fenv" =~ ^/[A-Za-z0-9._/-]+$ ]] || { warn "FACT_GATE_CHIP_ENV '${fenv}' is not an absolute path -- chip off."; fenv=""; }
+    fstyle=$(_gate_conf_pick "$existing" FACT_GATE_STYLE_BANNED)
+    cat <<EOF
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: settings of the agent guard scripts. No secrets here.
+# A re-run of the installer rewrites this file and keeps CHANNEL_AGENTS, AGENT_LABELS,
+# ALERT_MODE, ALERT_TG_CHAT_ID and the WEIGHT_* caps unless new values are given.
+# WEIGHT_RULES_KB / WEIGHT_CLAUDE_KB: caps of core/rules.md and CLAUDE.md in the nightly
+#                        memory weight watch (journals handoff/decisions: 15 KB, fixed).
+# ALERT_MODE: outbox   = alerts are JSON files in /var/lib/${AGENT_USER}-guard/outbox
+#                        (read them: python3 ${GUARD_LIB_DIR}/agents-guard.py --drain),
+#                        plus the log /var/log/${AGENT_USER}-guard.log;
+#             telegram = the same, and each alert is also sent by the Richard bot
+#                        (token from RICHARD_ENV) to ALERT_TG_CHAT_ID (default: owner);
+#             log      = only the log.
+# FACT_GATE_* (hooks/fact-check-gate.py, the check of a reply/edit before it is sent; kept on re-run):
+#   (an env NEUROOTDEL_FACT_GATE_<KEY> wins, set to "" it clears the key)
+#   SELF_IDS     the agent's own Telegram bot id(s) (default: from the Jarvis bot token);
+#   BOT_IDS      other bot accounts never taken for a person (default: the Richard bot id);
+#   CHIP_URL     optional Telegram user-account chip, http://host:port (empty = tag check and
+#                ready-post exception off, the gate makes no network calls);
+#   CHIP_ENV     file with CHIP_API_TOKEN=... readable by the agent (needed with CHIP_URL);
+#   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check).
+AGENT_USER="$(_guard_conf_value "$AGENT_USER")"
+AGENT_HOME="$(_guard_conf_value "$AGENT_HOME")"
+LIB_DIR="$(_guard_conf_value "$GUARD_LIB_DIR")"
+CONFIG_ROOT="$(_guard_conf_value "$CONFIG_ROOT")"
+CHANNEL_AGENTS="$(_guard_conf_value "${agents:-jarvis}")"
+MAIN_AGENT="jarvis"
+AGENT_LABELS="$(_guard_conf_value "${labels:-jarvis=Jarvis}")"
+OWNER_NAME="$(_guard_conf_value "$OPERATOR_NAME")"
+OWNER_TG_ID="$(_guard_conf_value "$TG_USER_ID")"
+OWNER_TIMEZONE="$(_guard_conf_value "${OPERATOR_TIMEZONE:-Europe/Moscow}")"
+RICHARD_UNIT="claude-richard"
+RICHARD_ENV="$(_guard_conf_value "${RICHARD_HOME}/.env")"
+ALERT_MODE="${mode}"
+ALERT_TG_CHAT_ID="$(_guard_conf_value "$chat")"
+WEIGHT_RULES_KB="${wrules:-30}"
+WEIGHT_CLAUDE_KB="${wclaude:-40}"
+FACT_GATE_SELF_IDS="$(_guard_conf_value "$fself")"
+FACT_GATE_BOT_IDS="$(_guard_conf_value "$fbots")"
+FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
+FACT_GATE_CHIP_ENV="$(_guard_conf_value "$fenv")"
+FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
+EOF
+}
+
+# _install_cron_file <name> <body> -- /etc/cron.d/<name>, root 0644, written atomically.
+_install_cron_file() {
+    local name=$1 body=$2 tmp
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    printf '%s\n' "$body" > "$tmp"
+    install -m 0644 -o root -g root "$tmp" "/etc/cron.d/${name}"
+}
+
+# add_hook <settings.json> <event> <matcher|""> <command> <timeout> [own-marker]
+# Adds one command hook unless an entry with the same matcher already runs the same
+# command (owner hooks are kept). own-regex matches OUR earlier command of that event
+# as a whole (anchored); such a command is replaced, so a changed port leaves one hook.
+# An owner command that merely calls the same script never matches the full pattern.
+add_hook() {
+    local file=$1 ev=$2 matcher=$3 cmd=$4 to=$5 own=${6:-}
+    merge_json_file "$file" '
+        .hooks = (.hooks // {})
+        | .hooks[$ev] = ((.hooks[$ev] // [])
+            | (if $own == "" then .
+               else map(if (.hooks | type) == "array"
+                        then .hooks |= map(select(((.command? // "") | test($own) and . != $cmd) | not))
+                        else . end)
+                    | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
+               end)
+            | if any(.[]?; ((.matcher // "") == $m) and any((.hooks // [])[]?; .command? == $cmd)) then .
+              else . + [((if $m == "" then {} else {matcher: $m} end)
+                         + {hooks: [{type: "command", command: $cmd, timeout: ($to | tonumber)}]})]
+              end)' \
+        --arg ev "$ev" --arg m "$matcher" --arg cmd "$cmd" --arg to "$to" --arg own "$own"
+}
+
+# _re_escape <text> -- the text as a literal inside a jq (Oniguruma) regex.
+_re_escape() {
+    printf '%s' "$1" | sed 's/[][\\.*^$+?(){}|]/\\&/g'
+}
+
+# setup_agent_hooks -- every hook goes into a settings.json the session REALLY reads:
+#   user  ~/.claude/settings.json (every session of the agent user, Richard's too: his
+#         cwd is the home dir): compact reminder, dangerous-command and protected-file stops,
+#         command log, review reminder;
+#   main agent: <plugin>/plugin/.claude/settings.json (claude runs with cwd plugin/):
+#         correction capture, auto-recall, critical thinking, fact-check gate, fallback reply,
+#         lessons at start, pre-compaction flush.
+# A file under <workspace>/.claude/settings.json would never load: claude does not run there.
+setup_agent_hooks() {
+    step 12 "Switching the agent hooks on (user + plugin settings.json)"
+
+    local lib="$GUARD_LIB_DIR" hooks="${GUARD_LIB_DIR}/hooks"
+    local user_settings="${AGENT_HOME}/.claude/settings.json"
+    local ws="${AGENT_HOME}/.claude-lab/jarvis/.claude"
+    local plugin_dir="${ws}/dashi-plugin-claude-code/plugin"
+    local plugin_settings="${plugin_dir}/.claude/settings.json"
+    local fact_state="${AGENT_HOME}/.claude-lab/shared/state/jarvis/factcheck"
+    local fail=0
+
+    add_hook "$user_settings" SessionStart compact "python3 ${lib}/compact-open-items-reminder.py" 20 || fail=1
+    add_hook "$user_settings" SessionStart startup "python3 ${lib}/compact-open-items-reminder.py" 20 || fail=1
+    add_hook "$user_settings" PreToolUse Bash "python3 ${hooks}/block-dangerous.py" 10 || fail=1
+    add_hook "$user_settings" PreToolUse 'Edit|Write|MultiEdit' "bash ${hooks}/protect-files.sh" 10 || fail=1
+    add_hook "$user_settings" PreToolUse Bash "bash ${hooks}/log-commands.sh" 5 || fail=1
+    add_hook "$user_settings" PostToolUse 'Edit|Write|MultiEdit' "bash ${hooks}/review-reminder.sh" 5 || fail=1
+    merge_json_file "$user_settings" '.env = (.env // {}) | (if .env | has("CLAUDE_CODE_AUTO_COMPACT_WINDOW") then . else .env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "400000" end)' || fail=1
+
+    if [[ -d "$plugin_dir" ]]; then
+        as_agent mkdir -p "${plugin_dir}/.claude" "$fact_state" || fail=1
+        local port
+        port=$(sed -n 's/^TELEGRAM_WEBHOOK_PORT=\([0-9]*\)$/\1/p' "${JARVIS_ENV_DIR}/channel.env" 2>/dev/null | tail -n 1)
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/correction-detector.py ${ws}" 10 || fail=1
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/auto-recall.py jarvis" 10 || fail=1
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/critical-check.py" 5 || fail=1
+        # The gate checks edits too; an entry of an earlier install (matcher reply only) is moved to the new matcher.
+        local fact_cmd="python3 ${hooks}/fact-check-gate.py ${fact_state}"
+        merge_json_file "$plugin_settings" '
+            if (.hooks.PreToolUse | type) == "array" then
+                .hooks.PreToolUse |= (map(if .matcher == $old and (.hooks | type) == "array"
+                                          then .hooks |= map(select(.command? != $cmd)) else . end)
+                                      | map(select((.hooks | type) != "array" or (.hooks | length) > 0)))
+            else . end' --arg old mcp__dashi-channel__reply --arg cmd "$fact_cmd" || fail=1
+        add_hook "$plugin_settings" PreToolUse 'mcp__dashi-channel__reply|mcp__dashi-channel__edit_message' "$fact_cmd" 10 || fail=1
+        add_hook "$plugin_settings" Stop "" "TELEGRAM_FALLBACK_REPLY_URL='http://127.0.0.1:${port:-8089}/hooks/fallback-reply' ${AGENT_HOME}/.bun/bin/bun '${plugin_dir}/scripts/fallback-reply-hook.ts'" 30 \
+            "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
+        add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1
+        add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh jarvis" 40 || fail=1
+    else
+        warn "Plugin dir ${plugin_dir} missing -- main agent hooks NOT set."
+        fail=1
+    fi
+
+    if [[ "$fail" -ne 0 ]]; then
+        err "Some hooks were NOT switched on -- see the warnings above."
+        return 1
+    fi
+    ok "Hooks on: ${user_settings} (all sessions), ${plugin_settings} (main agent)."
+}
+
+# install_agents_guard_cron -- the root watchdog, once a minute (stall, login, limit,
+# owner unanswered, restart queue). Alerts follow ALERT_MODE in guard.conf.
+install_agents_guard_cron() {
+    install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-guard"
+    _install_cron_file "${AGENT_USER}-agents-guard" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: agents guard (stall/login/limit/owner unanswered/restart queue).
+# Stop: touch /var/lib/${AGENT_USER}-guard/STOP ; alerts: python3 ${GUARD_LIB_DIR}/agents-guard.py --drain
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * root /usr/bin/python3 ${GUARD_LIB_DIR}/agents-guard.py >/dev/null 2>>/var/log/${AGENT_USER}-guard.err
+CRON
+)"
+}
+
+# install_memory_weight_cron -- the nightly weight watch of the always-loaded memory (rule 5b).
+# Hourly; --auto weighs only in the 04:xx hour of the owner's clock (OWNER_TIMEZONE in guard.conf),
+# after the 04:00 session reset, so the server timezone and clock changes do not matter.
+install_memory_weight_cron() {
+    install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-memory-weight"
+    _install_cron_file "${AGENT_USER}-memory-weight" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: memory weight watch (rule 5b): handoff/decisions > 15 KB,
+# core/rules.md > WEIGHT_RULES_KB, CLAUDE.md > WEIGHT_CLAUDE_KB (guard.conf) -> one signal to the agent a day.
+# Stop: touch /var/lib/${AGENT_USER}-memory-weight/STOP ; remove this file to uninstall.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+20 * * * * root /usr/bin/python3 ${GUARD_LIB_DIR}/memory_weight_watch.py --auto >> /var/log/${AGENT_USER}-memory-weight.log 2>&1
+CRON
+)"
+}
+
+# install_service_watch_cron <shared_state> -- the small watchdogs, all on from the start.
+# Alerts of the root ones go through outbox-put.py (ALERT_MODE in guard.conf).
+install_service_watch_cron() {
+    local st=$1 u="$AGENT_USER" lib="$GUARD_LIB_DIR"
+    as_agent mkdir -p "${st}/disk-clean" "${st}/claude-usage" "${st}/command-log" "${st}/review-reminder" \
+        || die "Could not create watchdog state dirs as ${u}."
+    _install_cron_file "${u}-service-watch" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: service watchdogs. Remove this file to uninstall all five.
+# Stops: resource   touch /var/lib/${u}-resource/STOP
+#        disk-clean touch ${st}/disk-clean/STOP
+#        manifest   touch /var/lib/${u}-cron-manifest/STOP
+#        autosync   touch /var/lib/${u}-autosync/STOP
+#        usage      touch ${st}/claude-usage/STOP   (report: python3 ${lib}/claude-usage-digest.py)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root /usr/bin/flock -n /run/${u}-resource.lock /bin/bash ${lib}/resource-watchdog.sh >/dev/null 2>>/var/log/${u}-resource.err
+*/10 * * * * ${u} /bin/bash ${lib}/disk-clean-old.sh >/dev/null 2>>${st}/disk-clean/cron.err
+23 * * * * root /bin/bash ${lib}/cron-manifest-watchdog.sh >/dev/null 2>>/var/log/${u}-cron-manifest.err
+*/30 * * * * root /usr/bin/flock -n /run/${u}-autosync.lock /bin/bash ${lib}/agents-git-autosync.sh >/dev/null 2>>/var/log/${u}-autosync.err
+17 * * * * ${u} [ -e ${st}/claude-usage/STOP ] || /usr/bin/timeout 900 /usr/bin/python3 ${lib}/claude-usage-collector.py >/dev/null 2>&1
+CRON
+)"
+}
+
+install_guard() {
+    step 12 "Installing agent guard: session reset, memory backup, watchdog (cron ON)"
+
+    local src="${INSTALLER_ROOT}/lib"
+    [[ -d "$src" ]] || die "lib/ directory missing at ${INSTALLER_ROOT} -- guard scripts cannot be installed."
+
+    install -d -m 0755 -o root -g root "$GUARD_LIB_DIR"
+    install -d -m 0755 -o root -g root "${GUARD_LIB_DIR}/hooks"
+    local f
+    for f in "$src"/*.py "$src"/*.sh "$src"/hooks/*.py "$src"/hooks/*.sh; do
+        [[ -f "$f" ]] || continue
+        install -m 0755 -o root -g root "$f" "${GUARD_LIB_DIR}/${f#"$src"/}"
+    done
+
+    local conf="${GUARD_LIB_DIR}/guard.conf" conf_tmp
+    conf_tmp=$(mktemp)
+    TMPFILES+=("$conf_tmp")
+    render_guard_conf "$conf" > "$conf_tmp"
+    install -m 0644 -o root -g root "$conf_tmp" "$conf"
+
+    # State and backup dirs live in the agent's home: created BY the agent user, so a
+    # path the agent swapped for a symlink never hands it a root-owned target.
+    local shared_state="${AGENT_HOME}/.claude-lab/shared/state"
+    as_agent mkdir -p "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
+        "${AGENT_HOME}/backups/memory" \
+        || die "Could not create guard state dirs as ${AGENT_USER}."
+    as_agent chmod 0700 "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
+        "${AGENT_HOME}/backups" "${AGENT_HOME}/backups/memory" || true
+
+    systemctl enable --now cron 2>/dev/null \
+        || warn "cron service not started -- guard jobs will run after next reboot."
+
+    local reset_state="${shared_state}/agents-reset"
+    _install_cron_file "${AGENT_USER}-agents-reset" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: session reset of the channel agents (agents-reset.sh).
+# Every 10 min; --auto picks the run by the owner's clock (OWNER_TIMEZONE in guard.conf),
+# so the server timezone does not matter: nightly 04:00, by context size 06:00-22:59.
+# Stop: touch ${reset_state}/STOP ; remove this file to uninstall. Log: ${reset_state}/agents-reset.log
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+*/10 * * * * ${AGENT_USER} /usr/bin/flock -n ${reset_state}/run.lock /bin/bash ${GUARD_LIB_DIR}/agents-reset.sh --auto >> ${reset_state}/cron.log 2>&1
+CRON
+)"
+
+    local bk="${AGENT_HOME}/backups/memory"
+    _install_cron_file "${AGENT_USER}-memory-backup" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: nightly local backup of the agents' memory (memory-backup.sh).
+# Hourly; --auto backs up only at 03:30 by the owner's clock, before the 04:00 reset.
+# Stop: touch ${bk}/STOP (or delete this file).
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+30 * * * * ${AGENT_USER} /bin/bash ${GUARD_LIB_DIR}/memory-backup.sh --auto >> ${bk}/backup.log 2>&1
+CRON
+)"
+
+    install_agents_guard_cron
+    install_service_watch_cron "$shared_state"
+    install_memory_weight_cron
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight}"
+}
+
+# =============================================================================
+# STEP 12c: GROUP WATCH (wakes the agent on group messages) -- files always, ON only with a chip
+# =============================================================================
+
+# The channel plugin does not see group updates. lib/group-watch.py reads a group through a
+# Telegram user-account chip and wakes the agent via its webhook. The installer has no chip,
+# so the unit is only written; one instance is enabled when this run names a group and a chip:
+#   NEUROOTDEL_GROUP_WATCH_CHAT_ID  group id (-100...)       NEUROOTDEL_GROUP_WATCH_CHIP  http://127.0.0.1:<port>
+# optional: _NAME (instance, default main), _TITLE, _AGENT (default jarvis), _BOT_ID (default: from the
+# agent's bot token), _BOT_USERNAME, _CHIP_ENV_FILE, _ALL_HUMAN (0|1, default 0), _NAME_REGEX,
+# _PEER_BOT_IDS, _IGNORE_IDS, _BOT_WAKES_PER_HOUR, _WHISPER_URL, _FEED (0|1), _STAGING_UID.
+# Stop: touch /var/lib/<user>-group-watch/<name>/STOP, or systemctl disable --now <user>-group-watch@<name>.
+
+# _gw_clean <value> -- one line for a systemd EnvironmentFile: no quotes, backslashes, $, backticks, newlines.
+_gw_clean() {
+    printf '%s' "$1" | tr -d '"\\$`\n\r'
+}
+
+# _gw_quoted <value> -- a value written in single quotes (systemd keeps it literal, backslashes too).
+_gw_quoted() {
+    printf '%s' "$1" | tr -d "'\n\r"
+}
+
+# _gw_bot_id <channel.env> -- the numeric part of the bot token (the bot's public id); the token is never printed.
+_gw_bot_id() {
+    [[ -f "$1" ]] || return 0
+    sed -n 's/^TELEGRAM_BOT_TOKEN=["]\{0,1\}\([0-9][0-9]*\):.*/\1/p' "$1" | tail -n 1
+}
+
+# _gw_bot_username <agent> <channel.env> -- the bot's @username without @: NEUROOTDEL_GROUP_WATCH_BOT_USERNAME,
+# else this run's Jarvis answer (agent jarvis only), else getMe with the agent's own token (never printed).
+_gw_bot_username() {
+    local agent=$1 envf=$2 user token resp
+    user="$(env_value GROUP_WATCH_BOT_USERNAME)"
+    if [[ -z "$user" && "$agent" == jarvis ]]; then
+        user="${JARVIS_BOT_USERNAME:-}"
+    fi
+    if [[ -z "$user" && -f "$envf" ]]; then
+        token=$(sed -n 's/^TELEGRAM_BOT_TOKEN=["]\{0,1\}\([^"]*\)["]\{0,1\}$/\1/p' "$envf" | tail -n 1)
+        if [[ -n "$token" ]] && validate_tg_token "$token"; then
+            resp=$(tg_get_me "$token")
+            user=$(printf '%s' "$resp" | jq -r 'if .ok == true then (.result.username // "") else "" end' 2>/dev/null || true)
+        fi
+    fi
+    printf '%s' "${user#@}"
+}
+
+# render_group_watch_unit -- the template unit, one instance per group.
+render_group_watch_unit() {
+    local conf_dir=$1
+    cat <<EOF
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: group watcher (lib/group-watch.py), one instance per group.
+# Settings: ${conf_dir}/%i.env. Stop: touch /var/lib/${AGENT_USER}-group-watch/%i/STOP
+# or: systemctl disable --now ${AGENT_USER}-group-watch@%i
+[Unit]
+Description=Group watcher %i: wakes the agent on messages in a Telegram group (user-account chip)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=${conf_dir}/%i.env
+
+[Service]
+Type=simple
+EnvironmentFile=${conf_dir}/%i.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 ${GUARD_LIB_DIR}/group-watch.py
+Restart=on-failure
+RestartSec=30
+# 2 = settings incomplete: fix the env file instead of restarting forever.
+RestartPreventExitStatus=2
+# Group texts in the state dir stay private to root.
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# render_group_watch_env <name> <chat_id> <chip> -- the instance's env file from NEUROOTDEL_GROUP_WATCH_*.
+# Prints nothing and returns 1 when a value is malformed.
+render_group_watch_env() {
+    local name=$1 chat=$2 chip=$3
+    local agent title bot_id bot_user chip_env all_human name_re peers ignore bot_cap whisper feed staging_uid
+    agent="$(env_value GROUP_WATCH_AGENT)"; agent="${agent:-jarvis}"
+    title="$(_gw_quoted "$(env_value GROUP_WATCH_TITLE)")"
+    bot_id="$(env_value GROUP_WATCH_BOT_ID)"
+    [[ -n "$bot_id" ]] || bot_id="$(_gw_bot_id "${CONFIG_ROOT}/${agent}/channel.env")"
+    bot_user="$(_gw_bot_username "$agent" "${CONFIG_ROOT}/${agent}/channel.env")"
+    chip_env="$(_gw_clean "$(env_value GROUP_WATCH_CHIP_ENV_FILE)")"
+    all_human="$(env_value GROUP_WATCH_ALL_HUMAN)"; all_human="${all_human:-0}"
+    name_re="$(_gw_quoted "$(env_value GROUP_WATCH_NAME_REGEX)")"
+    peers="$(env_value GROUP_WATCH_PEER_BOT_IDS)"
+    ignore="$(env_value GROUP_WATCH_IGNORE_IDS)"
+    bot_cap="$(env_value GROUP_WATCH_BOT_WAKES_PER_HOUR)"; bot_cap="${bot_cap:-6}"
+    whisper="$(env_value GROUP_WATCH_WHISPER_URL)"
+    feed="$(env_value GROUP_WATCH_FEED)"; feed="${feed:-0}"
+    staging_uid="$(env_value GROUP_WATCH_STAGING_UID)"
+    [[ -n "$staging_uid" ]] || staging_uid="$(id -u "$AGENT_USER" 2>/dev/null || true)"
+    local bad=""
+    [[ "$name" =~ ^[a-z0-9-]{1,32}$ ]] || bad+=" NAME"
+    [[ "$chat" =~ ^-[0-9]+$ ]] || bad+=" CHAT_ID"
+    [[ "$chip" =~ ^http://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] || bad+=" CHIP"
+    [[ "$agent" =~ ^[a-z0-9-]+$ ]] || bad+=" AGENT"
+    [[ "$bot_id" =~ ^[0-9]+$ ]] || bad+=" BOT_ID"
+    [[ "$bot_user" =~ ^[A-Za-z0-9_]{3,64}$ ]] || bad+=" BOT_USERNAME"   # the tag is the default call: required
+    [[ "$all_human" =~ ^[01]$ ]] || bad+=" ALL_HUMAN"
+    [[ "$feed" =~ ^[01]$ ]] || bad+=" FEED"
+    [[ "$peers" =~ ^[0-9,\ ]*$ ]] || bad+=" PEER_BOT_IDS"
+    [[ "$ignore" =~ ^[0-9,\ ]*$ ]] || bad+=" IGNORE_IDS"
+    [[ "$bot_cap" =~ ^[0-9]+$ ]] || bad+=" BOT_WAKES_PER_HOUR"
+    [[ -z "$whisper" || "$whisper" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]] || bad+=" WHISPER_URL"
+    [[ "$staging_uid" =~ ^[0-9]+$ ]] || bad+=" STAGING_UID"
+    if [[ -n "$bad" ]]; then
+        warn "Group watch: bad NEUROOTDEL_GROUP_WATCH_{${bad# }} -- instance not written."
+        return 1
+    fi
+    cat <<EOF
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: group watcher instance ${name}. A re-run with
+# NEUROOTDEL_GROUP_WATCH_CHAT_ID rewrites this file; without it the file is kept as is.
+GW_CHAT_ID=${chat}
+GW_TITLE='${title}'
+GW_CHIP=${chip%/}
+GW_CHIP_ENV_FILE=${chip_env}
+GW_AGENT=${agent}
+GW_BOT_ID=${bot_id}
+GW_BOT_USERNAME=${bot_user}
+GW_ALL_HUMAN=${all_human}
+GW_NAME_REGEX='${name_re}'
+GW_PEER_BOT_IDS=${peers}
+GW_IGNORE_IDS=${ignore}
+GW_BOT_WAKES_PER_HOUR=${bot_cap}
+GW_WHISPER_URL=${whisper}
+GW_FEED=${feed}
+GW_BASE=/var/lib/${AGENT_USER}-group-watch/${name}
+GW_STAGING=/dev/shm/${AGENT_USER}-group-watch-${name}
+GW_STAGING_UID=${staging_uid}
+EOF
+}
+
+# install_group_watch -- template unit always; one instance on only with CHAT_ID + CHIP.
+install_group_watch() {
+    local unit_dir="${GROUP_WATCH_SYSTEMD_DIR:-/etc/systemd/system}"
+    local conf_dir="${GROUP_WATCH_CONF_DIR:-/etc/${AGENT_USER}/group-watch}"
+    local unit="${AGENT_USER}-group-watch@"
+    local tmp
+    tmp=$(mktemp); TMPFILES+=("$tmp")
+    render_group_watch_unit "$conf_dir" >"$tmp"
+    install -m 0644 -o root -g root "$tmp" "${unit_dir}/${unit}.service"
+    install -d -m 0750 -o root -g root "$conf_dir"
+
+    local chat chip name
+    chat="$(env_value GROUP_WATCH_CHAT_ID)"
+    chip="$(env_value GROUP_WATCH_CHIP)"
+    name="$(env_value GROUP_WATCH_NAME)"; name="${name:-main}"
+    if [[ -z "$chat" || -z "$chip" ]]; then
+        GROUP_WATCH_STATUS="off"
+        log "Group watch: unit ${unit}.service written, not enabled (no NEUROOTDEL_GROUP_WATCH_CHAT_ID/CHIP)."
+        return 0
+    fi
+    local env_tmp
+    env_tmp=$(mktemp); TMPFILES+=("$env_tmp")
+    if ! render_group_watch_env "$name" "$chat" "$chip" >"$env_tmp"; then
+        GROUP_WATCH_STATUS="error"
+        return 0
+    fi
+    install -m 0640 -o root -g root "$env_tmp" "${conf_dir}/${name}.env"
+    local agent allowed
+    agent=$(sed -n 's/^GW_AGENT=//p' "${conf_dir}/${name}.env")
+    allowed=$(sed -n 's/^TELEGRAM_ALLOWED_CHAT_IDS=["]\{0,1\}\([^"]*\)["]\{0,1\}$/\1/p' "${CONFIG_ROOT}/${agent}/channel.env" 2>/dev/null | tail -n 1)
+    if [[ ",${allowed}," != *",${chat},"* ]]; then
+        warn "Group watch: ${chat} is not in TELEGRAM_ALLOWED_CHAT_IDS of ${CONFIG_ROOT}/${agent}/channel.env -- the helper refuses to wake for it until it is added."
+    fi
+    systemctl daemon-reload
+    # restart, not start: a re-run must pick up the rewritten env file.
+    if systemctl enable "${unit}${name}.service" --quiet && systemctl restart "${unit}${name}.service"; then
+        GROUP_WATCH_STATUS="on:${name}"
+        ok "Group watch ${name} on for chat ${chat} (${unit}${name})."
+    else
+        GROUP_WATCH_STATUS="error"
+        warn "Group watch ${name}: enable failed -- check 'journalctl -u ${unit}${name}'."
+    fi
+}
+
+# _AGENT_FILE_PY -- runs AS THE AGENT USER (never root) on a path inside the agent's home,
+# so a symlink the agent planted can only point root's work at the agent's own files.
+#   write  <dst> <mode> <if_absent 0|1>   content on stdin; atomic replace; rc 4 = kept as is
+#   block  <file> <tag> <name> <body>     the BEGIN/END block of <name>; bytes outside stay as
+#                                         they are; rc 3 = ambiguous markers, 4 = no change
+# The final path component must not be a symlink (O_NOFOLLOW); a missing file for "block" = 5.
+_AGENT_FILE_PY=$(cat <<'PY'
+import os, sys, tempfile
+
+def nofollow_read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+def atomic_write(path, data, mode):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".inst.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+op = sys.argv[1]
+if op == "write":
+    dst, mode, if_absent = sys.argv[2], int(sys.argv[3], 8), sys.argv[4] == "1"
+    if os.path.islink(dst):
+        sys.exit(3)
+    if if_absent and os.path.lexists(dst):
+        sys.exit(4)
+    atomic_write(dst, sys.stdin.buffer.read(), mode)
+    sys.exit(0)
+
+path, tag, name, body = sys.argv[2:6]
+if not os.path.lexists(path):
+    sys.exit(5)
+try:
+    text = nofollow_read(path)
+except OSError:
+    sys.exit(3)
+begin = f"<!-- BEGIN {tag}: {name} -->".encode()
+end = f"<!-- END {tag}: {name} -->".encode()
+lines = text.splitlines(keepends=True)
+bare = [ln.rstrip(b"\r\n") for ln in lines]
+bi = [i for i, ln in enumerate(bare) if ln == begin]
+ei = [i for i, ln in enumerate(bare) if ln == end]
+# Any other line carrying the marker text (inline, indented) is ambiguous too.
+loose = sum(1 for ln in bare if (begin in ln or end in ln) and ln not in (begin, end))
+nl = b"\r\n" if b"\r\n" in text else b"\n"
+block = [begin + nl] + [ln.encode() + nl for ln in body.rstrip("\n").split("\n")] + [end + nl]
+if loose or len(bi) > 1 or len(ei) > 1 or len(bi) != len(ei) or (bi and ei[0] < bi[0]):
+    sys.exit(3)
+if bi:
+    tail = lines[ei[0]]
+    if not tail.endswith((b"\n", b"\r")):
+        block[-1] = block[-1].rstrip(b"\r\n")
+    new = b"".join(lines[: bi[0]] + block + lines[ei[0] + 1 :])
+else:
+    sep = b"" if not text else (nl if text.endswith((b"\n", b"\r")) else nl + nl)
+    new = text + sep + b"".join(block)
+if new == text:
+    sys.exit(4)
+atomic_write(path, new, os.stat(path, follow_symlinks=False).st_mode & 0o7777)
+PY
+)
+
+# _agent_write <src> <dst> <mode> [if_absent 0|1] -- the file goes in BY the agent user.
+_agent_write() {
+    local src=$1 dst=$2 mode=$3 if_absent=${4:-0} rc=0
+    as_agent python3 -c "$_AGENT_FILE_PY" write "$dst" "$mode" "$if_absent" <"$src" || rc=$?
+    case "$rc" in
+        0|4) return 0 ;;
+        3) warn "${dst} is a symlink -- not written."; return 1 ;;
+        *) warn "${dst} not written."; return 1 ;;
+    esac
+}
+
+# _ensure_marked_block <file> <name> <body> -- the installer's own lines in a file the
+# owner also edits live ONLY between "<!-- BEGIN <tag>: <name> -->" and the matching END.
+# One clean pair: the body between them is replaced; no markers: the block is appended;
+# anything else (two BEGINs, END first, marker inside a line): left alone, rc 1.
+_ensure_marked_block() {
+    local file=$1 name=$2 body=$3 rc=0
+    as_agent python3 -c "$_AGENT_FILE_PY" block "$file" "$INSTALL_TAG" "$name" "$body" </dev/null || rc=$?
+    case "$rc" in
+        0|4) return 0 ;;
+        5) warn "${file} missing -- block '${name}' not added."; return 1 ;;
+        3) warn "${file}: markers of '${name}' are ambiguous or the file is a symlink -- left as it is."; return 1 ;;
+        *) warn "${file}: block '${name}' not written."; return 1 ;;
+    esac
+}
+
+# install_team_refs -- the shared team references, code style rules and the memory layout.
+#   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
+#                                      between markers in the agent's CLAUDE.md;
+#   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
+#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
+#     library/INDEX.md, core/archive/.
+# Every file lands through the agent user (_agent_write), never a root write into its home.
+install_team_refs() {
+    step 12 "Installing team rules, references, code style rules, memory layout"
+
+    local tdir="${TEMPLATES_DIR}"
+    local shared="${AGENT_HOME}/.claude-lab/shared"
+    local ws="${AGENT_HOME}/.claude-lab/jarvis/.claude"
+    # Auto memory sits under the git root the session runs in (the plugin clone).
+    local mem_dir
+    mem_dir="${AGENT_HOME}/.claude/projects/$(printf '%s' "${ws}/dashi-plugin-claude-code" | sed 's/[^A-Za-z0-9]/-/g')/memory"
+    local fail=0 f tmp
+
+    as_agent mkdir -p "$shared" "${AGENT_HOME}/.claude/rules" "$mem_dir" \
+        "${ws}/core/archive" "${ws}/library" || die "Could not create reference dirs as ${AGENT_USER}."
+
+    for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER; do
+        tmp=$(mktemp)
+        TMPFILES+=("$tmp")
+        render_template "${tdir}/shared/${f}.md" "$tmp" \
+            USER_NAME "$OPERATOR_NAME" LIB "$GUARD_LIB_DIR" CONFIG_ROOT "$CONFIG_ROOT" USER "$AGENT_USER"
+        if [[ "$f" == team-rules ]]; then
+            _agent_write "$tmp" "${shared}/${f}.md" 0644 0 || fail=1
+        else
+            _agent_write "$tmp" "${shared}/${f}.md" 0644 1 || fail=1
+        fi
+    done
+
+    for f in bash python typescript; do
+        _agent_write "${tdir}/rules/${f}.md" "${AGENT_HOME}/.claude/rules/${f}.md" 0644 1 || fail=1
+    done
+
+    for f in MEMORY index-work index-people index-content index-infra; do
+        _agent_write "${tdir}/memory/${f}.md" "${mem_dir}/${f}.md" 0644 1 || fail=1
+    done
+    _agent_write "${tdir}/memory/library-INDEX.md" "${ws}/library/INDEX.md" 0644 1 || fail=1
+
+    _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+
+    if [[ "$fail" -ne 0 ]]; then
+        err "Team references are not all in place -- see the warnings above."
+        return 1
+    fi
+    ok "Team rules on (@ in ${ws}/CLAUDE.md); references in ${shared}; memory layout in ${mem_dir}."
 }
 
 # =============================================================================
@@ -2288,6 +3197,29 @@ rollback_to_gateway() {
 # FINAL BANNER
 # =============================================================================
 
+# report_claude_plan [credentials.json] -- prints the plan of the Claude account the
+# agents run on (subscriptionType only; tokens are never read out). "pro" gets a
+# warning: its usage limit stops a working agent for hours several times a day.
+report_claude_plan() {
+    local cred=${1:-"${AGENT_HOME}/.claude/.credentials.json"} plan
+    if [[ ! -s "$cred" ]]; then
+        warn "Claude account: not logged in yet. After 'claude auth login' check the plan:"
+        warn "  sudo -u ${AGENT_USER} jq -r .claudeAiOauth.subscriptionType ${cred}"
+        return 0
+    fi
+    plan=$(jq -r '.claudeAiOauth.subscriptionType // "unknown" | tostring | .[0:32]' "$cred" 2>/dev/null) || plan="unreadable"
+    plan=${plan//[^A-Za-z0-9_.-]/}
+    case "${plan,,}" in
+        pro)
+            warn "Claude account plan: pro -- too small for agents that work all day: the usage limit"
+            warn "  stops them for hours. Use Max (max) for this server." ;;
+        "")
+            warn "Claude account plan: unknown" ;;
+        *)
+            ok "Claude account plan: ${plan}" ;;
+    esac
+}
+
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
@@ -2320,6 +3252,7 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         sudo -u ${AGENT_USER} -i bash -lc 'claude auth login'
 
       Credentials land in ${AGENT_HOME}/.claude/ and are shared by both agents.
+      Check the plan (must not be "pro"): sudo -u ${AGENT_USER} jq -r .claudeAiOauth.subscriptionType ${AGENT_HOME}/.claude/.credentials.json
 
   $(printf '%b' "$C_YELLOW")2.$(printf '%b' "$C_NC") If tokens were skipped during install, fill them now and restart:
 
@@ -2352,7 +3285,15 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # 10
         ls ${AGENT_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
 
-  $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
+  $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Group watch (status: ${GROUP_WATCH_STATUS:-off}). Jarvis does not see group messages by itself;
+      with a Telegram user-account chip on this server, turn it on for a group (its id also goes into
+      TELEGRAM_ALLOWED_CHAT_IDS of ${JARVIS_ENV_DIR}/channel.env):
+
+        sudo NEUROOTDEL_GROUP_WATCH_CHAT_ID=<-100...> NEUROOTDEL_GROUP_WATCH_CHIP=http://127.0.0.1:<port> bash install.sh
+        # every human message wakes it only with NEUROOTDEL_GROUP_WATCH_ALL_HUMAN=1 (default: tag/reply/name)
+        # stop: sudo touch /var/lib/${AGENT_USER}-group-watch/main/STOP && sudo systemctl disable --now ${AGENT_USER}-group-watch@main
+
+  $(printf '%b' "$C_YELLOW")5.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
       If Jarvis dies, the student messages Richard:  ${richard_label}
 
 EOF
@@ -2394,7 +3335,12 @@ main() {
     install_superpowers
     install_sudoers
     install_memory_cron
+    install_guard
+    install_group_watch
+    setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
+    install_team_refs || die "Team references are not all in place; fix the warnings above and re-run the installer."
     enable_services
+    report_claude_plan
     final_instructions
 }
 

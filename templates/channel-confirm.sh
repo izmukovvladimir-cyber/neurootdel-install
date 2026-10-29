@@ -21,6 +21,18 @@ for _ in $(seq 1 40); do   # ~80с максимум
   # первый владеет процессом, остальные systemd считает мёртвыми (inactive).
   vis="$(tmux -L "$sess" capture-pane -t "$sess" -p 2>/dev/null || true)"
   if grep -qE "$ready_re" <<<"$vis"; then
+    # An automatic restart (agents-reset.sh, agents-guard.py) leaves a one-shot quiet
+    # marker; that restart must not nudge the agent, because the nudge made it re-send an
+    # already answered message to a person. Manual restarts keep the nudge.
+    quiet="${HOME:-/nonexistent}/.claude-lab/shared/state/quiet-restart/$sess"
+    if [ -f "$quiet" ] && [ ! -L "$quiet" ]; then
+      qts="$(tr -dc '0-9' < "$quiet" 2>/dev/null || true)"
+      rm -f "$quiet" 2>/dev/null || true
+      if [ -n "$qts" ] && [ $(( $(date +%s) - qts )) -lt 600 ]; then
+        echo "channel-confirm: quiet restart, resume-nudge skipped for $sess" >&2
+        exit 0
+      fi
+    fi
     # 2026-07-06 (Vladimir + Richard): every restart used to leave the agent
     # sitting on a blank prompt until the next inbound message — nobody told
     # it to look at its own memory. Nudge it once, here, so it resumes
