@@ -2687,6 +2687,190 @@ CRON
     ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight}"
 }
 
+# =============================================================================
+# STEP 12c: GROUP WATCH (wakes the agent on group messages) -- files always, ON only with a chip
+# =============================================================================
+
+# The channel plugin does not see group updates. lib/group-watch.py reads a group through a
+# Telegram user-account chip and wakes the agent via its webhook. The installer has no chip,
+# so the unit is only written; one instance is enabled when this run names a group and a chip:
+#   NEUROOTDEL_GROUP_WATCH_CHAT_ID  group id (-100...)       NEUROOTDEL_GROUP_WATCH_CHIP  http://127.0.0.1:<port>
+# optional: _NAME (instance, default main), _TITLE, _AGENT (default jarvis), _BOT_ID (default: from the
+# agent's bot token), _BOT_USERNAME, _CHIP_ENV_FILE, _ALL_HUMAN (0|1, default 0), _NAME_REGEX,
+# _PEER_BOT_IDS, _IGNORE_IDS, _BOT_WAKES_PER_HOUR, _WHISPER_URL, _FEED (0|1), _STAGING_UID.
+# Stop: touch /var/lib/<user>-group-watch/<name>/STOP, or systemctl disable --now <user>-group-watch@<name>.
+
+# _gw_clean <value> -- one line for a systemd EnvironmentFile: no quotes, backslashes, $, backticks, newlines.
+_gw_clean() {
+    printf '%s' "$1" | tr -d '"\\$`\n\r'
+}
+
+# _gw_quoted <value> -- a value written in single quotes (systemd keeps it literal, backslashes too).
+_gw_quoted() {
+    printf '%s' "$1" | tr -d "'\n\r"
+}
+
+# _gw_bot_id <channel.env> -- the numeric part of the bot token (the bot's public id); the token is never printed.
+_gw_bot_id() {
+    [[ -f "$1" ]] || return 0
+    sed -n 's/^TELEGRAM_BOT_TOKEN=["]\{0,1\}\([0-9][0-9]*\):.*/\1/p' "$1" | tail -n 1
+}
+
+# _gw_bot_username <agent> <channel.env> -- the bot's @username without @: NEUROOTDEL_GROUP_WATCH_BOT_USERNAME,
+# else this run's Jarvis answer (agent jarvis only), else getMe with the agent's own token (never printed).
+_gw_bot_username() {
+    local agent=$1 envf=$2 user token resp
+    user="$(env_value GROUP_WATCH_BOT_USERNAME)"
+    if [[ -z "$user" && "$agent" == jarvis ]]; then
+        user="${JARVIS_BOT_USERNAME:-}"
+    fi
+    if [[ -z "$user" && -f "$envf" ]]; then
+        token=$(sed -n 's/^TELEGRAM_BOT_TOKEN=["]\{0,1\}\([^"]*\)["]\{0,1\}$/\1/p' "$envf" | tail -n 1)
+        if [[ -n "$token" ]] && validate_tg_token "$token"; then
+            resp=$(tg_get_me "$token")
+            user=$(printf '%s' "$resp" | jq -r 'if .ok == true then (.result.username // "") else "" end' 2>/dev/null || true)
+        fi
+    fi
+    printf '%s' "${user#@}"
+}
+
+# render_group_watch_unit -- the template unit, one instance per group.
+render_group_watch_unit() {
+    local conf_dir=$1
+    cat <<EOF
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: group watcher (lib/group-watch.py), one instance per group.
+# Settings: ${conf_dir}/%i.env. Stop: touch /var/lib/${AGENT_USER}-group-watch/%i/STOP
+# or: systemctl disable --now ${AGENT_USER}-group-watch@%i
+[Unit]
+Description=Group watcher %i: wakes the agent on messages in a Telegram group (user-account chip)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=${conf_dir}/%i.env
+
+[Service]
+Type=simple
+EnvironmentFile=${conf_dir}/%i.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 ${GUARD_LIB_DIR}/group-watch.py
+Restart=on-failure
+RestartSec=30
+# 2 = settings incomplete: fix the env file instead of restarting forever.
+RestartPreventExitStatus=2
+# Group texts in the state dir stay private to root.
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# render_group_watch_env <name> <chat_id> <chip> -- the instance's env file from NEUROOTDEL_GROUP_WATCH_*.
+# Prints nothing and returns 1 when a value is malformed.
+render_group_watch_env() {
+    local name=$1 chat=$2 chip=$3
+    local agent title bot_id bot_user chip_env all_human name_re peers ignore bot_cap whisper feed staging_uid
+    agent="$(env_value GROUP_WATCH_AGENT)"; agent="${agent:-jarvis}"
+    title="$(_gw_quoted "$(env_value GROUP_WATCH_TITLE)")"
+    bot_id="$(env_value GROUP_WATCH_BOT_ID)"
+    [[ -n "$bot_id" ]] || bot_id="$(_gw_bot_id "${CONFIG_ROOT}/${agent}/channel.env")"
+    bot_user="$(_gw_bot_username "$agent" "${CONFIG_ROOT}/${agent}/channel.env")"
+    chip_env="$(_gw_clean "$(env_value GROUP_WATCH_CHIP_ENV_FILE)")"
+    all_human="$(env_value GROUP_WATCH_ALL_HUMAN)"; all_human="${all_human:-0}"
+    name_re="$(_gw_quoted "$(env_value GROUP_WATCH_NAME_REGEX)")"
+    peers="$(env_value GROUP_WATCH_PEER_BOT_IDS)"
+    ignore="$(env_value GROUP_WATCH_IGNORE_IDS)"
+    bot_cap="$(env_value GROUP_WATCH_BOT_WAKES_PER_HOUR)"; bot_cap="${bot_cap:-6}"
+    whisper="$(env_value GROUP_WATCH_WHISPER_URL)"
+    feed="$(env_value GROUP_WATCH_FEED)"; feed="${feed:-0}"
+    staging_uid="$(env_value GROUP_WATCH_STAGING_UID)"
+    [[ -n "$staging_uid" ]] || staging_uid="$(id -u "$AGENT_USER" 2>/dev/null || true)"
+    local bad=""
+    [[ "$name" =~ ^[a-z0-9-]{1,32}$ ]] || bad+=" NAME"
+    [[ "$chat" =~ ^-[0-9]+$ ]] || bad+=" CHAT_ID"
+    [[ "$chip" =~ ^http://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] || bad+=" CHIP"
+    [[ "$agent" =~ ^[a-z0-9-]+$ ]] || bad+=" AGENT"
+    [[ "$bot_id" =~ ^[0-9]+$ ]] || bad+=" BOT_ID"
+    [[ "$bot_user" =~ ^[A-Za-z0-9_]{3,64}$ ]] || bad+=" BOT_USERNAME"   # the tag is the default call: required
+    [[ "$all_human" =~ ^[01]$ ]] || bad+=" ALL_HUMAN"
+    [[ "$feed" =~ ^[01]$ ]] || bad+=" FEED"
+    [[ "$peers" =~ ^[0-9,\ ]*$ ]] || bad+=" PEER_BOT_IDS"
+    [[ "$ignore" =~ ^[0-9,\ ]*$ ]] || bad+=" IGNORE_IDS"
+    [[ "$bot_cap" =~ ^[0-9]+$ ]] || bad+=" BOT_WAKES_PER_HOUR"
+    [[ -z "$whisper" || "$whisper" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]] || bad+=" WHISPER_URL"
+    [[ "$staging_uid" =~ ^[0-9]+$ ]] || bad+=" STAGING_UID"
+    if [[ -n "$bad" ]]; then
+        warn "Group watch: bad NEUROOTDEL_GROUP_WATCH_{${bad# }} -- instance not written."
+        return 1
+    fi
+    cat <<EOF
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: group watcher instance ${name}. A re-run with
+# NEUROOTDEL_GROUP_WATCH_CHAT_ID rewrites this file; without it the file is kept as is.
+GW_CHAT_ID=${chat}
+GW_TITLE='${title}'
+GW_CHIP=${chip%/}
+GW_CHIP_ENV_FILE=${chip_env}
+GW_AGENT=${agent}
+GW_BOT_ID=${bot_id}
+GW_BOT_USERNAME=${bot_user}
+GW_ALL_HUMAN=${all_human}
+GW_NAME_REGEX='${name_re}'
+GW_PEER_BOT_IDS=${peers}
+GW_IGNORE_IDS=${ignore}
+GW_BOT_WAKES_PER_HOUR=${bot_cap}
+GW_WHISPER_URL=${whisper}
+GW_FEED=${feed}
+GW_BASE=/var/lib/${AGENT_USER}-group-watch/${name}
+GW_STAGING=/dev/shm/${AGENT_USER}-group-watch-${name}
+GW_STAGING_UID=${staging_uid}
+EOF
+}
+
+# install_group_watch -- template unit always; one instance on only with CHAT_ID + CHIP.
+install_group_watch() {
+    local unit_dir="${GROUP_WATCH_SYSTEMD_DIR:-/etc/systemd/system}"
+    local conf_dir="${GROUP_WATCH_CONF_DIR:-/etc/${AGENT_USER}/group-watch}"
+    local unit="${AGENT_USER}-group-watch@"
+    local tmp
+    tmp=$(mktemp); TMPFILES+=("$tmp")
+    render_group_watch_unit "$conf_dir" >"$tmp"
+    install -m 0644 -o root -g root "$tmp" "${unit_dir}/${unit}.service"
+    install -d -m 0750 -o root -g root "$conf_dir"
+
+    local chat chip name
+    chat="$(env_value GROUP_WATCH_CHAT_ID)"
+    chip="$(env_value GROUP_WATCH_CHIP)"
+    name="$(env_value GROUP_WATCH_NAME)"; name="${name:-main}"
+    if [[ -z "$chat" || -z "$chip" ]]; then
+        GROUP_WATCH_STATUS="off"
+        log "Group watch: unit ${unit}.service written, not enabled (no NEUROOTDEL_GROUP_WATCH_CHAT_ID/CHIP)."
+        return 0
+    fi
+    local env_tmp
+    env_tmp=$(mktemp); TMPFILES+=("$env_tmp")
+    if ! render_group_watch_env "$name" "$chat" "$chip" >"$env_tmp"; then
+        GROUP_WATCH_STATUS="error"
+        return 0
+    fi
+    install -m 0640 -o root -g root "$env_tmp" "${conf_dir}/${name}.env"
+    local agent allowed
+    agent=$(sed -n 's/^GW_AGENT=//p' "${conf_dir}/${name}.env")
+    allowed=$(sed -n 's/^TELEGRAM_ALLOWED_CHAT_IDS=["]\{0,1\}\([^"]*\)["]\{0,1\}$/\1/p' "${CONFIG_ROOT}/${agent}/channel.env" 2>/dev/null | tail -n 1)
+    if [[ ",${allowed}," != *",${chat},"* ]]; then
+        warn "Group watch: ${chat} is not in TELEGRAM_ALLOWED_CHAT_IDS of ${CONFIG_ROOT}/${agent}/channel.env -- the helper refuses to wake for it until it is added."
+    fi
+    systemctl daemon-reload
+    # restart, not start: a re-run must pick up the rewritten env file.
+    if systemctl enable "${unit}${name}.service" --quiet && systemctl restart "${unit}${name}.service"; then
+        GROUP_WATCH_STATUS="on:${name}"
+        ok "Group watch ${name} on for chat ${chat} (${unit}${name})."
+    else
+        GROUP_WATCH_STATUS="error"
+        warn "Group watch ${name}: enable failed -- check 'journalctl -u ${unit}${name}'."
+    fi
+}
+
 # _AGENT_FILE_PY -- runs AS THE AGENT USER (never root) on a path inside the agent's home,
 # so a symlink the agent planted can only point root's work at the agent's own files.
 #   write  <dst> <mode> <if_absent 0|1>   content on stdin; atomic replace; rc 4 = kept as is
@@ -3046,7 +3230,15 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # 10
         ls ${AGENT_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
 
-  $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
+  $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Group watch (status: ${GROUP_WATCH_STATUS:-off}). Jarvis does not see group messages by itself;
+      with a Telegram user-account chip on this server, turn it on for a group (its id also goes into
+      TELEGRAM_ALLOWED_CHAT_IDS of ${JARVIS_ENV_DIR}/channel.env):
+
+        sudo NEUROOTDEL_GROUP_WATCH_CHAT_ID=<-100...> NEUROOTDEL_GROUP_WATCH_CHIP=http://127.0.0.1:<port> bash install.sh
+        # every human message wakes it only with NEUROOTDEL_GROUP_WATCH_ALL_HUMAN=1 (default: tag/reply/name)
+        # stop: sudo touch /var/lib/${AGENT_USER}-group-watch/main/STOP && sudo systemctl disable --now ${AGENT_USER}-group-watch@main
+
+  $(printf '%b' "$C_YELLOW")5.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
       If Jarvis dies, the student messages Richard:  ${richard_label}
 
 EOF
@@ -3089,6 +3281,7 @@ main() {
     install_sudoers
     install_memory_cron
     install_guard
+    install_group_watch
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
     install_team_refs || die "Team references are not all in place; fix the warnings above and re-run the installer."
     enable_services
