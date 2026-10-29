@@ -1765,6 +1765,55 @@ PY
     write_as_user "$tmp" "$dst" "$mode"
 }
 
+# ensure_fact_gate_hook <settings.json> <gate.py> <owner_id|""> -- adds the PreToolUse
+# hook that stops a reply to the owner carrying a number nobody checked in this turn
+# (fact-number-gate.py); idempotent by the script path, every other key kept, backup
+# before the first change. An entry with another owner id is updated in place.
+ensure_fact_gate_hook() {
+    local dst=$1 gate=$2 owner=$3 tmp rc=0 mode=644
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    python3 - "$dst" "$gate" "$owner" "$tmp" <<'PY' || rc=$?
+import json
+import sys
+from pathlib import Path
+
+path, gate, owner, out = Path(sys.argv[1]), sys.argv[2], sys.argv[3], Path(sys.argv[4])
+MATCHER = "mcp__dashi-channel__reply|mcp__dashi-channel__edit_message"
+cmd = f"python3 {gate} agent" + (f" --owner {owner}" if owner else "")
+data: dict = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError as exc:
+        sys.exit(f"{path}: not valid JSON ({exc}); left untouched")
+    if not isinstance(data, dict):
+        sys.exit(f"{path}: top level is not an object; left untouched")
+hooks = data.setdefault("hooks", {})
+pre = hooks.setdefault("PreToolUse", []) if isinstance(hooks, dict) else None
+if not isinstance(pre, list):
+    sys.exit(f"{path}: hooks.PreToolUse is not an array; left untouched")
+mine = [h for e in pre if isinstance(e, dict) and isinstance(e.get("hooks"), list)
+        and set(MATCHER.split("|")) <= set(str(e.get("matcher", "")).split("|"))
+        for h in e["hooks"] if isinstance(h, dict) and h.get("type") == "command"
+        and str(h.get("command", "")).strip().startswith(f"python3 {gate} ")]
+if any(str(h.get("command", "")).strip() == cmd for h in mine):
+    sys.exit(3)  # already wired with this owner
+if mine:
+    mine[0]["command"] = cmd
+else:
+    pre.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+out.write_text(json.dumps(data, indent=2) + "\n")
+PY
+    [[ $rc -eq 3 ]] && return 0
+    [[ $rc -eq 0 ]] || return "$rc"
+    if [[ -f "$dst" ]]; then
+        mode=$(stat -c '%a' -- "$dst")
+        [[ -f "${dst}.bak-install" ]] || cp -p -- "$dst" "${dst}.bak-install" || return 1
+    fi
+    write_as_user "$tmp" "$dst" "$mode"
+}
+
 setup_global_claude() {
     step 8 "Setting up ${AGENT_HOME}/.claude/ (shared OAuth dir)"
 
@@ -1808,6 +1857,20 @@ SJEOF
     fi
     ensure_secret_guard_hook "$settings_json" "$guard" \
         || die "Cannot add the secret guard hook to ${settings_json}."
+
+    # Hard numbers gate: a number the agent did not check in this turn never reaches the owner.
+    local factgate="${claude_dir}/hooks/fact-number-gate.py"
+    [[ -f "${TEMPLATES_DIR}/fact-number-gate.py" ]] \
+        || die "Template not found: ${TEMPLATES_DIR}/fact-number-gate.py"
+    if ! cmp -s -- "${TEMPLATES_DIR}/fact-number-gate.py" "$factgate"; then
+        if [[ -f "$factgate" ]]; then
+            cp -p -- "$factgate" "${factgate}.bak-$(date +%Y%m%d-%H%M%S)" \
+                || die "Cannot back up ${factgate}; gate not updated."
+        fi
+        write_as_user "${TEMPLATES_DIR}/fact-number-gate.py" "$factgate" 0755
+    fi
+    ensure_fact_gate_hook "$settings_json" "$factgate" "${TG_USER_ID:-}" \
+        || die "Cannot add the fact gate hook to ${settings_json}."
 
     local mcp_json="${claude_dir}/mcp.json"
     if [[ ! -f "$mcp_json" ]]; then
