@@ -28,7 +28,7 @@ Restarting another agent's service is Richard's job. Your own service: `echo <ag
 | `block-dangerous.py`, `protect-files.sh` | PreToolUse | ~/.claude/settings.json (every session) |
 | `compact-open-items-reminder.py` | SessionStart | ~/.claude/settings.json |
 | `correction-detector.py`, `auto-recall.py`, `critical-check.py` | UserPromptSubmit | plugin/.claude/settings.json |
-| `fact-check-gate.py` | PreToolUse (reply) | plugin/.claude/settings.json (main agent only) |
+| `fact-check-gate.py` | PreToolUse (reply, edit_message) | plugin/.claude/settings.json (main agent only) |
 | `learnings-engine.py <ws> top` | SessionStart | plugin/.claude/settings.json |
 | `precompact-flush.sh <agent>` | PreCompact | plugin/.claude/settings.json |
 

@@ -79,6 +79,7 @@ import_legacy_env() {
     local old new
     for old in $(compgen -v EDGELAB_ || true); do
         new="NEUROOTDEL_${old#EDGELAB_}"
+        [[ "$old" == EDGELAB_FACT_GATE_* ]] && continue   # new keys: NEUROOTDEL_ only, "" must clear
         if [[ -z "${!new:-}" && -n "${!old:-}" ]]; then
             export "${new}=${!old}"
         fi
@@ -2430,12 +2431,31 @@ _guard_conf_get() {
     sed -n "s/^${2}=\"\\([^\"]*\\)\"\$/\\1/p" "$1" | tail -n 1
 }
 
+# _env_is_set <NAME> -- NEUROOTDEL_<NAME> is set, even to "" (FACT_GATE_* keys have no
+# EDGELAB_ name).
+_env_is_set() {
+    local new="NEUROOTDEL_$1"
+    [[ -n "${!new+x}" ]]
+}
+
+# _gate_conf_pick <existing> <KEY> -- NEUROOTDEL_<KEY> if set (an empty one clears), else the
+# value already in guard.conf.
+_gate_conf_pick() {
+    local new="NEUROOTDEL_$2"
+    if _env_is_set "$2"; then printf '%s' "${!new}"; else _guard_conf_get "$1" "$2"; fi
+}
+
+# _guard_conf_has <file> <KEY> -- the key is in an existing guard.conf (even with "").
+_guard_conf_has() {
+    [[ -f "$1" ]] && grep -q "^${2}=" "$1"
+}
+
 # render_guard_conf [existing] -- prints guard.conf. Answers from this run win; the
 # owner's own choices in an existing file (agents list, labels, alert route) are kept
 # when this run gave none.
 render_guard_conf() {
     local existing="${1:-}"
-    local agents labels mode chat wrules wclaude
+    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle
     agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
     wrules="$(env_value WEIGHT_RULES_KB)"
     [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
@@ -2453,6 +2473,20 @@ render_guard_conf() {
     chat="$(env_value GUARD_ALERT_CHAT_ID)"
     [[ -n "$chat" ]] || chat=$(_guard_conf_get "$existing" ALERT_TG_CHAT_ID)
     [[ -z "$chat" || "$chat" =~ ^-?[0-9]+$ ]] || { warn "Alert chat id '${chat}' is not a number -- ignored."; chat=""; }
+    # Fact-check gate: the agent's own bot id is the numeric part of its token (public, not a secret).
+    # Order: env (an empty one clears), then the key in guard.conf (an empty one stays empty),
+    # then, only when neither has it, the id from the token.
+    fself=$(_gate_conf_pick "$existing" FACT_GATE_SELF_IDS)
+    if ! _env_is_set FACT_GATE_SELF_IDS && ! _guard_conf_has "$existing" FACT_GATE_SELF_IDS && [[ "${JARVIS_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then fself="${BASH_REMATCH[1]}"; fi
+    [[ -z "$fself" || "$fself" =~ ^[0-9]+([\ ,]+[0-9]+)*$ ]] || { warn "FACT_GATE_SELF_IDS '${fself}' is not a list of ids -- ignored."; fself=""; }
+    fbots=$(_gate_conf_pick "$existing" FACT_GATE_BOT_IDS)
+    if ! _env_is_set FACT_GATE_BOT_IDS && ! _guard_conf_has "$existing" FACT_GATE_BOT_IDS && [[ "${RICHARD_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then fbots="${BASH_REMATCH[1]}"; fi
+    [[ -z "$fbots" || "$fbots" =~ ^[0-9]+([\ ,]+[0-9]+)*$ ]] || { warn "FACT_GATE_BOT_IDS '${fbots}' is not a list of ids -- ignored."; fbots=""; }
+    furl=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_URL)
+    [[ -z "$furl" || "$furl" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]] || { warn "FACT_GATE_CHIP_URL '${furl}' is not http(s)://host[:port] -- chip off."; furl=""; }
+    fenv=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_ENV)
+    [[ -z "$fenv" || "$fenv" =~ ^/[A-Za-z0-9._/-]+$ ]] || { warn "FACT_GATE_CHIP_ENV '${fenv}' is not an absolute path -- chip off."; fenv=""; }
+    fstyle=$(_gate_conf_pick "$existing" FACT_GATE_STYLE_BANNED)
     cat <<EOF
 # ${INSTALL_TAG} v${INSTALLER_VERSION}: settings of the agent guard scripts. No secrets here.
 # A re-run of the installer rewrites this file and keeps CHANNEL_AGENTS, AGENT_LABELS,
@@ -2465,6 +2499,14 @@ render_guard_conf() {
 #             telegram = the same, and each alert is also sent by the Richard bot
 #                        (token from RICHARD_ENV) to ALERT_TG_CHAT_ID (default: owner);
 #             log      = only the log.
+# FACT_GATE_* (hooks/fact-check-gate.py, the check of a reply/edit before it is sent; kept on re-run):
+#   (an env NEUROOTDEL_FACT_GATE_<KEY> wins, set to "" it clears the key)
+#   SELF_IDS     the agent's own Telegram bot id(s) (default: from the Jarvis bot token);
+#   BOT_IDS      other bot accounts never taken for a person (default: the Richard bot id);
+#   CHIP_URL     optional Telegram user-account chip, http://host:port (empty = tag check and
+#                ready-post exception off, the gate makes no network calls);
+#   CHIP_ENV     file with CHIP_API_TOKEN=... readable by the agent (needed with CHIP_URL);
+#   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check).
 AGENT_USER="$(_guard_conf_value "$AGENT_USER")"
 AGENT_HOME="$(_guard_conf_value "$AGENT_HOME")"
 LIB_DIR="$(_guard_conf_value "$GUARD_LIB_DIR")"
@@ -2481,6 +2523,11 @@ ALERT_MODE="${mode}"
 ALERT_TG_CHAT_ID="$(_guard_conf_value "$chat")"
 WEIGHT_RULES_KB="${wrules:-30}"
 WEIGHT_CLAUDE_KB="${wclaude:-40}"
+FACT_GATE_SELF_IDS="$(_guard_conf_value "$fself")"
+FACT_GATE_BOT_IDS="$(_guard_conf_value "$fbots")"
+FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
+FACT_GATE_CHIP_ENV="$(_guard_conf_value "$fenv")"
+FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
 EOF
 }
 
@@ -2555,7 +2602,15 @@ setup_agent_hooks() {
         add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/correction-detector.py ${ws}" 10 || fail=1
         add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/auto-recall.py jarvis" 10 || fail=1
         add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/critical-check.py" 5 || fail=1
-        add_hook "$plugin_settings" PreToolUse mcp__dashi-channel__reply "python3 ${hooks}/fact-check-gate.py ${fact_state}" 10 || fail=1
+        # The gate checks edits too; an entry of an earlier install (matcher reply only) is moved to the new matcher.
+        local fact_cmd="python3 ${hooks}/fact-check-gate.py ${fact_state}"
+        merge_json_file "$plugin_settings" '
+            if (.hooks.PreToolUse | type) == "array" then
+                .hooks.PreToolUse |= (map(if .matcher == $old and (.hooks | type) == "array"
+                                          then .hooks |= map(select(.command? != $cmd)) else . end)
+                                      | map(select((.hooks | type) != "array" or (.hooks | length) > 0)))
+            else . end' --arg old mcp__dashi-channel__reply --arg cmd "$fact_cmd" || fail=1
+        add_hook "$plugin_settings" PreToolUse 'mcp__dashi-channel__reply|mcp__dashi-channel__edit_message' "$fact_cmd" 10 || fail=1
         add_hook "$plugin_settings" Stop "" "TELEGRAM_FALLBACK_REPLY_URL='http://127.0.0.1:${port:-8089}/hooks/fallback-reply' ${AGENT_HOME}/.bun/bin/bun '${plugin_dir}/scripts/fallback-reply-hook.ts'" 30 \
             "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
         add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1

@@ -152,6 +152,27 @@ check "conf: re-run keeps weight caps"      grep -qx 'WEIGHT_RULES_KB="25"' "${G
 NEUROOTDEL_WEIGHT_RULES_KB='2$x' render_guard_conf "" >"${GC}.7" 2>/dev/null
 check "conf: bad weight cap -> default"     grep -qx 'WEIGHT_RULES_KB="30"' "${GC}.7"
 check "conf: watch reads the caps"          env NEUROOTDEL_GUARD_CONF="${GC}.5" NEUROOTDEL_WEIGHT_STATE="${TDIR}/ws5" python3 -c "import importlib.util as u; s = u.spec_from_file_location('m', '${REPO}/lib/memory_weight_watch.py'); m = u.module_from_spec(s); s.loader.exec_module(m); assert m.STATIC_LIMITS == {'core/rules.md': 25 * 1024, 'CLAUDE.md': 45 * 1024}, m.STATIC_LIMITS"
+JARVIS_BOT_TOKEN="7000111222:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" RICHARD_BOT_TOKEN="7000333444:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" render_guard_conf "" >"${GC}.f1"
+check "conf: gate self id from the bot token" grep -qx 'FACT_GATE_SELF_IDS="7000111222"' "${GC}.f1"
+check "conf: gate bot ids from Richard token" grep -qx 'FACT_GATE_BOT_IDS="7000333444"' "${GC}.f1"
+check "conf: no token secret in guard.conf"  bash -c '! grep -q "AAAAAAAA\|BBBBBBBB" "$0"' "${GC}.f1"
+check "conf: chip off and style empty by default" bash -c 'grep -qx "FACT_GATE_CHIP_URL=\"\"" "$0" && grep -qx "FACT_GATE_CHIP_ENV=\"\"" "$0" && grep -qx "FACT_GATE_STYLE_BANNED=\"\"" "$0"' "${GC}.f1"
+NEUROOTDEL_FACT_GATE_CHIP_URL="http://127.0.0.1:4321" NEUROOTDEL_FACT_GATE_CHIP_ENV="/srv/chip/.env" NEUROOTDEL_FACT_GATE_STYLE_BANNED="ага, в рамках" NEUROOTDEL_FACT_GATE_SELF_IDS="11 22" render_guard_conf "${GC}.f1" >"${GC}.f2"
+check "conf: gate chip and style from env"   bash -c 'grep -qx "FACT_GATE_CHIP_URL=\"http://127.0.0.1:4321\"" "$0" && grep -qx "FACT_GATE_CHIP_ENV=\"/srv/chip/.env\"" "$0" && grep -qx "FACT_GATE_STYLE_BANNED=\"ага, в рамках\"" "$0" && grep -qx "FACT_GATE_SELF_IDS=\"11 22\"" "$0"' "${GC}.f2"
+render_guard_conf "${GC}.f2" >"${GC}.f3"
+check "conf: re-run keeps gate settings"     bash -c 'grep -qx "FACT_GATE_CHIP_URL=\"http://127.0.0.1:4321\"" "$0" && grep -qx "FACT_GATE_SELF_IDS=\"11 22\"" "$0" && grep -qx "FACT_GATE_BOT_IDS=\"7000333444\"" "$0"' "${GC}.f3"
+JARVIS_BOT_TOKEN="7000555666:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" render_guard_conf "${GC}.f2" >"${GC}.f5"
+check "conf: owner ids in guard.conf beat the token" grep -qx 'FACT_GATE_SELF_IDS="11 22"' "${GC}.f5"
+NEUROOTDEL_FACT_GATE_STYLE_BANNED="" NEUROOTDEL_FACT_GATE_CHIP_URL="" render_guard_conf "${GC}.f2" >"${GC}.f6"
+check "conf: empty env clears style and chip" bash -c 'grep -qx "FACT_GATE_STYLE_BANNED=\"\"" "$0" && grep -qx "FACT_GATE_CHIP_URL=\"\"" "$0" && grep -qx "FACT_GATE_CHIP_ENV=\"/srv/chip/.env\"" "$0"' "${GC}.f6"
+sed -i 's/^FACT_GATE_SELF_IDS=.*/FACT_GATE_SELF_IDS=""/' "${GC}.f5"
+JARVIS_BOT_TOKEN="7000555666:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" render_guard_conf "${GC}.f5" >"${GC}.f7"
+check "conf: owner-cleared self id stays empty" grep -qx 'FACT_GATE_SELF_IDS=""' "${GC}.f7"
+EDGELAB_FACT_GATE_STYLE_BANNED="ага" NEUROOTDEL_FACT_GATE_STYLE_BANNED="" bash -c 'export INSTALL_SH_SOURCED_FOR_TESTING=1; source "$1" >/dev/null 2>&1; set +e; INSTALL_TAG=t AGENT_USER=u GUARD_LIB_DIR=/l CONFIG_ROOT=/c render_guard_conf "$2" 2>/dev/null' _ "${REPO}/install.sh" "${GC}.f2" >"${GC}.f8"
+check "conf: empty new env beats a legacy EDGELAB_ one" grep -qx 'FACT_GATE_STYLE_BANNED=""' "${GC}.f8"
+NEUROOTDEL_FACT_GATE_CHIP_URL='http://x/$(id)' NEUROOTDEL_FACT_GATE_CHIP_ENV='rel/.env' NEUROOTDEL_FACT_GATE_SELF_IDS='1;2' render_guard_conf "" >"${GC}.f4" 2>/dev/null
+check "conf: bad gate values dropped"        bash -c 'grep -qx "FACT_GATE_CHIP_URL=\"\"" "$0" && grep -qx "FACT_GATE_CHIP_ENV=\"\"" "$0" && grep -qx "FACT_GATE_SELF_IDS=\"\"" "$0"' "${GC}.f4"
+check "conf: gate reads its settings"        env NEUROOTDEL_GUARD_CONF="${GC}.f2" python3 -c "import importlib.util as u; s = u.spec_from_file_location('fg', '${REPO}/lib/hooks/fact-check-gate.py'); m = u.module_from_spec(s); s.loader.exec_module(m); assert m.chip_enabled() and m.SELF_IDS == {11, 22} and m.BOT_IDS == {11, 22, 7000333444} and m.OWNER_CHAT == '555' and m.STYLE_RE is not None, (m.CHIP_URL, m.SELF_IDS)"
 render_guard_conf "" >"$GC"
 
 # --- lib scripts against a fake home -------------------------------------------

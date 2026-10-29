@@ -75,6 +75,9 @@ OUT=$(echo '{"tool_input":{"chat_id":"555","text":"Готово, бот рабо
 check "factcheck: repeat passes"             test -z "$OUT"
 OUT=$(echo '{"tool_input":{"chat_id":"777","text":"Готово"}}' | python3 "${HK}/fact-check-gate.py" "${TDIR}/fc2")
 check "factcheck: other DM untouched"        test -z "$OUT"
+OUT=$(echo '{"tool_name":"mcp__dashi-channel__edit_message","tool_input":{"chat_id":"555","message_id":"7","text":"Готово, 3 файла"}}' | python3 "${HK}/fact-check-gate.py" "${TDIR}/fc3")
+check "factcheck: edit_message checked too"  jq -e '.hookSpecificOutput.permissionDecision == "deny"' <<<"$OUT" >/dev/null
+check "factcheck: gate.log names the tool"   grep -q '"tool": "edit_message"' "${TDIR}/fc3/gate.log"
 
 # --- learnings-engine ------------------------------------------------------------------
 python3 "${HK}/learnings-engine.py" "$WS" capture --type correction --source owner --impact high --rule "Проверять ссылку браузером" >/dev/null
@@ -148,13 +151,24 @@ check "hooks: user auto-compact window"      jqtrue "$US" '.env.CLAUDE_CODE_AUTO
 for ev in UserPromptSubmit PreToolUse Stop SessionStart PreCompact; do
     check "hooks: plugin ${ev}"              jqtrue "$PS" ".hooks.${ev} | length >= 1"
 done
-check "hooks: fact-check main agent only"    jqtrue "$PS" '[.hooks.PreToolUse[] | select(.matcher == "mcp__dashi-channel__reply")] | length == 1'
+FCM='mcp__dashi-channel__reply|mcp__dashi-channel__edit_message'
+check "hooks: fact-check main agent only"    jqtrue "$PS" "[.hooks.PreToolUse[] | select(.matcher == \"${FCM}\")] | length == 1"
+check "hooks: fact-check not in user settings" jqtrue "$US" '[.hooks.PreToolUse[].hooks[].command] | any(test("fact-check-gate")) | not'
+check "hooks: fact-check matcher covers reply and edit" jqtrue "$PS" '[.hooks.PreToolUse[] | select(.hooks[].command | test("fact-check-gate")) | .matcher] | (length == 1) and (.[0] as $m | ["mcp__dashi-channel__reply", "mcp__dashi-channel__edit_message"] | all(test("^(" + $m + ")$"))) and (.[0] as $m | "mcp__dashi-channel__react" | test("^(" + $m + ")$") | not)'
 check "hooks: fallback reply on our port"    jqtrue "$PS" '[.hooks.Stop[].hooks[].command] | any(test("127.0.0.1:8095/hooks/fallback-reply"))'
 check "hooks: no workspace settings.json"    test ! -e "${WS}/settings.json" -a ! -e "${WS}/.claude/settings.json"
 cp "$US" "${TDIR}/us1"; cp "$PS" "${TDIR}/ps1"
 setup_agent_hooks
 check "hooks: re-run adds nothing (user)"    cmp -s "$US" "${TDIR}/us1"
 check "hooks: re-run adds nothing (plugin)"  cmp -s "$PS" "${TDIR}/ps1"
+FCC=$(jq -r '[.hooks.PreToolUse[].hooks[].command | select(test("fact-check-gate"))][0]' "$PS")
+jq --arg c "$FCC" '.hooks.PreToolUse = [.hooks.PreToolUse[] | select(.hooks[].command != $c)] + [{"matcher":"mcp__dashi-channel__reply","hooks":[{"type":"command","command":$c,"timeout":10}]},{"matcher":"mcp__dashi-channel__reply","hooks":[{"type":"command","command":"bash /owner/reply.sh"},{"type":"command","command":$c}]}]' "$PS" >"${PS}.t" && mv "${PS}.t" "$PS"
+setup_agent_hooks
+check "hooks: old reply-only gate entry migrated" jqtrue "$PS" "[.hooks.PreToolUse[] | select(.hooks[].command | test(\"fact-check-gate\"))] | length == 1 and .[0].matcher == \"${FCM}\""
+check "hooks: owner reply hook kept on migration" jqtrue "$PS" '[.hooks.PreToolUse[] | select(.matcher == "mcp__dashi-channel__reply") | .hooks[].command] == ["bash /owner/reply.sh"]'
+cp "$PS" "${TDIR}/ps2"
+setup_agent_hooks
+check "hooks: re-run after migration adds nothing" cmp -s "$PS" "${TDIR}/ps2"
 echo 'TELEGRAM_WEBHOOK_PORT=8099' >"${JARVIS_ENV_DIR}/channel.env"
 setup_agent_hooks
 check "hooks: port change replaces our Stop"  jqtrue "$PS" '[.hooks.Stop[].hooks[].command | select(test("fallback-reply"))] | (length == 1 and (.[0] | test(":8099/")))'
