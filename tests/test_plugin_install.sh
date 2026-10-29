@@ -582,6 +582,41 @@ check "richard launcher: httpcore at WARNING"  grep -qx "LEVEL httpcore=WARNING"
 check "richard launcher: no bot URL in output" bash -c '! grep -q "api.telegram.org/bot" "$1"' _ "$LOGOUT"
 check "richard launcher: no token in output"   bash -c '! grep -qF -- "$1" "$2"' _ "${TOKEN#*:}" "$LOGOUT"
 check "richard launcher: warnings still pass"  grep -q WARN-PASSES "$LOGOUT"
+# A rejected token: python-telegram-bot raises InvalidToken("The token `<TOKEN>` was
+# rejected by the server.") -- no "bot" prefix. It reaches the journal three ways: a
+# logged exception (structlog JSON on stdout), a plain print to stderr, and the final
+# uncaught traceback. The second token is format-valid but not the one in the env.
+FAKEPKG2="${TDIR}/fakepkg-invalid"
+mkdir -p "${FAKEPKG2}/src"
+: >"${FAKEPKG2}/src/__init__.py"
+cat >"${FAKEPKG2}/src/main.py" <<'PYEOF'
+import json, logging, os, sys
+class InvalidToken(Exception):
+    pass
+def run():
+    t = os.environ["TELEGRAM_BOT_TOKEN"]
+    other = os.environ["OTHER_TOKEN"]
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    try:
+        raise InvalidToken(f"The token `{t}` was rejected by the server.")
+    except InvalidToken:
+        logging.getLogger("src.main").exception("bot start failed")
+    print(json.dumps({"event": "x", "exception": f"InvalidToken: The token `{t}` was rejected"}))
+    print(f"stderr mark {t} and {other}", file=sys.stderr)
+    sys.stdout.writelines([f"lines {t}\n"])
+    print("RUN2-DONE")
+    raise InvalidToken(f"The token `{t}` was rejected by the server.")
+PYEOF
+OTHER_TOKEN="9876543210:ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvut_-"
+LOGOUT2="${TDIR}/launcher-invalid.out"
+(cd "$TDIR" && TELEGRAM_BOT_TOKEN="$TOKEN" OTHER_TOKEN="$OTHER_TOKEN" PYTHONPATH="$FAKEPKG2" python3 "${RH}/launch/richard_launch.py") >"$LOGOUT2" 2>&1
+LOGRC2=$?
+check "richard launcher (rejected): entry point ran"     grep -q RUN2-DONE "$LOGOUT2"
+check "richard launcher (rejected): fails like the bot"  test "$LOGRC2" = 1
+check "richard launcher (rejected): traceback still shown" grep -q "InvalidToken: The token \`<bot-token>\` was rejected" "$LOGOUT2"
+check "richard launcher (rejected): env token secret absent" bash -c '! grep -qF -- "$1" "$2"' _ "${TOKEN#*:}" "$LOGOUT2"
+check "richard launcher (rejected): other token secret absent" bash -c '! grep -qF -- "$1" "$2"' _ "${OTHER_TOKEN#*:}" "$LOGOUT2"
+check "richard launcher (rejected): every leak point masked" test "$(grep -c "<bot-token>" "$LOGOUT2")" -ge 5
 unset -f sudo install
 
 # --- final notes point at `claude auth login` ------------------------------------
