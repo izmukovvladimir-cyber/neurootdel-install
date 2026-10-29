@@ -144,6 +144,14 @@ NEUROOTDEL_GUARD_ALERTS=telegram render_guard_conf "$GC" >"${GC}.3"
 check "conf: env alert mode wins"             grep -qx 'ALERT_MODE="telegram"' "${GC}.3"
 NEUROOTDEL_GUARD_ALERTS=bogus render_guard_conf "" >"${GC}.4"
 check "conf: bad alert mode -> outbox"        grep -qx 'ALERT_MODE="outbox"' "${GC}.4"
+check "conf: weight caps default 30/40"     bash -c 'grep -qx "WEIGHT_RULES_KB=\"30\"" "$0" && grep -qx "WEIGHT_CLAUDE_KB=\"40\"" "$0"' "${GC}.4"
+NEUROOTDEL_WEIGHT_RULES_KB=25 NEUROOTDEL_WEIGHT_CLAUDE_KB=45 render_guard_conf "" >"${GC}.5"
+check "conf: weight caps from env"          bash -c 'grep -qx "WEIGHT_RULES_KB=\"25\"" "$0" && grep -qx "WEIGHT_CLAUDE_KB=\"45\"" "$0"' "${GC}.5"
+render_guard_conf "${GC}.5" >"${GC}.6"
+check "conf: re-run keeps weight caps"      grep -qx 'WEIGHT_RULES_KB="25"' "${GC}.6"
+NEUROOTDEL_WEIGHT_RULES_KB='2$x' render_guard_conf "" >"${GC}.7" 2>/dev/null
+check "conf: bad weight cap -> default"     grep -qx 'WEIGHT_RULES_KB="30"' "${GC}.7"
+check "conf: watch reads the caps"          env NEUROOTDEL_GUARD_CONF="${GC}.5" NEUROOTDEL_WEIGHT_STATE="${TDIR}/ws5" python3 -c "import importlib.util as u; s = u.spec_from_file_location('m', '${REPO}/lib/memory_weight_watch.py'); m = u.module_from_spec(s); s.loader.exec_module(m); assert m.STATIC_LIMITS == {'core/rules.md': 25 * 1024, 'CLAUDE.md': 45 * 1024}, m.STATIC_LIMITS"
 render_guard_conf "" >"$GC"
 
 # --- lib scripts against a fake home -------------------------------------------

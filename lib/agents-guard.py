@@ -17,6 +17,16 @@ Runs as root from /etc/cron.d/<user>-agents-guard once a minute. One tick:
                      > 15 min: agent nudged through its webhook (max 2 per message) + alert.
                      While the agent is on the limit: ONE Bot-API answer per limit period
                      instead ("Я на перерыве до ..., продолжу с места.").
+  4a. limit notice   the moment the screen shows the usage-limit pause, ONE Bot-API line to the
+                     owner «На лимите до HH:MM» from THIS agent's bot, without the model. One line
+                     per bot per window (limit_notice_periods[agent]); a part-5 answer from the same
+                     bot in that window counts as its line. The main agent speaks for all of them;
+                     any other agent's bot writes only while the owner's DM to it waits for an answer.
+  5a. restart check  after a start of the unit (any cause), once the session is up and idle,
+                     private chats whose last human messages came after the agent's last reply get
+                     ONE webhook nudge carrying those texts (restart_unanswered.py). Start identity =
+                     systemd InvocationID. Once per start and once per message (A, then A+B hands
+                     over only B); the owner nudge of part 5 waits until this check is done.
   6. auditor         only when a hermes-auditor unit exists on this server.
 Alerts never go to the owner's chat by default: ALERT_MODE in guard.conf decides.
   outbox   (default) JSON items in STATE/outbox (--drain prints them, --ack ID deletes) + the log;
@@ -25,6 +35,8 @@ Alerts never go to the owner's chat by default: ALERT_MODE in guard.conf decides
   log                only the log file.
 
 Stops: touch STATE/STOP (all), STATE/AUTOREPLY_OFF (only the limit answer),
+       STATE/LIMIT_NOTICE_OFF (only the limit notice of part 4a),
+       STATE/RESTART_CHECK_OFF (only the restart check of part 5a),
        STATE/QUEUE_OFF (only the restart queue).
 Modes: --dry-run (nothing sent, restarted, nudged or written; prints decisions),
        --drain (prints outbox as JSON), --ack ID... (deletes delivered items),
@@ -75,12 +87,16 @@ QUIET_DIR = HOME / ".claude-lab/shared/state/quiet-restart"
 CRED_FILE = HOME / ".claude/.credentials.json"
 PROJECTS = HOME / ".claude/projects"
 JUDGE = LIB / "dashi_watchdog_unanswered.py"
+RESTART_MOD = LIB / "restart_unanswered.py"
 OWNER_CHAT = CONF.owner_tg_id
 OWNER = CONF.owner_name or "владелец"
 
 AGENTS: dict[str, dict] = {
     a: {"unit": f"channel-{a}", "tmux": f"channel-{a}", "name": CONF.label(a),
-        "env": str(CONF.channel_env(a)), "owner_dm": bool(OWNER_CHAT)}
+        "env": str(CONF.channel_env(a)), "owner_dm": bool(OWNER_CHAT),
+        "restart_check": True, "limit_notice": bool(OWNER_CHAT),
+        # the main agent speaks for the whole account; the others only while a DM to them waits
+        "limit_notice_needs_dm": a != CONF.main_agent}
     for a in CONF.channel_agents
 }
 RICHARD_UNIT = CONF.richard_unit
@@ -105,6 +121,13 @@ AUDITOR_HEARTBEAT_MAX = 600
 AUDITOR_ANSWER_SEC = 1200
 USAGE_THRESHOLDS = (80, 95)
 JSONL_CAP = 300 << 20
+RC_MIN_UPTIME = 60       # let the plugin deliver updates queued during the downtime first
+RC_MAX_AGE = 6 * 3600   # keeps waiting for an idle session this long, then gives up with an alert
+RC_WINDOW = 86400        # messages older than a day are left to the humans
+RC_LABELS = {OWNER_CHAT: "личка владельца"} if OWNER_CHAT else {}
+# ready TUI: the start screen shows "? for shortcuts", after a turn the footer is the mode line
+# ("bypass permissions on (shift+tab to cycle)") under an empty "❯" prompt
+_READY = re.compile(r"for shortcuts|for agents|shift\+tab to cycle|^\s*❯", re.M)
 
 _TURN = re.compile(r"\((?:(\d+)h\s+)?(?:(\d+)m\s+)?(\d+)s\s*·([^)]*)\)")
 _TOKENS = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([kmKM]?)\s*tokens")
@@ -310,6 +333,15 @@ def limit_text(reset: datetime) -> str:
     return f"Я на перерыве до {reset.astimezone(tz):%H:%M} {label} ({fmt_msk(reset)} мск), продолжу с места."
 
 
+def limit_notice_text(reset: datetime, agent: str) -> str:
+    """Part 4a line: the main agent speaks for every agent of the account."""
+    tz, label = owner_zone()
+    t = f"{fmt_msk(reset)} мск" if tz is None else f"{reset.astimezone(tz):%H:%M} {label}"
+    if agent == CONF.main_agent and len([a for a in AGENTS if a != "richard"]) > 1:
+        return f"Мы на лимите до {t}, ответим после."
+    return f"На лимите до {t}, отвечу после."
+
+
 # ---------- owner unanswered (our judge, filtered for this CC version) ----------
 
 def _load_judge():
@@ -357,6 +389,88 @@ def owner_wait(agent: str, now: datetime, override: str | None = None) -> tuple[
             os.close(fd)
     m = re.search(r"silent_sec=(\d+) last_human=(\S+)", line)
     return verdict, int(m.group(1)) if m else 0, m.group(2) if m else ""
+
+
+def agent_fds(agent: str, now: datetime) -> list[int] | None:
+    """Open fds of the agent's transcripts touched in the last 3 days; None = do not judge."""
+    fds: list[int] = []
+    try:
+        total = 0
+        for p in PROJECTS.glob(f"{CONF.project_prefix(agent)}-dashi-plugin-claude-code*/*.jsonl"):
+            fd = open_regular(p)
+            fds.append(fd)
+            st = os.fstat(fd)
+            if now.timestamp() - st.st_mtime >= 3 * 86400:
+                os.close(fds.pop())
+                continue
+            total += st.st_size
+    except OSError:
+        for fd in fds:
+            os.close(fd)
+        return None
+    if not fds or total > JSONL_CAP:
+        for fd in fds:
+            os.close(fd)
+        return None
+    return fds
+
+
+def unit_start(unit: str) -> tuple[str, float, float]:
+    """(InvocationID, wall-clock ActiveEnter, wall-clock ExecMainStart), ONE systemctl call.
+
+    ActiveEnter (after ExecStartPost, i.e. the channel is up) drives the uptime wait;
+    ExecMainStart (the new process started, the old one already killed) is the boundary
+    between the old and the new session in the transcripts."""
+    out = run(["systemctl", "show", unit, "-p", "InvocationID", "-p", "ActiveEnterTimestampMonotonic",
+               "-p", "ExecMainStartTimestampMonotonic"]).stdout
+    kv = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+
+    def wall(key: str) -> float:
+        try:
+            mono = int(kv.get(key, "0")) / 1e6
+        except ValueError:
+            return 0.0
+        return time.time() - (time.monotonic() - mono) if mono else 0.0
+    return (kv.get("InvocationID", "").strip(), wall("ActiveEnterTimestampMonotonic"),
+            wall("ExecMainStartTimestampMonotonic"))
+
+
+def transcript_sig(agent: str, override: str | None = None) -> tuple:
+    """Size and mtime of every transcript: any append between two calls changes it."""
+    paths = [Path(override)] if override else sorted(
+        PROJECTS.glob(f"{CONF.project_prefix(agent)}-dashi-plugin-claude-code*/*.jsonl"))
+    sig = []
+    for p in paths:
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        sig.append((str(p), st.st_size, st.st_mtime_ns))
+    return tuple(sig)
+
+
+def restart_pending(agent: str, started: datetime, now: datetime, override: str | None = None,
+                    handed: set[str] | None = None):
+    """Pending private chats after a restart (restart_unanswered.Pending list) or None."""
+    spec = importlib.util.spec_from_file_location("restart_unanswered", RESTART_MOD)
+    ru = importlib.util.module_from_spec(spec)
+    sys.modules["restart_unanswered"] = ru  # dataclasses resolve their module through sys.modules
+    spec.loader.exec_module(ru)
+    judge = ru.load_judge(JUDGE)
+    chats = ru.private_chats(env_value(AGENTS[agent]["env"], "TELEGRAM_ALLOWED_CHAT_IDS")
+                             if AGENTS[agent]["env"] else "")
+    if override:
+        return ru, ru.pending_after_restart(judge, [Path(override)], started, now, chats, RC_WINDOW,
+                                            handed or set())
+    fds = agent_fds(agent, now)
+    if fds is None:
+        return ru, None
+    try:
+        return ru, ru.pending_after_restart(judge, [Path(f"/proc/self/fd/{fd}") for fd in fds],
+                                            started, now, chats, RC_WINDOW, handed or set())
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 # ---------- actions ----------
@@ -462,16 +576,16 @@ class Guard:
         self.state.setdefault("restarts", {})[agent] = lst
         return [t for t in lst if time.time() - t < window]
 
-    def nudge(self, agent: str, text: str) -> bool:
+    def nudge(self, agent: str, text: str, chat: str = OWNER_CHAT) -> bool:
         env = AGENTS[agent]["env"]
         if self.dry:
-            self.say(f"[dry] NUDGE {agent} webhook chatId={OWNER_CHAT}: {text[:120]}…")
+            self.say(f"[dry] NUDGE {agent} webhook chatId={chat}: {text[:120]}…")
             return True
         token, port = env_value(env, "TELEGRAM_WEBHOOK_TOKEN"), env_value(env, "TELEGRAM_WEBHOOK_PORT")
         if not token or not port.isdigit():
             return False
         req = urllib.request.Request(f"http://127.0.0.1:{port}/hooks/agent", method="POST",
-                                     data=json.dumps({"message": text, "chatId": OWNER_CHAT}).encode(),
+                                     data=json.dumps({"message": text, "chatId": chat}).encode(),
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -605,6 +719,137 @@ class Guard:
                                f"Расход Claude: {up[0]}% {'недельного' if up[1] == 'weekly' else 'сессионного'} лимита (порог {th}%).")
         return lim
 
+    def do_restart_check(self, agent: str, pane: str | None) -> bool:
+        """Part 5a. True while the check for the current start is still due (owner nudge waits)."""
+        if (STATE_DIR / "RESTART_CHECK_OFF").exists():
+            return False
+        st = self.state.setdefault("agents", {}).setdefault(agent, {})
+        rc = st.setdefault("rc", {})
+        unit = AGENTS[agent]["unit"]
+
+        def current() -> tuple[str, float, float]:
+            if f"{agent}.inv" in self.ov:
+                since = float(self.ov[f"{agent}.since"])
+                return self.ov[f"{agent}.inv"], since, float(self.ov.get(f"{agent}.main", since))
+            return unit_start(unit)
+
+        inv, started_ts, main_ts = current()
+        if not started_ts or not main_ts or not inv:
+            return False
+        if "inv" not in rc:  # first run after deploy: this start was not a restart we saw
+            rc["inv"] = inv
+            self.save()
+            return False
+        if rc["inv"] == inv:
+            return False
+        uptime = self.now.timestamp() - started_ts
+        if uptime > RC_MAX_AGE:
+            rc["inv"] = inv
+            self.save()
+            self.alert(f"rc:{agent}:stale:{inv}", f"{AGENTS[agent]['name']}: после рестарта сессия "
+                       f"{RC_MAX_AGE // 3600} ч не освобождалась, проверку неотвеченного пропустил.")
+            return False
+
+        def idle() -> bool:
+            cur = capture(agent, self.ov)
+            return cur is not None and bool(_READY.search(cur)) and not is_busy(cur)
+
+        if uptime < RC_MIN_UPTIME or pane is None or not _READY.search(pane) or is_busy(pane):
+            self.say(f"RC {agent}: waiting (uptime {int(uptime)} s)")
+            return True
+        started = datetime.fromtimestamp(main_ts, UTC)  # old/new session boundary
+        done: dict = rc.setdefault("done", {})
+        for k in [k for k, v in done.items() if time.time() - v > 3 * 86400]:
+            del done[k]
+        ru, pend = restart_pending(agent, started, self.now, self.jsonl.get(agent), set(done))
+        if pend is None:  # e.g. a line being appended right now: no send, retry next tick
+            self.say(f"RC {agent}: transcripts cannot be judged now, retry next tick")
+            return True
+        # The start is marked handled only after every chat went through; a chat already handed
+        # over is in `done` (saved BEFORE its send), so a retry next tick never repeats it.
+        name = AGENTS[agent]["name"]
+        sent = rc.get("sent") if isinstance(rc.get("sent"), dict) else {}
+        if sent.get("inv") != inv:
+            sent = rc["sent"] = {"inv": inv, "chats": []}
+        sent_chats: list = sent["chats"]
+        for first in pend:
+            # revalidate THIS chat right before its send: fresh read of the transcripts (a reply
+            # or new speech since the first read drops the chat), THEN same start and idle pane,
+            # then the transcripts must not have grown since before the re-read: a turn that
+            # started and finished in between (reply appended, pane idle again) is caught here
+            if first.chat in sent_chats:
+                continue
+            sig = transcript_sig(agent, self.jsonl.get(agent))
+            _ru, again = restart_pending(agent, started, self.now, self.jsonl.get(agent), set(done))
+            if again is None:
+                self.say(f"RC {agent}: transcripts cannot be judged on recheck, retry next tick")
+                return True
+            if current()[0] != inv or not idle() or transcript_sig(agent, self.jsonl.get(agent)) != sig:
+                self.say(f"RC {agent}: start changed, agent busy or transcripts moved before chat {first.chat}, retry next tick")
+                return True
+            p = next((x for x in again if x.chat == first.chat), None)
+            if p is None:
+                self.say(f"RC {agent}: chat {first.chat} closed on recheck, no nudge")
+                continue
+            last = p.last.isoformat()
+            if p.chat == OWNER_CHAT and any(t >= main_ts for t in st.get("nudges", {}).get(last, [])):
+                self.say(f"RC {agent}: owner nudge for {last} already went to this session")
+                continue
+            for k in p.keys() + p.dropped_keys:
+                done[k] = int(time.time())
+            sent_chats.append(p.chat)   # one nudge per chat per start, whatever arrives later
+            if p.chat == OWNER_CHAT:  # the owner nudge of part 5 counts this one (gap and max)
+                st.setdefault("nudges", {}).setdefault(last, []).append(int(time.time()))
+            self.save()
+            ok = self.nudge(agent, ru.build_message(p, RC_LABELS.get(p.chat, "личный чат")), p.chat)
+            self.say(f"RC {agent}: chat {p.chat} pending {len(p.messages)} since {p.messages[0][0].isoformat()} nudge ok={ok}")
+            self.alert(f"rc:{agent}:{p.chat}:{last}",
+                       f"{name} после рестарта: в чате {RC_LABELS.get(p.chat, p.chat)} нашлось без ответа "
+                       f"{len(p.messages) + p.dropped} (с {fmt_msk(p.messages[0][0])} МСК), "
+                       f"передал ему тексты ({'доставлено' if ok else 'вебхук НЕ принял'}).")
+        rc["inv"] = inv
+        self.save()
+        if not pend:
+            self.say(f"RC {agent}: nothing pending after restart")
+        return False
+
+    def notice_periods(self, agent: str) -> list:
+        """Limit windows in which THIS agent's bot already wrote to the owner (4a or part 5)."""
+        per = self.state.get("limit_notice_periods")
+        if not isinstance(per, dict):
+            per = self.state["limit_notice_periods"] = {}
+        lst = per.get(agent)
+        if not isinstance(lst, list) or not all(isinstance(u, str) and re.fullmatch(r"\d{12}", u) for u in lst):
+            lst = per[agent] = []
+        return lst
+
+    def limit_notice(self, agent: str, lim: tuple[datetime | None, bool]) -> None:
+        """Part 4a: one line to the owner per limit window, sent by the bot, never by the model."""
+        reset, reliable = lim
+        if (not reliable or not reset or reset <= self.now + timedelta(minutes=2) or self.no_autoreply
+                or (STATE_DIR / "LIMIT_NOTICE_OFF").exists()):
+            return
+        period = f"{reset:%Y%m%d%H%M}"
+        used = self.state.setdefault("autoreply_periods", [])
+        mine = self.notice_periods(agent)
+        live = any(datetime.strptime(u, "%Y%m%d%H%M").replace(tzinfo=UTC) > self.now for u in mine)
+        if period in mine or live:  # this bot already spoke in this window (here or in part 5)
+            return
+        if AGENTS[agent].get("limit_notice_needs_dm"):
+            verdict, silent, _last = owner_wait(agent, self.now, self.jsonl.get(agent))
+            if verdict != "unanswered" or silent >= 6 * 3600:
+                return  # no DM to this bot waits: the main agent's line covers it
+        text = limit_notice_text(reset, agent)
+        for lst in (used, mine):
+            if period not in lst:
+                lst.append(period)
+            del lst[:-20]
+        self.save()  # marker durable BEFORE sending: an unclear result is never retried
+        ok = self.bot_send(agent, text)
+        self.alert(f"limitnotice:{agent}:{period}",
+                   f"{AGENTS[agent]['name']} на лимите до {fmt_msk(reset)} МСК; владельцу ушло «{text}» "
+                   f"({'доставлено' if ok else 'НЕ доставлено, повтора не будет'}).")
+
     def do_owner(self, agent: str, lim: tuple[datetime | None, bool] | None, autoreply_off: bool) -> None:
         name = AGENTS[agent]["name"]
         verdict, silent, last = owner_wait(agent, self.now, self.jsonl.get(agent))
@@ -624,6 +869,7 @@ class Guard:
                     text = limit_text(reset)
                     used.append(period)
                     del used[:-20]
+                    self.notice_periods(agent).append(period)  # this bot spoke: no 4a line from it
                     self.save()  # marker durable BEFORE sending: an unclear result is never retried
                     ok = self.bot_send(agent, text)
                     self.alert(f"autoreply:{period}",
@@ -707,7 +953,12 @@ class Guard:
                 continue
             try:
                 lim = self.do_agent(agent, panes.get(agent))
-                if AGENTS[agent]["owner_dm"] and agent not in self.restarted:
+                if lim and AGENTS[agent].get("limit_notice"):
+                    self.limit_notice(agent, lim)
+                rc_due = False
+                if AGENTS[agent].get("restart_check") and agent not in self.restarted:
+                    rc_due = self.do_restart_check(agent, panes.get(agent))
+                if AGENTS[agent]["owner_dm"] and agent not in self.restarted and not rc_due:
                     self.do_owner(agent, lim, autoreply_off)
             except Exception as exc:  # one agent's failure must not blind the others
                 self.failed = True
@@ -725,7 +976,7 @@ class Guard:
         if not self.failed:
             self.state["open"] = {k: v for k, v in self.state.get("open", {}).items()
                                   if k in self.seen or time.time() - v < 86400 and k.split(":")[0] in
-                                  ("queue", "loginheal", "frozen", "autoreply", "usage", "limit", "unanswered")}
+                                  ("queue", "loginheal", "frozen", "autoreply", "usage", "limit", "unanswered", "rc")}
         self.state["last_tick"] = int(time.time())
 
 

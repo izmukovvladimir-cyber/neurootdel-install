@@ -28,6 +28,7 @@ readonly -a EXPECTED=(
     "$CD/${U}-agents-reset::agents-reset.sh --auto::сброс сессий (ночной и дневной)"
     "$CD/${U}-agents-guard::agents-guard.py::сторож агентов (1/мин)"
     "$CD/${U}-memory-backup::memory-backup.sh --auto::бэкап памяти (03:30)"
+    "$CD/${U}-memory-weight::memory_weight_watch.py::вес памяти агентов (04:20)"
     "$CD/${U}-service-watch::resource-watchdog.sh::сторож ресурсов (*/5)"
     "$CD/${U}-service-watch::disk-clean-old.sh::чистка старых файлов (04:30)"
     "$CD/${U}-service-watch::agents-git-autosync.sh::git-история агентов (*/30)"
@@ -38,7 +39,7 @@ readonly -a EXPECTED=(
 readonly -a SCRIPTS=(
     "$L/agents-reset.sh" "$L/agents-guard.py" "$L/agent-handoff-flush.py" "$L/memory-backup.sh"
     "$L/resource-watchdog.sh" "$L/disk-clean-old.sh" "$L/agents-git-autosync.sh"
-    "$L/claude-usage-collector.py" "$L/outbox-put.py"
+    "$L/claude-usage-collector.py" "$L/outbox-put.py" "$L/memory_weight_watch.py" "$L/restart_unanswered.py"
     "$L/hooks/precompact-flush.sh" "$L/cron-manifest-watchdog.sh"
 )
 

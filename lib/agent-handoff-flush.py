@@ -266,6 +266,22 @@ def resolve_jsonl_dirs(agent: str) -> list[Path]:
             and (p.name == base or p.name.startswith(base + "-"))]
 
 
+# Our own heading left alone at the very end of the hand-written part: the generated
+# body under it was cut away by hand. AUTO_MARKER_RE no longer sees it, so every flush
+# kept it as sticky text and wrote a second heading below. Nothing can follow it, so
+# dropping it loses no hand-written text.
+ORPHAN_HEADING_RE = re.compile(r"(?:\A|\n)## Last \d+ actions \(auto-generated\)[ \t]*\s*\Z")
+
+
+def drop_orphan_headings(text: str) -> str:
+    """Strip trailing bare copies of our heading; text before them is returned unchanged."""
+    while True:
+        m = ORPHAN_HEADING_RE.search(text)
+        if m is None:
+            return text
+        text = text[:m.start()]
+
+
 def split_sticky(existing: str) -> str:
     """Return the hand-written part of handoff.md that must survive the flush.
 
@@ -274,6 +290,7 @@ def split_sticky(existing: str) -> str:
     marker as "nothing to keep" and silently destroyed the header — that is how
     an open-items block was lost on 2026-07-28.
     """
+    existing = drop_orphan_headings(existing)
     bounds = auto_bounds(existing)
     if bounds is None:
         return existing.rstrip() + "\n\n" if existing.strip() else ""
@@ -284,7 +301,7 @@ def split_sticky(existing: str) -> str:
     # indistinguishable from a real one, and the text a person wrote between those
     # lines would go with it (Codex, round 2, 2026-09-12). More than one closed
     # section is treated as a file we do not understand — see _flush_locked.
-    head = existing[:bounds[0]]
+    head = drop_orphan_headings(existing[:bounds[0]])
     return head.rstrip() + "\n\n" if head.strip() else ""
 
 

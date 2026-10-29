@@ -6,7 +6,7 @@
 #     has an edgelab install keeps the edgelab user and its paths
 #     (see select_install_names)
 #   - Node.js 22 + Python 3.12 + Claude Code CLI
-#   - Jarvis: izmukovvladimir-cyber/dashi-plugin-claude-code (main) -> systemd unit channel-jarvis
+#   - Jarvis: izmukovvladimir-cyber/dashi-plugin-claude-code (pinned commit, PLUGIN_COMMIT_DEFAULT) -> systemd unit channel-jarvis
 #     (a server that still runs the old claude-gateway is migrated; see --rollback)
 #   - Richard: izmukovvladimir-cyber/claude-code-telegram v1.6.0 -> systemd unit claude-richard
 #
@@ -40,7 +40,9 @@ set -euo pipefail
 
 readonly INSTALLER_VERSION="3.1.0"
 readonly PLUGIN_REPO="https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code.git"
-readonly PLUGIN_REF="main"
+# Every install gets the SAME plugin code: one pinned commit of the fork (owner-only
+# service commands, d846493). NEUROOTDEL_PLUGIN_COMMIT overrides it (40 hex chars).
+readonly PLUGIN_COMMIT_DEFAULT="d846493201d02b92399404c9b2a89a6dbcd89ab5"
 readonly JARVIS_UNIT="channel-jarvis"
 # Pre-plugin Jarvis (v3.0.x). Kept on disk for --rollback, never deleted.
 readonly LEGACY_GATEWAY_UNIT="claude-gateway"
@@ -1150,6 +1152,42 @@ ensure_channel_config_defaults() {
     esac
 }
 
+# plugin_commit -- the pinned plugin commit (NEUROOTDEL_PLUGIN_COMMIT or the default).
+plugin_commit() {
+    local c
+    c="$(env_value PLUGIN_COMMIT)"
+    c="${c:-$PLUGIN_COMMIT_DEFAULT}"
+    [[ "$c" =~ ^[0-9a-f]{40}$ ]] || die "NEUROOTDEL_PLUGIN_COMMIT must be a full 40-char commit id."
+    printf '%s' "$c"
+}
+
+# checkout_plugin <plugin_root> -- the plugin at exactly the pinned commit (detached HEAD).
+# A fresh install clones it; a re-run moves a clean checkout to the pin and keeps a
+# checkout with local edits as it is (warning), so an owner's hand change is never lost.
+checkout_plugin() {
+    local root=$1 pin head
+    pin="$(plugin_commit)"
+    if [[ ! -d "${root}/.git" ]]; then
+        as_agent git init -q "$root" || die "git init failed in ${root}."
+        as_agent git -C "$root" remote add origin "$PLUGIN_REPO" || die "git remote add failed in ${root}."
+    fi
+    head="$(as_agent git -C "$root" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    if [[ "$head" == "$pin" ]]; then
+        ok "Plugin already at pinned commit ${pin:0:12}."
+        return 0
+    fi
+    if [[ -n "$head" && -n "$(as_agent git -C "$root" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        warn "Plugin checkout ${root} has local edits -- kept at ${head:0:12}, pinned ${pin:0:12} NOT applied."
+        return 0
+    fi
+    log "Plugin: checking out pinned commit ${pin:0:12}."
+    as_agent git -C "$root" fetch -q --depth 1 origin "$pin" \
+        || die "Could not fetch plugin commit ${pin} from ${PLUGIN_REPO}."
+    as_agent git -C "$root" -c advice.detachedHead=false checkout -q --detach "$pin" \
+        || die "Could not check out plugin commit ${pin}."
+    [[ "$(as_agent git -C "$root" rev-parse HEAD)" == "$pin" ]] || die "Plugin HEAD is not the pinned commit."
+}
+
 install_jarvis() {
     step 6 "Installing Jarvis (Telegram channel plugin, systemd: ${JARVIS_UNIT})"
 
@@ -1179,12 +1217,7 @@ install_jarvis() {
 
     # The plugin lives inside the workspace: claude runs in plugin/ and picks
     # up the agent CLAUDE.md from the parent dirs.
-    if [[ -d "${plugin_root}/.git" ]]; then
-        log "Plugin repo exists -- pulling latest ${PLUGIN_REF}."
-        as_agent git -C "$plugin_root" pull --ff-only || warn "git pull failed; continuing with existing checkout."
-    else
-        as_agent git clone --depth 1 --branch "$PLUGIN_REF" "$PLUGIN_REPO" "$plugin_root"
-    fi
+    checkout_plugin "$plugin_root"
     [[ -f "${plugin_dir}/.mcp.json" ]] || die "Plugin checkout has no plugin/.mcp.json (${plugin_root})."
     as_agent env -C "$plugin_dir" "${AGENT_HOME}/.bun/bin/bun" install \
         || die "bun install failed in ${plugin_dir}."
@@ -1288,7 +1321,7 @@ _write_channel_env() {
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
 
-    CHANNEL_ENV_TOKEN="$JARVIS_BOT_TOKEN" render_channel_env \
+    CHANNEL_ENV_TOKEN="$JARVIS_BOT_TOKEN" CHANNEL_ENV_CMD_TRUSTED="$(env_value COMMAND_TRUSTED_IDS)" render_channel_env \
         "$env_file" "$JARVIS_ALLOWED_IDS" "$JARVIS_GROQ_KEY_FILE" "$state_dir" "$ws_root" >"$tmp" \
         || die "Could not build ${env_file}."
 
@@ -1363,6 +1396,21 @@ perm_ids = new_ids[0] if new_ids else (
     existing.get("TELEGRAM_PERMISSION_ALLOWED_USER_IDS", "") or (user_ids[0] if user_ids else ""))
 if perm_ids:
     managed["TELEGRAM_PERMISSION_ALLOWED_USER_IDS"] = perm_ids
+# Service commands (/new, /compact, /stop, /status, panel buttons...): only the owner,
+# plus the trusted ids given to the installer (NEUROOTDEL_COMMAND_TRUSTED_IDS). Same
+# pinning as above: a new owner answer re-pins, otherwise the existing value is kept.
+trusted = csv(os.environ.get("CHANNEL_ENV_CMD_TRUSTED", ""))
+for uid in trusted:
+    if not re.fullmatch(r"[0-9]+", uid):
+        sys.exit(f"channel.env: trusted command id {uid!r} is not a number")
+old_cmd = csv(existing.get("TELEGRAM_COMMAND_OWNER_IDS", ""))
+if new_ids and (not old_cmd or old_cmd[0] != new_ids[0]):
+    cmd_ids = [new_ids[0]]  # a new owner: the old trusted list belonged to someone else
+else:
+    cmd_ids = old_cmd or (user_ids[:1] if user_ids else [])  # same owner: hand-added ids stay
+cmd_ids += [t for t in trusted if t not in cmd_ids]
+if cmd_ids:
+    managed["TELEGRAM_COMMAND_OWNER_IDS"] = ",".join(cmd_ids)
 if groq:
     managed["GROQ_API_KEY"] = groq
 
@@ -1381,6 +1429,8 @@ out = [
     "# Permission prompts (\"allow this command?\") go ONLY to the owner:",
     "# TELEGRAM_PERMISSION_ALLOWED_USER_IDS is set once to the first id and kept, so",
     "# team members you add to TELEGRAM_ALLOWED_USER_IDS later never get them.",
+    "# Service commands (/new, /compact, /stop, /status, ...) and panel buttons obey",
+    "# ONLY TELEGRAM_COMMAND_OWNER_IDS (owner + trusted ids); others get one refusal line.",
     "# Without TELEGRAM_ALLOWED_USER_IDS the plugin refuses to start.",
 ]
 out += [f"{k}={v}" for k, v in managed.items()]
@@ -2269,8 +2319,14 @@ _guard_conf_get() {
 # when this run gave none.
 render_guard_conf() {
     local existing="${1:-}"
-    local agents labels mode chat
+    local agents labels mode chat wrules wclaude
     agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
+    wrules="$(env_value WEIGHT_RULES_KB)"
+    [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
+    [[ -z "$wrules" || "$wrules" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_RULES_KB '${wrules}' is not a number -- using 30."; wrules=""; }
+    wclaude="$(env_value WEIGHT_CLAUDE_KB)"
+    [[ -n "$wclaude" ]] || wclaude=$(_guard_conf_get "$existing" WEIGHT_CLAUDE_KB)
+    [[ -z "$wclaude" || "$wclaude" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_CLAUDE_KB '${wclaude}' is not a number -- using 40."; wclaude=""; }
     labels=$(_guard_conf_get "$existing" AGENT_LABELS)
     mode="$(env_value GUARD_ALERTS)"
     [[ -n "$mode" ]] || mode=$(_guard_conf_get "$existing" ALERT_MODE)
@@ -2284,7 +2340,9 @@ render_guard_conf() {
     cat <<EOF
 # ${INSTALL_TAG} v${INSTALLER_VERSION}: settings of the agent guard scripts. No secrets here.
 # A re-run of the installer rewrites this file and keeps CHANNEL_AGENTS, AGENT_LABELS,
-# ALERT_MODE and ALERT_TG_CHAT_ID unless new values are given.
+# ALERT_MODE, ALERT_TG_CHAT_ID and the WEIGHT_* caps unless new values are given.
+# WEIGHT_RULES_KB / WEIGHT_CLAUDE_KB: caps of core/rules.md and CLAUDE.md in the nightly
+#                        memory weight watch (journals handoff/decisions: 15 KB, fixed).
 # ALERT_MODE: outbox   = alerts are JSON files in /var/lib/${AGENT_USER}-guard/outbox
 #                        (read them: python3 ${GUARD_LIB_DIR}/agents-guard.py --drain),
 #                        plus the log /var/log/${AGENT_USER}-guard.log;
@@ -2305,6 +2363,8 @@ RICHARD_UNIT="claude-richard"
 RICHARD_ENV="$(_guard_conf_value "${RICHARD_HOME}/.env")"
 ALERT_MODE="${mode}"
 ALERT_TG_CHAT_ID="$(_guard_conf_value "$chat")"
+WEIGHT_RULES_KB="${wrules:-30}"
+WEIGHT_CLAUDE_KB="${wclaude:-40}"
 EOF
 }
 
@@ -2410,6 +2470,22 @@ CRON
 )"
 }
 
+# install_memory_weight_cron -- the nightly weight watch of the always-loaded memory (rule 5b).
+# Hourly; --auto weighs only in the 04:xx hour of the owner's clock (OWNER_TIMEZONE in guard.conf),
+# after the 04:00 session reset, so the server timezone and clock changes do not matter.
+install_memory_weight_cron() {
+    install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-memory-weight"
+    _install_cron_file "${AGENT_USER}-memory-weight" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: memory weight watch (rule 5b): handoff/decisions > 15 KB,
+# core/rules.md > WEIGHT_RULES_KB, CLAUDE.md > WEIGHT_CLAUDE_KB (guard.conf) -> one signal to the agent a day.
+# Stop: touch /var/lib/${AGENT_USER}-memory-weight/STOP ; remove this file to uninstall.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+20 * * * * root /usr/bin/python3 ${GUARD_LIB_DIR}/memory_weight_watch.py --auto >> /var/log/${AGENT_USER}-memory-weight.log 2>&1
+CRON
+)"
+}
+
 # install_service_watch_cron <shared_state> -- the small watchdogs, all on from the start.
 # Alerts of the root ones go through outbox-put.py (ALERT_MODE in guard.conf).
 install_service_watch_cron() {
@@ -2491,7 +2567,8 @@ CRON
 
     install_agents_guard_cron
     install_service_watch_cron "$shared_state"
-    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch}"
+    install_memory_weight_cron
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight}"
 }
 
 # _AGENT_FILE_PY -- runs AS THE AGENT USER (never root) on a path inside the agent's home,
@@ -2765,6 +2842,29 @@ rollback_to_gateway() {
 # FINAL BANNER
 # =============================================================================
 
+# report_claude_plan [credentials.json] -- prints the plan of the Claude account the
+# agents run on (subscriptionType only; tokens are never read out). "pro" gets a
+# warning: its usage limit stops a working agent for hours several times a day.
+report_claude_plan() {
+    local cred=${1:-"${AGENT_HOME}/.claude/.credentials.json"} plan
+    if [[ ! -s "$cred" ]]; then
+        warn "Claude account: not logged in yet. After 'claude auth login' check the plan:"
+        warn "  sudo -u ${AGENT_USER} jq -r .claudeAiOauth.subscriptionType ${cred}"
+        return 0
+    fi
+    plan=$(jq -r '.claudeAiOauth.subscriptionType // "unknown" | tostring | .[0:32]' "$cred" 2>/dev/null) || plan="unreadable"
+    plan=${plan//[^A-Za-z0-9_.-]/}
+    case "${plan,,}" in
+        pro)
+            warn "Claude account plan: pro -- too small for agents that work all day: the usage limit"
+            warn "  stops them for hours. Use Max (max) for this server." ;;
+        "")
+            warn "Claude account plan: unknown" ;;
+        *)
+            ok "Claude account plan: ${plan}" ;;
+    esac
+}
+
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
@@ -2797,6 +2897,7 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         sudo -u ${AGENT_USER} -i bash -lc 'claude auth login'
 
       Credentials land in ${AGENT_HOME}/.claude/ and are shared by both agents.
+      Check the plan (must not be "pro"): sudo -u ${AGENT_USER} jq -r .claudeAiOauth.subscriptionType ${AGENT_HOME}/.claude/.credentials.json
 
   $(printf '%b' "$C_YELLOW")2.$(printf '%b' "$C_NC") If tokens were skipped during install, fill them now and restart:
 
@@ -2875,6 +2976,7 @@ main() {
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
     install_team_refs || die "Team references are not all in place; fix the warnings above and re-run the installer."
     enable_services
+    report_claude_plan
     final_instructions
 }
 

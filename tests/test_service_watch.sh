@@ -92,7 +92,7 @@ OUT=$(NEUROOTDEL_CRON_D="${TDIR}/crond" NEUROOTDEL_MANIFEST_STATE="${TDIR}/man" 
 check "manifest: missing slots listed"       grep -q 'нет файла' <<<"$OUT"
 check "manifest: only the configured cron dir" bash -c '! grep -q "/etc/cron.d/" <<<"$0"' "$OUT"
 U=$(id -un)
-for n in agents-reset agents-guard memory-backup service-watch; do : >"${TDIR}/crond/${U}-${n}"; done
+for n in agents-reset agents-guard memory-backup memory-weight service-watch; do : >"${TDIR}/crond/${U}-${n}"; done
 printf 'x agents-reset.sh --auto\n' >"${TDIR}/crond/${U}-agents-reset"
 OUT=$(NEUROOTDEL_CRON_D="${TDIR}/crond" NEUROOTDEL_MANIFEST_STATE="${TDIR}/man" bash "${LIB}/cron-manifest-watchdog.sh" --dry-run 2>&1)
 check "manifest: present slot not reported"  bash -c '! grep -q "сброс сессий" <<<"$0"' "$OUT"
@@ -187,6 +187,15 @@ done
 check "cron: no 429 watcher, no digest send" bash -c '! grep -qE "429|claude-usage-digest.py[^)]*$" <(grep -v "^#" "$0")' "$CF"
 check "cron: no CRON_TZ"                     bash -c '! grep -q CRON_TZ "$0"' "$CF"
 check "cron: state dirs made"                test -d "${H}/.claude-lab/shared/state/disk-clean" -a -d "${H}/.claude-lab/shared/state/claude-usage"
+install() { :; }
+OPERATOR_TIMEZONE=Europe/Moscow install_memory_weight_cron
+unset -f install
+WF="${TDIR}/cron-neurootdel-memory-weight"
+check "weight cron: file written"            test -s "$WF"
+check "weight cron: hourly --auto as root"  grep -qE '^20 \* \* \* \* root /usr/bin/python3 /usr/local/lib/neurootdel/memory_weight_watch.py --auto ' "$WF"
+check "weight cron: stop file named"         grep -q 'memory-weight/STOP' "$WF"
+check "weight cron: no CRON_TZ"              bash -c '! grep -q CRON_TZ "$0"' "$WF"
+check "weight cron: called from install_guard" bash -c 'sed -n "/^install_guard()/,/^}/p" "$0" | grep -q "^    install_memory_weight_cron$"' "${REPO}/install.sh"
 check "memory cron: no ov-session-sync"      bash -c '! grep -q "ov-session-sync" <(sed -n "/^install_memory_cron()/,/^}/p" "$0")' "${REPO}/install.sh"
 write_as_user() { install -m "${3:-0644}" "$1" "$2"; }
 JARVIS_ENV_DIR="${TDIR}/etc/jarvis"

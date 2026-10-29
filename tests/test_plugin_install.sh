@@ -118,6 +118,32 @@ ENV6="${TDIR}/env6"
 CHANNEL_ENV_TOKEN="" render_channel_env "$TEAM" "" "" /st /ws >"$ENV6"
 check "perm: team member added, owner kept" has "$ENV6" "TELEGRAM_PERMISSION_ALLOWED_USER_IDS=555"
 check "perm: team member stays allowed" has "$ENV6" "TELEGRAM_ALLOWED_USER_IDS=555,777"
+
+# --- channel.env: service commands only for the owner (+ trusted ids) -----------
+check "cmd: fresh pinned to owner"      has "$ENV1" "TELEGRAM_COMMAND_OWNER_IDS=555"
+check "cmd: empty answers, no line"     hasnt "$ENV0" '^TELEGRAM_COMMAND_OWNER_IDS='
+check "cmd: rerun pins existing owner"  has "$ENV2" "TELEGRAM_COMMAND_OWNER_IDS=555"
+check "cmd: new owner answer re-pins"   has "$ENV3" "TELEGRAM_COMMAND_OWNER_IDS=999"
+check "cmd: team member is not owner"   has "$ENV6" "TELEGRAM_COMMAND_OWNER_IDS=555"
+ENV7="${TDIR}/env7"
+CHANNEL_ENV_TOKEN="" CHANNEL_ENV_CMD_TRUSTED="777, 555" render_channel_env "" "555" "" /st /ws >"$ENV7"
+check "cmd: trusted ids after owner"    has "$ENV7" "TELEGRAM_COMMAND_OWNER_IDS=555,777"
+CMDPREV="${TDIR}/cmdprev"
+printf 'TELEGRAM_ALLOWED_USER_IDS=555,777\nTELEGRAM_COMMAND_OWNER_IDS=555,888\n' >"$CMDPREV"
+ENV8="${TDIR}/env8"
+CHANNEL_ENV_TOKEN="" render_channel_env "$CMDPREV" "" "" /st /ws >"$ENV8"
+check "cmd: rerun keeps hand-set list"  has "$ENV8" "TELEGRAM_COMMAND_OWNER_IDS=555,888"
+ENV9="${TDIR}/env9"
+CHANNEL_ENV_TOKEN="" render_channel_env "$CMDPREV" "555" "" /st /ws >"$ENV9"
+check "cmd: same owner answer keeps trusted" has "$ENV9" "TELEGRAM_COMMAND_OWNER_IDS=555,888"
+ENV10="${TDIR}/env10"
+CHANNEL_ENV_TOKEN="" render_channel_env "$CMDPREV" "999" "" /st /ws >"$ENV10"
+check "cmd: new owner drops old trusted" has "$ENV10" "TELEGRAM_COMMAND_OWNER_IDS=999"
+ENV11="${TDIR}/env11"
+CHANNEL_ENV_TOKEN="" CHANNEL_ENV_CMD_TRUSTED="777" render_channel_env "$CMDPREV" "555" "" /st /ws >"$ENV11"
+check "cmd: new trusted added to kept list" has "$ENV11" "TELEGRAM_COMMAND_OWNER_IDS=555,888,777"
+bad_trusted_refused() { ! CHANNEL_ENV_TOKEN="" CHANNEL_ENV_CMD_TRUSTED="12a" render_channel_env "" "555" "" /st /ws >/dev/null 2>&1; }
+check "cmd: bad trusted id refused"     bad_trusted_refused
 check "perm: exactly one perm line"     test "$(grep -c '^TELEGRAM_PERMISSION_ALLOWED_USER_IDS=' "$ENV6")" -eq 1
 ENV7="${TDIR}/env7"
 CHANNEL_ENV_TOKEN="" render_channel_env "$TEAM" "999" "" /st /ws >"$ENV7"
@@ -422,7 +448,8 @@ PR="${FAKE_HOME}/.claude-lab/jarvis/.claude/dashi-plugin-claude-code"
 mkdir -p "${PR}/.git" "${PR}/plugin" "${PR}/.claude"; printf '{}' >"${PR}/plugin/.mcp.json"
 # What a rejected first start leaves behind (seen live, Claude Code 2.1.283).
 printf '{"disabledMcpjsonServers":["dashi-channel"]}\n' >"${PR}/.claude/settings.local.json"
-as_agent() { case "$1" in git|env) return 0 ;; *) "$@" ;; esac; }
+# git stub: the checkout already sits at the pinned commit (checkout_plugin is tested in test_plugin_pin.sh)
+as_agent() { case "$1" in git) [[ " $* " == *" rev-parse "* ]] && printf '%s\n' "$PLUGIN_COMMIT_DEFAULT"; return 0 ;; env) return 0 ;; *) "$@" ;; esac; }
 install() {
     local args=()
     while (($#)); do case $1 in -o|-g|-m) shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -707,7 +734,7 @@ check "gate: after apt-get -> passes"          test "$OUT" = "rc=0"
 STEPS="${TDIR}/steps"
 main_steps=(banner preflight install_apt_deps install_node ensure_agent_user check_node_for_agent
     install_claude_cli install_bun collect_inputs install_jarvis install_richard setup_global_claude
-    install_skills install_superpowers install_sudoers install_memory_cron install_guard setup_agent_hooks install_team_refs enable_services final_instructions)
+    install_skills install_superpowers install_sudoers install_memory_cron install_guard setup_agent_hooks install_team_refs enable_services report_claude_plan final_instructions)
 run_main_stubbed() {
     (
         for f in "${main_steps[@]}"; do eval "${f}() { echo ${f} >>'${STEPS}'; }"; done
