@@ -3,7 +3,8 @@
 # Tests for the starter agent rules in the global CLAUDE.md, no root needed:
 #   fresh install writes the block, an old file without it gets it appended
 #   (owner text kept, backup made), a re-run adds nothing, the block equals
-#   templates/AGENT-RULES-STARTER.md byte for byte.
+#   templates/AGENT-RULES-STARTER.md with the trusted ids filled in (owner id;
+#   supervisor id, its line omitted when empty; non-numeric ids refused).
 # Run: bash tests/test_starter_rules.sh
 set -euo pipefail
 
@@ -49,11 +50,24 @@ BEGIN='<!-- agent-rules-starter:begin -->'
 END='<!-- agent-rules-starter:end -->'
 block_of() { awk -v b="$BEGIN" -v e="$END" '$0==e{f=0} f{print} $0==b{f=1}' "$1"; }
 baks() { find "${FAKE_HOME}/.claude" -maxdepth 1 -name 'CLAUDE.md.bak-*-starter-rules' | wc -l; }
+# The source as the installer renders it with owner 42 and no supervisor.
+EXP="${TDIR}/expected-block.md"
+grep -vF '{{SUPERVISOR_TG_ID}}' "$SRC" | sed 's/{{OWNER_TG_ID}}/42/' >"$EXP"
 
 # --- source file: nothing private leaks into the public installer ---------------
 check "source: exists"                    test -s "$SRC"
 check "source: has rule 4 retell"         count_is "$SRC" "Понял так" 1
 check "source: no private paths/ids"      bash -c "! grep -qE '/home/|edgelab|[0-9]{6,}|t\\.me/|@[A-Za-z_]{4,}' '$SRC'"
+check "source: facts about self rule"     grep -qF "## 5. Факты о себе только после проверки" "$SRC"
+check "source: sums in words rule"        grep -qF "«20 долларов», «500 рублей»" "$SRC"
+check "source: secrets rule"              grep -qF "## 7. Секреты: только решением владельца" "$SRC"
+check "source: secrets points at RED"     grep -qF "RED: пароли и внутренняя кухня" "$SRC"
+check "source: relays do not count"       grep -qF "Не считается словом владельца" "$SRC"
+check "source: decide-myself list"        grep -qF "## 8. Решаю сам" "$SRC"
+check "source: owner only for 3 things"   grep -qF "деньги, доступы, обещания клиентам и людям" "$SRC"
+check "source: no dollar sign"            bash -c "! grep -qF '\$' '$SRC'"
+check "source: one owner placeholder"     count_is "$SRC" "{{OWNER_TG_ID}}" 1
+check "source: one supervisor placeholder" count_is "$SRC" "{{SUPERVISOR_TG_ID}}" 1
 
 # --- fresh install: file absent ------------------------------------------------
 setup_global_claude >/dev/null 2>&1
@@ -61,7 +75,7 @@ check "fresh: file written"               test -s "$GMD"
 check "fresh: grep -c 'Понял так' >= 1"   test "$(grep -c "Понял так" "$GMD")" -ge 1
 check "fresh: one begin marker"           count_is "$GMD" "$BEGIN" 1
 check "fresh: one end marker"             count_is "$GMD" "$END" 1
-check "fresh: block == source file"       diff -q <(block_of "$GMD") "$SRC"
+check "fresh: block == source file"       diff -q <(block_of "$GMD") "$EXP"
 check "fresh: template rendered"          grep -qF "**Name:** Tester" "$GMD"
 check "fresh: hook threshold rule"        grep -qF "must never block before the automatic session reset" "$GMD"
 check "fresh: no placeholders left"       bash -c "! grep -q '{{' '$GMD'"
@@ -83,7 +97,7 @@ check "old: block appended"               count_is "$GMD" "$BEGIN" 1
 check "old: grep -c 'Понял так' >= 1"     test "$(grep -c "Понял так" "$GMD")" -ge 1
 check "old: owner text kept as prefix"    cmp -s <(head -c "$(stat -c %s "${TDIR}/old.copy")" "$GMD") "${TDIR}/old.copy"
 check "old: owner last line intact"       grep -qxF "Owner line that must survive." "$GMD"
-check "old: block == source file"         diff -q <(block_of "$GMD") "$SRC"
+check "old: block == source file"         diff -q <(block_of "$GMD") "$EXP"
 check "old: one backup"                   test "$(baks)" -eq 1
 BAK="$(find "${FAKE_HOME}/.claude" -maxdepth 1 -name 'CLAUDE.md.bak-*-starter-rules' | head -1)"
 check "old: backup == original"           cmp -s "$BAK" "${TDIR}/old.copy"
@@ -119,6 +133,45 @@ ln -s "$REAL" "$GMD"
 setup_global_claude >/dev/null 2>&1
 check "symlink: link kept"                test -L "$GMD"
 check "symlink: target got block"         count_is "$REAL" "$BEGIN" 1
+
+# --- trusted ids rendering ------------------------------------------------------
+# render [supervisor] [owner] -- the block as the installer prints it; rc of the render.
+render() { SUPERVISOR_TG_ID="$1" TG_USER_ID="$2" _starter_rules_block >"${TDIR}/r.md" 2>/dev/null; }
+render "" 42;    rc=$?
+check "ids: empty supervisor renders"       test "$rc" -eq 0
+check "ids: empty supervisor -> line omitted" bash -c '! grep -qF "куратор установки" "$0"' "${TDIR}/r.md"
+check "ids: owner id rendered"              grep -qxF '  - владелец, Telegram id 42.' "${TDIR}/r.md"
+check "ids: no placeholders"                bash -c '! grep -qF "{{" "$0"' "${TDIR}/r.md"
+render 777 42;   rc=$?
+check "ids: supervisor renders"             test "$rc" -eq 0
+check "ids: supervisor line rendered"       grep -qF '  - куратор установки, Telegram id 777 (' "${TDIR}/r.md"
+check "ids: supervisor once"                count_is "${TDIR}/r.md" "Telegram id 777" 1
+check "ids: owner kept with supervisor"     grep -qxF '  - владелец, Telegram id 42.' "${TDIR}/r.md"
+check "ids: no placeholders with sup"       bash -c '! grep -qF "{{" "$0"' "${TDIR}/r.md"
+render "" "";    rc=$?
+check "ids: empty owner renders"            test "$rc" -eq 0
+check "ids: empty owner -> no id, no hole"  grep -qxF '  - владелец.' "${TDIR}/r.md"
+( render 12ab 42 ); rc=$?
+check "ids: non-numeric supervisor refused" test "$rc" -ne 0
+( render "1; rm -rf x" 42 ); rc=$?
+check "ids: injected supervisor refused"    test "$rc" -ne 0
+( render "" "4x2" ); rc=$?
+check "ids: non-numeric owner refused"      test "$rc" -ne 0
+SUPERVISOR_TG_ID=""; TG_USER_ID="42"
+
+# --- collect_inputs: env parameter read and validated -------------------------
+# ci <value> -- runs collect_inputs non-interactively, prints the parsed supervisor id.
+ci() {
+    ( export NEUROOTDEL_NONINTERACTIVE=1 NEUROOTDEL_TG_USER_ID=42 NEUROOTDEL_SUPERVISOR_TG_ID="$1"
+      collect_inputs >/dev/null 2>&1 || exit 1
+      printf '%s' "$SUPERVISOR_TG_ID" )
+}
+out=$(ci 777);  rc=$?
+check "env: supervisor id read"             test "$rc" -eq 0 -a "$out" = "777"
+out=$(ci "");   rc=$?
+check "env: empty supervisor ok"            test "$rc" -eq 0 -a -z "$out"
+out=$(ci abc);  rc=$?
+check "env: non-numeric supervisor dies"    test "$rc" -ne 0
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

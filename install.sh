@@ -28,6 +28,8 @@
 #   NEUROOTDEL_RICHARD_BOT_TOKEN  Richard Telegram bot token
 #   NEUROOTDEL_RICHARD_BOT_USER   Richard bot @username (no @)
 #   NEUROOTDEL_TG_USER_ID         Operator Telegram numeric ID
+#   NEUROOTDEL_SUPERVISOR_TG_ID   Optional second trusted Telegram numeric ID (installer
+#                                 supervisor) for the starter secrets rule; empty = none
 #   NEUROOTDEL_USER_NAME          Operator display name (for Jarvis CLAUDE.md)
 #   NEUROOTDEL_LANGUAGE           Operator language (default: Russian)
 #   NEUROOTDEL_TIMEZONE           Operator timezone (default: Europe/Moscow)
@@ -1002,6 +1004,8 @@ JARVIS_BOT_USERNAME=""
 RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
 TG_USER_ID=""
+# Optional second trusted id (installer supervisor), NEUROOTDEL_SUPERVISOR_TG_ID; empty = none.
+SUPERVISOR_TG_ID=""
 OPERATOR_NAME=""
 OPERATOR_LANGUAGE=""
 OPERATOR_TIMEZONE=""
@@ -1036,6 +1040,7 @@ BRIEF
         "Ваш Telegram numeric user ID (from @userinfobot)" \
         ""
 
+    SUPERVISOR_TG_ID="$(env_value SUPERVISOR_TG_ID)"
     JARVIS_BOT_USERNAME="${NEUROOTDEL_JARVIS_BOT_USER:-}"
     RICHARD_BOT_USERNAME="${NEUROOTDEL_RICHARD_BOT_USER:-}"
 
@@ -1080,6 +1085,9 @@ BRIEF
 
     if [[ -n "$TG_USER_ID" && ! "$TG_USER_ID" =~ ^[0-9]+$ ]]; then
         die "Telegram user ID must be a positive integer (got: ${TG_USER_ID})."
+    fi
+    if [[ -n "$SUPERVISOR_TG_ID" && ! "$SUPERVISOR_TG_ID" =~ ^[0-9]+$ ]]; then
+        die "NEUROOTDEL_SUPERVISOR_TG_ID must be a positive integer (got: ${SUPERVISOR_TG_ID})."
     fi
 
     ok "Inputs collected: name=${OPERATOR_NAME}, tz=${OPERATOR_TIMEZONE}, lang=${OPERATOR_LANGUAGE}"
@@ -1780,12 +1788,28 @@ readonly STARTER_RULES_END='<!-- agent-rules-starter:end -->'
 # Phrase of rule 4; a file that already has it carries the rules in some form.
 readonly STARTER_RULES_PROBE='Понял так'
 
-# _starter_rules_block -- prints the starter rules wrapped in the markers.
+# _starter_rules_block -- prints the starter rules wrapped in the markers, with the
+# trusted ids filled in: owner = TG_USER_ID (empty -> "владелец." without an id),
+# supervisor = SUPERVISOR_TG_ID (empty -> its line is omitted). Ids are digits only.
 _starter_rules_block() {
-    local src="${TEMPLATES_DIR}/AGENT-RULES-STARTER.md"
+    local src="${TEMPLATES_DIR}/AGENT-RULES-STARTER.md" owner="${TG_USER_ID:-}" sup="${SUPERVISOR_TG_ID:-}"
     [[ -f "$src" ]] || die "Template not found: $src"
+    [[ -z "$owner" || "$owner" =~ ^[0-9]+$ ]] || die "Telegram user ID must be a positive integer (got: ${owner})."
+    [[ -z "$sup" || "$sup" =~ ^[0-9]+$ ]] || die "NEUROOTDEL_SUPERVISOR_TG_ID must be a positive integer (got: ${sup})."
     printf '\n%s\n' "$STARTER_RULES_BEGIN"
-    cat "$src"
+    awk -v owner="$owner" -v sup="$sup" '
+        function put(s, key, val,    i) {
+            while ((i = index(s, key)) > 0) s = substr(s, 1, i - 1) val substr(s, i + length(key))
+            return s
+        }
+        index($0, "{{SUPERVISOR_TG_ID}}") && sup == "" { next }
+        {
+            line = $0
+            if (owner == "") line = put(line, ", Telegram id {{OWNER_TG_ID}}", "")
+            line = put(line, "{{OWNER_TG_ID}}", owner)
+            line = put(line, "{{SUPERVISOR_TG_ID}}", sup)
+            print line
+        }' "$src"
     printf '%s\n' "$STARTER_RULES_END"
 }
 
@@ -2762,7 +2786,7 @@ _ensure_marked_block() {
 #   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
 #                                      between markers in the agent's CLAUDE.md;
 #   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
-#     PARALLEL-AGENTS,LEARNINGS}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
+#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
 #     library/INDEX.md, core/archive/.
 # Every file lands through the agent user (_agent_write), never a root write into its home.
 install_team_refs() {
@@ -2779,7 +2803,7 @@ install_team_refs() {
     as_agent mkdir -p "$shared" "${AGENT_HOME}/.claude/rules" "$mem_dir" \
         "${ws}/core/archive" "${ws}/library" || die "Could not create reference dirs as ${AGENT_USER}."
 
-    for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS; do
+    for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER; do
         tmp=$(mktemp)
         TMPFILES+=("$tmp")
         render_template "${tdir}/shared/${f}.md" "$tmp" \

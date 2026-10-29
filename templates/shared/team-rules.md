@@ -37,6 +37,8 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 - The owner's correction: fix it, then record the lesson:
   `python3 {{LIB}}/hooks/learnings-engine.py <workspace> capture --type correction --source owner --rule "..."`
   (top 5 return at session start). Team-wide lesson: also ~/.claude-lab/shared/LEARNINGS.md.
+- Starter lessons every agent shares (rule, why, how): ~/.claude-lab/shared/LESSONS-STARTER.md.
+  Read it once when you start and again before similar work.
 
 ## Models and subagents
 - Main turn stays on the main model. Review = a second model; bulk reading = the light model.
@@ -48,4 +50,4 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
   the guard restarts it quietly when the turn is over.
 
 ## References (cold, Read when needed)
-- ~/.claude-lab/shared/{STAFF,AGENTS,TOOLS,PARALLEL-AGENTS,LEARNINGS}.md
+- ~/.claude-lab/shared/{STAFF,AGENTS,TOOLS,PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER}.md

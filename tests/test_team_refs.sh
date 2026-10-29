@@ -46,10 +46,17 @@ MEM="${H}/.claude/projects/$(printf '%s' "${WS}/dashi-plugin-claude-code" | sed 
 
 install_team_refs; rc=$?
 check "refs: rc 0"                            test "$rc" -eq 0
-for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS; do
+for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER; do
     check "refs: shared/${f}.md"              test -s "${SH}/${f}.md"
 done
 check "refs: placeholders filled"             bash -c '! grep -l "{{" "$0"/*.md' "$SH"
+LS="${SH}/LESSONS-STARTER.md"
+nl=$(grep -cE '^## [0-9]+\. ' "$LS")
+check "lessons: 12-20 lessons"               test "$nl" -ge 12 -a "$nl" -le 20
+check "lessons: each has rule/why/how"       test "$(grep -c '^Правило: ' "$LS")" -eq "$nl" -a "$(grep -c '^Почему: ' "$LS")" -eq "$nl" -a "$(grep -c '^Как: ' "$LS")" -eq "$nl"
+check "lessons: == template"                 cmp -s "$LS" "${REPO}/templates/shared/LESSONS-STARTER.md"
+check "lessons: in team-rules references"    grep -qF 'LESSONS-STARTER.md' "${SH}/team-rules.md"
+check "lessons: generic (no ids/IPs/@/\$)"   bash -c '! grep -qE "[0-9]{6,}|([0-9]{1,3}\.){3}[0-9]{1,3}|@|\\\$|/home/|t\.me/" "$0"' "${REPO}/templates/shared/LESSONS-STARTER.md"
 check "refs: owner name in team rules"        grep -q 'Owner = Анна' "${SH}/team-rules.md"
 check "refs: lib path in team rules"          grep -q '/usr/local/lib/neurootdel/include_weight.py' "${SH}/team-rules.md"
 for f in bash python typescript; do
@@ -67,13 +74,14 @@ check "refs: no names of ours in templates"   bash -c '! grep -rliE "svetlan|с�
 
 # Re-run: owner's edits outside markers and in owner files survive, the block is not doubled.
 echo '- my own staff line' >>"${SH}/STAFF.md"
+echo '## 21. my own lesson' >>"${SH}/LESSONS-STARTER.md"
 echo '- [my rule](feedback-x.md)' >>"${MEM}/MEMORY.md"
 echo 'my rule' >>"${H}/.claude/rules/bash.md"
 echo 'after the block' >>"${WS}/CLAUDE.md"
-sha_before=$(sha256sum "${SH}/STAFF.md" "${MEM}/MEMORY.md" "${H}/.claude/rules/bash.md" | sha256sum)
+sha_before=$(sha256sum "${SH}/LESSONS-STARTER.md" "${SH}/STAFF.md" "${MEM}/MEMORY.md" "${H}/.claude/rules/bash.md" | sha256sum)
 echo 'stale managed text' >>"${SH}/team-rules.md"
 install_team_refs
-sha_after=$(sha256sum "${SH}/STAFF.md" "${MEM}/MEMORY.md" "${H}/.claude/rules/bash.md" | sha256sum)
+sha_after=$(sha256sum "${SH}/LESSONS-STARTER.md" "${SH}/STAFF.md" "${MEM}/MEMORY.md" "${H}/.claude/rules/bash.md" | sha256sum)
 check "rerun: owner files untouched"          test "$sha_before" = "$sha_after"
 check "rerun: team rules refreshed"           bash -c '! grep -q "stale managed text" "$0"' "${SH}/team-rules.md"
 check "rerun: one block only"                 test "$(grep -c "BEGIN ${INSTALL_TAG}: team-rules" "${WS}/CLAUDE.md")" -eq 1
