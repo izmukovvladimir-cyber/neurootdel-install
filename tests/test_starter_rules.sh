@@ -98,14 +98,14 @@ check "old re-run: still one backup"      test "$(baks)" -eq 1
 
 # --- owner already has the retell rule in own words: left alone ----------------
 rm -f "${FAKE_HOME:?}"/.claude/CLAUDE.md.bak-*-starter-rules
-printf 'Own rule: Понял так: делаю X.\n' >"$GMD"
+printf 'Own rule: Понял так: делаю X.\n%s\n' "$RED_SECRETS_BEGIN" >"$GMD"  # RED block present: only the starter logic is checked
 cp "$GMD" "${TDIR}/own.copy"
 setup_global_claude >/dev/null 2>&1
 check "own rule: untouched"               cmp -s "$GMD" "${TDIR}/own.copy"
 check "own rule: no backup"               test "$(baks)" -eq 0
 
 # --- markers present, phrase edited out by the owner: left alone --------------
-printf 'text\n%s\nowner edited the rules\n%s\n' "$BEGIN" "$END" >"$GMD"
+printf 'text\n%s\nowner edited the rules\n%s\n%s\n' "$BEGIN" "$END" "$RED_SECRETS_BEGIN" >"$GMD"
 cp "$GMD" "${TDIR}/markers.copy"
 setup_global_claude >/dev/null 2>&1
 check "markers only: untouched"           cmp -s "$GMD" "${TDIR}/markers.copy"

@@ -1818,6 +1818,84 @@ ensure_starter_rules() {
     ok "Starter rules appended to ${dst} (backup: ${bak})."
 }
 
+# RED secrets rule: passwords, keys, access and internal details go out only by
+# the owner's decision. Its own block, so installs made before it get it too.
+readonly RED_SECRETS_BEGIN='<!-- red-secrets-rule:begin -->'
+
+# ensure_red_secrets_rule <CLAUDE.md> -- appends templates/RED-SECRETS-RULE.md
+# once (backup first); a file that already has the marker is left alone.
+ensure_red_secrets_rule() {
+    local dst src="${TEMPLATES_DIR}/RED-SECRETS-RULE.md"
+    [[ -f "$src" ]] || die "Template not found: $src"
+    dst=$(readlink -f -- "$1") || return 0
+    [[ -f "$dst" ]] || return 0
+    grep -qF -- "$RED_SECRETS_BEGIN" "$dst" && return 0
+
+    local tmp bak mode
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    cat -- "$dst" > "$tmp"
+    if [[ -s "$tmp" && -n "$(tail -c1 "$tmp")" ]]; then
+        printf '\n' >> "$tmp"
+    fi
+    cat -- "$src" >> "$tmp"
+
+    bak="${dst}.bak-$(date +%Y%m%d-%H%M%S)-red-secrets"
+    cp -p -- "$dst" "$bak" || die "Cannot back up ${dst}; RED secrets rule not added."
+    mode=$(stat -c '%a' -- "$dst")
+    write_as_user "$tmp" "$dst" "$mode"
+    ok "RED secrets rule appended to ${dst} (backup: ${bak})."
+}
+
+# ensure_secret_guard_hook <settings.json> <guard.py> -- adds the PreToolUse hook
+# that stops outbound messages carrying passwords/keys/tokens; idempotent by the
+# script name, every other key kept, backup before the first change.
+ensure_secret_guard_hook() {
+    local dst=$1 guard=$2 tmp rc=0 mode=644
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    python3 - "$dst" "$guard" "$tmp" <<'PY' || rc=$?
+import json
+import sys
+from pathlib import Path
+
+path, guard, out = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+MATCHER = "mcp__dashi-channel__reply|mcp__dashi-channel__edit_message|mcp__gbrain-swarm__notify"
+data: dict = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError as exc:
+        sys.exit(f"{path}: not valid JSON ({exc}); left untouched")
+    if not isinstance(data, dict):
+        sys.exit(f"{path}: top level is not an object; left untouched")
+hooks = data.setdefault("hooks", {})
+pre = hooks.setdefault("PreToolUse", []) if isinstance(hooks, dict) else None
+if not isinstance(pre, list):
+    sys.exit(f"{path}: hooks.PreToolUse is not an array; left untouched")
+def wired(entry: object) -> bool:
+    """An entry that runs the guard on every outbound tool."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+        return False
+    tools = set(str(entry.get("matcher", "")).split("|"))
+    runs = any(isinstance(h, dict) and h.get("type") == "command"
+               and str(h.get("command", "")).strip() == f"python3 {guard}" for h in entry["hooks"])
+    return runs and set(MATCHER.split("|")) <= tools
+if any(wired(e) for e in pre):
+    sys.exit(3)  # already wired
+pre.append({"matcher": MATCHER,
+            "hooks": [{"type": "command", "command": f"python3 {guard}", "timeout": 10}]})
+out.write_text(json.dumps(data, indent=2) + "\n")
+PY
+    [[ $rc -eq 3 ]] && return 0
+    [[ $rc -eq 0 ]] || return "$rc"
+    if [[ -f "$dst" ]]; then
+        mode=$(stat -c '%a' -- "$dst")
+        [[ -f "${dst}.bak-install" ]] || cp -p -- "$dst" "${dst}.bak-install" || return 1
+    fi
+    write_as_user "$tmp" "$dst" "$mode"
+}
+
 setup_global_claude() {
     step 8 "Setting up ${AGENT_HOME}/.claude/ (shared OAuth dir)"
 
@@ -1849,6 +1927,19 @@ SJEOF
         write_as_user "$tmp" "$settings_json" 0644
     fi
 
+    local guard="${claude_dir}/hooks/secret-outbound-guard.py"
+    [[ -f "${TEMPLATES_DIR}/secret-outbound-guard.py" ]] \
+        || die "Template not found: ${TEMPLATES_DIR}/secret-outbound-guard.py"
+    if ! cmp -s -- "${TEMPLATES_DIR}/secret-outbound-guard.py" "$guard"; then
+        if [[ -f "$guard" ]]; then
+            cp -p -- "$guard" "${guard}.bak-$(date +%Y%m%d-%H%M%S)" \
+                || die "Cannot back up ${guard}; guard not updated."
+        fi
+        write_as_user "${TEMPLATES_DIR}/secret-outbound-guard.py" "$guard" 0755
+    fi
+    ensure_secret_guard_hook "$settings_json" "$guard" \
+        || die "Cannot add the secret guard hook to ${settings_json}."
+
     local mcp_json="${claude_dir}/mcp.json"
     if [[ ! -f "$mcp_json" ]]; then
         local tmp
@@ -1877,6 +1968,7 @@ SJEOF
     else
         ensure_starter_rules "$global_claude_md"
     fi
+    ensure_red_secrets_rule "$global_claude_md"
 
     fix_owner "$claude_dir"
     ok "${claude_dir} ready."
