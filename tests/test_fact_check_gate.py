@@ -3,6 +3,7 @@
 style list, optional chip extras (tag in groups, a person's ready post), ids from guard.conf.
 Run: python3 tests/test_fact_check_gate.py"""
 import contextlib
+import hashlib
 import http.client
 import importlib.util
 import json
@@ -15,6 +16,22 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from pathlib import Path
+
+# sha256[:16] of lowercase name stems from the server the defaults came from; kept as
+# hashes so this public repo does not list them (numbers and ports: the check above).
+PRIVATE_STEM_HASHES = {"e159719da19b8dea", "3b8ac1e335565ad7", "6cc4efe2a6abe67a", "b9e9e2463b3b5b70",
+                       "480022346e390147", "4857bd728ee1cd91", "6b26c23a88657a97"}
+
+
+def private_stems(text: str) -> bool:
+    """True when a hashed private name stem occurs anywhere inside a run of letters, or a
+    digit run of 5+ (an id or a port glued to text) other than the two known constants."""
+    for w in re.findall(r"[^\W\d_]{3,}", text.lower()):
+        for i in range(len(w) - 2):
+            if any(hashlib.sha256(w[i:i + n].encode()).hexdigest()[:16] in PRIVATE_STEM_HASHES
+                   for n in range(3, min(len(w) - i, 8) + 1)):
+                return True
+    return not set(re.findall(r"\d{5,}", text)) <= {"65536", "86400"}
 
 GATE = Path(__file__).resolve().parent.parent / "lib" / "hooks" / "fact-check-gate.py"
 GROUP = "-1009000000001"
@@ -314,7 +331,7 @@ def conf_cases() -> list[tuple[str, bool]]:
         ("conf: no hardcoded Telegram ids or ports in the gate", re.search(r"\b\d{5,}\b", src) is None
          or set(re.findall(r"\b\d{5,}\b", src)) <= {"65536", "86400"}),
         ("conf: no owner-specific names or paths in the gate",
-         re.search(r"Светлан|Николай|Никола|Вика|Виктори|Женя|Юля|18090|/home/neurootdel|348049383", src) is None),
+         "/home/neurootdel" not in src and not private_stems(src)),
         ("conf: no ban on the long dash", "—" not in (g.STYLE_RE.pattern if g.STYLE_RE else "")
          and full.style_problems("Готово — проверил.") == []),
         ("conf: no chip -> no network, tag and human-post extras off", no_chip_no_network(Path(tempfile.mkdtemp()))),

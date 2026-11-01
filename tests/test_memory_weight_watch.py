@@ -77,7 +77,7 @@ def light_agent_is_silent():
 @case
 def heavy_handoff_signals_once_per_day():
     lab, st = env()
-    make_agent(lab, "a", handoff=BIG + "x" * 9000)  # ~25 KB like Nikolai's
+    make_agent(lab, "a", handoff=BIG + "x" * 9000)  # ~25 KB, an overgrown handoff
     n = Rec()
     assert go(lab, st, D1, n) == []
     assert go(lab, st, D1, n) == []  # second manual run the same day: no second signal
