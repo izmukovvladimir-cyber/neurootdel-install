@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/neurootdel-in
 | Node.js | 22.x | Среда для Claude Code CLI |
 | Python | 3.12+ | Скрипты |
 | Claude Code | latest | AI-агент (Anthropic, Opus -- код/ревью, Sonnet -- субагенты) |
-| Bun + [Telegram-плагин](https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code) | latest (main) | Связь агента с Telegram |
+| Bun + [Telegram-плагин](https://github.com/izmukovvladimir-cyber/dashi-plugin-claude-code) | закреплённый коммит (`PLUGIN_COMMIT_DEFAULT`) | Связь агента с Telegram |
 | Caddy | latest | Веб-сервер для вебхуков |
 | UFW + fail2ban | -- | Безопасность сервера |
 
