@@ -247,35 +247,26 @@ running_job() {
     python3 "$LIB/agent_running_job.py" ${2:+"$2"} "$1" 2>>"$LOG" || echo "ERR helper failed"
 }
 
+# Context of the CURRENT session only (29.10.2026, reset loop): the newest-by-mtime file was
+# the OLD transcript right after a restart (the new session had no transcript yet and the dying
+# CLI appended untimed records to the old one), so the same ctx restarted the agent every run.
+# Prints "<ctx>\t<path>", NODATA, NOSESSION, SAME\t<ctx>\t<path> or ERR (agent_context_size.py).
+LAST_RESET_DIR="$STATE/last-reset"
+[ "$DRY" = 1 ] || mkdir -p "$LAST_RESET_DIR"
+service_start_epoch() {
+    local raw
+    raw="$(systemctl show -p ExecMainStartTimestamp --value "channel-$1.service" 2>/dev/null)" || return 1
+    [ -n "$raw" ] || return 1
+    raw="$(date -d "$raw" +%s 2>/dev/null)" || return 1
+    # +1: %s drops the fraction, so the whole start second is excluded (an old-session record
+    # in that second must not pass as the new session; the CLI never writes within 1 s of start)
+    echo $(( raw + 1 ))
+}
 agent_context_size() {
-    python3 - "$(project_prefix "$1")" "$PROJECTS_DIR" <<'PY'
-import glob, json, os, sys
-prefix, projects = sys.argv[1], sys.argv[2]
-pat = os.path.join(projects, f"{prefix}*", "*.jsonl")
-try:
-    files = sorted(glob.glob(pat), key=os.path.getmtime)
-except OSError:
-    print("ERR"); raise SystemExit(0)
-if not files:
-    print("NODATA"); raise SystemExit(0)
-last = 0
-try:
-    with open(files[-1]) as f:
-        for line in f:
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            u = (o.get("message") or {}).get("usage") or o.get("usage")
-            if not u:
-                continue
-            cr = u.get("cache_read_input_tokens", 0) or 0
-            if cr:
-                last = cr
-except OSError:
-    print("ERR"); raise SystemExit(0)
-print(last)
-PY
+    local start
+    start="$(service_start_epoch "$1")" || { echo ERR; return 0; }
+    python3 "$LIB/agent_context_size.py" "$(project_prefix "$1")" "$PROJECTS_DIR" "$start" \
+        "$LAST_RESET_DIR/$1" 2>>"$LOG" || echo ERR
 }
 
 # Restart with a quiet marker: channel-confirm.sh sees it, deletes it and skips the resume-nudge.
@@ -361,8 +352,23 @@ for agent in "${AGENTS[@]}"; do
             log "[$agent] background process older than 3h does not hold the reset: $job" ;;
     esac
 
-    ctx="$(agent_context_size "$agent" 2>/dev/null || echo ERR)"
+    measured="$(agent_context_size "$agent")"
+    case "$measured" in
+        NOSESSION)
+            note_reset "$agent"
+            RESULT[$agent]="skipped: current session has no transcript yet"
+            log "[$agent] SKIP: no transcript of the current session yet (started after restart)"
+            continue ;;
+        SAME$'\t'*)
+            note_reset "$agent"
+            RESULT[$agent]="skipped: same transcript as last reset"
+            log "[$agent] SKIP: transcript and ctx unchanged since last reset: ${measured#SAME$'\t'}"
+            continue ;;
+    esac
+    ctx="${measured%%$'\t'*}"
+    transcript="${measured#*$'\t'}"
     if ! [[ "$ctx" =~ ^[0-9]+$ ]]; then
+        ctx="$measured"
         RESULT[$agent]="skipped: context not measured ($ctx, streak $(note_skip "$agent"))"
         log "[$agent] SKIP: context not measured: $ctx"
         continue
@@ -379,7 +385,7 @@ for agent in "${AGENTS[@]}"; do
         log "[$agent] SKIP: ctx=$ctx < $limit (busy_rc=$busy_rc)"
         continue
     fi
-    log "[$agent] ctx=$ctx >= $limit (busy_rc=$busy_rc), resetting"
+    log "[$agent] ctx=$ctx >= $limit (busy_rc=$busy_rc), resetting ($transcript)"
 
     now_turn_ts="$(newest_turn_ts "$agent")"
     if [ "$now_turn_ts" = ERR ]; then
@@ -420,6 +426,10 @@ for agent in "${AGENTS[@]}"; do
             RESULT[$agent]="would reset (dry-run)"
         else
             RESULT[$agent]="reset"
+            # atomic (tmp + mv): a damaged record reads as ERR and holds resets until fixed
+            { printf '%s\t%s\n' "$transcript" "$ctx" > "$LAST_RESET_DIR/.$agent.tmp" \
+                && mv -f "$LAST_RESET_DIR/.$agent.tmp" "$LAST_RESET_DIR/$agent"; } 2>>"$LOG" \
+                || log "[$agent] WARN: last-reset record not written"
             log "[$agent] restart OK (quiet, no resume-nudge)"
         fi
     else
