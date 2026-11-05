@@ -1,14 +1,19 @@
 #!/usr/bin/env bats
 # Regression tests for the four review fixes that needed explicit coverage:
-#   F1  -- state-file round-trip restores AGENT_NAME / OPERATOR_* from inputs
-#   F2  -- _tg_getme uses curl -K so the bot token is never in argv
+#   F1  -- owner answers survive a re-run (guard.conf; v2 state file is gone since v3.0.0)
+#   F2  -- tg_get_me uses curl -K so the bot token is never in argv
 #   F5  -- Superpowers jq merge handles malformed plugins config.json
 #   F9  -- install_skill_bundle stages on the same filesystem as dst_parent
 
 setup() {
     export INSTALL_SH_SOURCED_FOR_TESTING=1
+    # install.sh sets `trap _cleanup EXIT`, which replaces bats' own EXIT trap: a failing
+    # test then vanishes ("Executed N instead of expected M") instead of "not ok". Keep bats' trap.
+    local bats_exit_trap
+    bats_exit_trap="$(trap -p EXIT)"
     # shellcheck disable=SC1091
     source "${BATS_TEST_DIRNAME}/../install.sh"
+    eval "${bats_exit_trap:-trap - EXIT}"
 
     TDIR="$(mktemp -d)"
 
@@ -26,88 +31,71 @@ teardown() {
     rm -rf "$TDIR"
 }
 
-# --- F1: state-file round-trip -------------------------------------------------
+# --- F1: inputs survive a re-run ----------------------------------------------
+# v3.0.0 dropped the v2 state file (record_step/state_file). The owner's answers now live in
+# guard.conf, and a re-run without env reads them back as the defaults of collect_inputs.
 
-@test "F1 state round-trip: record_step persists safe inputs into state file" {
-    AGENT_NAME="thrall"
-    AGENT_ROLE="coder"
-    OPERATOR_NAME="Dashi"
-    OPERATOR_TIMEZONE="UTC+3"
-    OPERATOR_LANGUAGE="ru"
-    REAL_USER="${USER:-tester}"
-    COMPLETED_STEPS=()
-
-    record_step "gather_inputs"
-
-    local sf
-    sf="$(state_file)"
-    [ -f "$sf" ]
-
-    # Assert the JSON contains the inputs load_state() would read back.
-    # (We do not call load_state here because it uses `mapfile`, a Bash 4+
-    # builtin -- macOS BATS runs with Bash 3.2. Production runs on Ubuntu
-    # 22/24 where Bash 5.x provides mapfile.)
-    run jq -r '.inputs.agent_name' "$sf"
-    [ "$output" = "thrall" ]
-    run jq -r '.inputs.agent_role' "$sf"
-    [ "$output" = "coder" ]
-    run jq -r '.inputs.operator_name' "$sf"
-    [ "$output" = "Dashi" ]
-    run jq -r '.inputs.operator_timezone' "$sf"
-    [ "$output" = "UTC+3" ]
-    run jq -r '.inputs.operator_language' "$sf"
-    [ "$output" = "ru" ]
-    run jq -r '.completed_steps[0]' "$sf"
-    [ "$output" = "gather_inputs" ]
-    run jq -r '.real_user' "$sf"
-    [ "$output" = "${REAL_USER}" ]
+_f1_render_conf() {   # guard.conf of this test, from the current answers
+    apply_install_names new
+    GUARD_LIB_DIR="${TDIR}/lib"; AGENT_HOME="${TDIR}/home"; mkdir -p "$GUARD_LIB_DIR"
+    render_guard_conf "" > "${GUARD_LIB_DIR}/guard.conf"
 }
 
-@test "F1 state round-trip: secrets are NOT written to state file" {
-    AGENT_NAME="thrall"
-    CONFIGURED_BOT_TOKEN="1234:ABCDEFsecret"
-    CONFIGURED_GROQ_KEY="gsk_shouldnotleak"
-    OV_KEY="ov_shouldnotleak"
-    REAL_USER="${USER:-tester}"
-    COMPLETED_STEPS=()
-
-    record_step "gather_inputs"
-
-    local sf contents
-    sf="$(state_file)"
-    contents="$(cat "$sf")"
-
-    # Only allowed fields should appear; secrets must not.
-    ! grep -q "1234:ABCDEFsecret" <<<"$contents"
-    ! grep -q "gsk_shouldnotleak" <<<"$contents"
-    ! grep -q "ov_shouldnotleak" <<<"$contents"
+_f1_collect_without_env() {   # a re-run: no env, Enter on every question
+    unset NEUROOTDEL_USER_NAME NEUROOTDEL_TG_USER_ID NEUROOTDEL_LANGUAGE NEUROOTDEL_TIMEZONE \
+        NEUROOTDEL_JARVIS_BOT_TOKEN NEUROOTDEL_RICHARD_BOT_TOKEN \
+        EDGELAB_USER_NAME EDGELAB_TG_USER_ID EDGELAB_LANGUAGE EDGELAB_TIMEZONE
+    export NEUROOTDEL_NONINTERACTIVE=1
+    OPERATOR_NAME=""; TG_USER_ID=""; OPERATOR_LANGUAGE=""; OPERATOR_TIMEZONE=""
+    eval 'step() { :; }; log() { :; }; warn() { :; }; ok() { :; }'
+    collect_inputs </dev/null
 }
 
-# --- F2: curl -K (token never in argv) -----------------------------------------
+@test "F1 re-run: owner name and id come back from guard.conf" {
+    OPERATOR_NAME="Dashi"; TG_USER_ID="424242"; OPERATOR_TIMEZONE="Asia/Bangkok"; OPERATOR_LANGUAGE="English"
+    MAIN_AGENT_NAME="Thrall"; DOCTOR_NAME="Doc"
+    _f1_render_conf
+    grep -qx 'OWNER_NAME="Dashi"' "${GUARD_LIB_DIR}/guard.conf"
+    grep -qx 'OWNER_TG_ID="424242"' "${GUARD_LIB_DIR}/guard.conf"
+    grep -qx 'OWNER_TIMEZONE="Asia/Bangkok"' "${GUARD_LIB_DIR}/guard.conf"
 
-@test "F2 telegram: _tg_curl_cfg emits a config file, token only inside it" {
-    local token="111:SECRETTOKEN"
-    local cfg
-    cfg=$(_tg_curl_cfg "$token" "getMe")
-    [ -f "$cfg" ]
-    grep -q "https://api.telegram.org/bot${token}/getMe" "$cfg"
-    local mode
-    mode=$(stat -f '%Lp' "$cfg" 2>/dev/null || stat -c '%a' "$cfg")
-    [ "$mode" = "600" ]
-    rm -f "$cfg"
+    _f1_collect_without_env
+    [ "$OPERATOR_NAME" = "Dashi" ]
+    [ "$TG_USER_ID" = "424242" ]
 }
 
-@test "F2 telegram: _tg_getme invocation does not put token in curl argv" {
-    local argv_log="${TDIR}/curl-argv.log"
-    eval "curl_safe() { printf '%s\n' \"\$@\" > '${argv_log}'; echo '{\"ok\":false,\"error_code\":401}'; }"
+@test "F1 re-run: bot tokens are NOT written to guard.conf" {
+    OPERATOR_NAME="Dashi"; TG_USER_ID="424242"; MAIN_AGENT_NAME="Thrall"; DOCTOR_NAME="Doc"
+    JARVIS_BOT_TOKEN="1234567:ABCDEFsecretJarvisTokenPart_xyz0123"
+    RICHARD_BOT_TOKEN="7654321:ABCDEFsecretRichardTokenPart_xyz012"
+    _f1_render_conf
+    # `! cmd` never fails a bats test (errexit ignores negated commands): check the status.
+    run grep -q "ABCDEFsecretJarvisTokenPart" "${GUARD_LIB_DIR}/guard.conf"
+    [ "$status" -eq 1 ]
+    run grep -q "ABCDEFsecretRichardTokenPart" "${GUARD_LIB_DIR}/guard.conf"
+    [ "$status" -eq 1 ]
+    # only the public bot ids (numeric part) are kept, for the fact gate
+    grep -qx 'FACT_GATE_SELF_IDS="1234567"' "${GUARD_LIB_DIR}/guard.conf"
+}
+
+# --- F2: token never in curl argv ----------------------------------------------
+# v3.0.0 replaced _tg_curl_cfg/_tg_getme with tg_get_me; the property is the same: the bot
+# token must not be in curl's argv (visible to every local user in ps / /proc/*/cmdline).
+
+@test "F2 telegram: tg_get_me does not put the token in curl argv" {
+    local argv_log="${TDIR}/curl-argv.log" stdin_log="${TDIR}/curl-stdin.log"
+    eval "curl() { printf '%s\n' \"\$@\" > '${argv_log}'; cat > '${stdin_log}'; echo '{\"ok\":false,\"error_code\":401}'; }"
 
     local resp
-    resp=$(_tg_getme "999:ARGV_TOKEN_MUST_NOT_APPEAR" 2>/dev/null || true)
-    [ -n "$resp" ] || true
+    resp=$(tg_get_me "999:ARGV_TOKEN_MUST_NOT_APPEAR" </dev/null)
+    [ "$resp" = '{"ok":false,"error_code":401}' ]
 
     [ -f "$argv_log" ]
-    ! grep -q "ARGV_TOKEN_MUST_NOT_APPEAR" "$argv_log"
-    grep -q -- '-K' "$argv_log"
+    run grep -q "ARGV_TOKEN_MUST_NOT_APPEAR" "$argv_log"
+    [ "$status" -eq 1 ]
+    grep -qx -- '-K' "$argv_log"
+    # the request itself went through the config on stdin
+    grep -qF 'url = "https://api.telegram.org/bot999:ARGV_TOKEN_MUST_NOT_APPEAR/getMe"' "$stdin_log"
 }
 
 # --- F5: Superpowers jq merge defensive path -----------------------------------

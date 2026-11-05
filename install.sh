@@ -607,7 +607,8 @@ validate_tg_token() {
 
 tg_get_me() {
     local token=$1
-    curl "${CURL_OPTS[@]}" "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || true
+    # The URL holds the token: pass it in a curl config on stdin, never in argv (ps, /proc).
+    curl "${CURL_OPTS[@]}" -K - 2>/dev/null <<<"url = \"https://api.telegram.org/bot${token}/getMe\"" || true
 }
 
 # =============================================================================
