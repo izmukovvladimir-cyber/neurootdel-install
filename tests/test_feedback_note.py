@@ -5,6 +5,7 @@ Run: python3 tests/test_feedback_note.py
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -128,7 +129,7 @@ text = shared.read_text(encoding="utf-8")
 check("shared pravki: own old line removed", p.returncode == 0 and "Правило агента один" not in text, text)
 check("shared pravki: the other agent's line with the same slug kept", "Правило агента два" in text, text)
 check("no staging or backup files left", not [f for f in (*MEM.iterdir(), *MEM.parent.iterdir())
-                                               if ".new-" in f.name or f.name.endswith("feedback-note-bak")])
+                                               if ".new-" in f.name or "feedback-note-bak" in f.name])
 
 # --- in-process failures: a rename fails mid-way -> renames undo it; an undo that fails is reported --------
 import importlib.util
@@ -196,6 +197,45 @@ try:
 finally:
     fn.os.replace, fn.Path.unlink = real_replace, real_unlink
 check("undo and cleanup fail: rc 3", rc == 3, rc)
+
+# the commit succeeds but removing the backups fails: rc 0, new data kept, leftovers named, never «put back»
+import contextlib
+import io
+M5 = Path(tempfile.mkdtemp()) / "memory"
+M5.mkdir()
+shutil.copy(TEMPLATE_INDEX, M5 / "MEMORY.md")
+pr5 = M5.parent / "pravki.md"
+pr5.write_text("# pravki\n", encoding="utf-8")
+
+
+def failing_bak_unlink(self, missing_ok=False):
+    if "feedback-note-bak" in self.name:
+        raise OSError(30, "Read-only file system")
+    return real_unlink(self, missing_ok=missing_ok)
+
+
+err5 = io.StringIO()
+fn.Path.unlink = failing_bak_unlink
+try:
+    with contextlib.redirect_stderr(err5):
+        rc = fn.main([str(M5), "add", "--name", "kept", "--rule", "Новое правило", "--area", "a", "--source", "s",
+                      "--pravki", str(pr5)])
+finally:
+    fn.Path.unlink = real_unlink
+left5 = sorted(f.name for f in (*M5.iterdir(), *M5.parent.iterdir()) if "feedback-note-bak" in f.name)
+check("commit ok, backup cleanup fails: rc 0", rc == 0, (rc, err5.getvalue()))
+check("commit ok, backup cleanup fails: new note and index line kept",
+      (M5 / "feedback-kept.md").exists() and "(feedback-kept.md)" in (M5 / "MEMORY.md").read_text(encoding="utf-8"))
+check("commit ok, backup cleanup fails: pravki line kept", "Новое правило" in pr5.read_text(encoding="utf-8"))
+check("commit ok, backup cleanup fails: never «put back»", "put back" not in err5.getvalue(), err5.getvalue())
+check("commit ok, backup cleanup fails: leftovers named on stderr",
+      "leftover backups" in err5.getvalue() and len(left5) >= 2 and all(n in err5.getvalue() for n in left5),
+      (left5, err5.getvalue()))
+check("commit ok, backup cleanup fails: leftovers use the new pid-random name",
+      all(re.fullmatch(r"\..+\.feedback-note-bak-\d+-[0-9a-f]{8}", n) for n in left5), left5)
+for f in (*M5.iterdir(), *M5.parent.iterdir()):
+    if "feedback-note-bak" in f.name:
+        f.unlink()
 
 # --- YAML front matter stays valid with colons, quotes, a leading # ------------------------------------
 p = run(MEM, "--name", "yaml-safe", "--rule", '# В ответах: сначала вывод, "цитаты" в кавычках', "--area", "ответы",
