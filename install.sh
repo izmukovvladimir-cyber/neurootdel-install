@@ -1088,14 +1088,24 @@ The installer will now ask a few questions. You need TWO Telegram bots ready
 BRIEF
     fi
 
-    # Re-run: Enter (or no env) keeps the owner name and id an earlier run saved in guard.conf.
-    local conf="${GUARD_LIB_DIR}/guard.conf" saved_name saved_id
+    # Re-run: Enter (or no env) keeps the owner name, id, language and timezone an earlier run
+    # saved in guard.conf. An install made before OWNER_LANGUAGE existed: the agent's USER.md.
+    local conf="${GUARD_LIB_DIR}/guard.conf" saved_name saved_id saved_lang saved_tz
     saved_name=$(_guard_conf_get "$conf" OWNER_NAME)
     saved_id=$(_guard_conf_get "$conf" OWNER_TG_ID)
     [[ "$saved_id" =~ ^[0-9]+$ ]] || saved_id=""
+    saved_lang=$(_guard_conf_get "$conf" OWNER_LANGUAGE)
+    if [[ -z "$saved_lang" ]]; then
+        saved_lang=$(sed -n 's/^\*\*Preferred language:\*\* *\(.*[^ ]\) *$/\1/p' \
+            "${AGENT_HOME}/.claude-lab/jarvis/.claude/core/USER.md" 2>/dev/null | head -n 1) || saved_lang=""
+    fi
+    local lang_re='^[^"\\$`<>|;&[:cntrl:]]{1,40}$'
+    [[ "$saved_lang" =~ $lang_re ]] || saved_lang=""
+    saved_tz=$(_guard_conf_get "$conf" OWNER_TIMEZONE)
+    [[ "$saved_tz" =~ ^[A-Za-z][A-Za-z0-9_+/-]{0,63}$ ]] || saved_tz=""
     prompt_or_env OPERATOR_NAME     NEUROOTDEL_USER_NAME  "Как к вам обращаться?"                "${saved_name:-friend}"
-    prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "Russian"
-    prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "Europe/Moscow"
+    prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "${saved_lang:-Russian}"
+    prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "${saved_tz:-Europe/Moscow}"
 
     prompt_or_env JARVIS_BOT_TOKEN  NEUROOTDEL_JARVIS_BOT_TOKEN \
         "Jarvis bot token (from @BotFather, формат 1234567890:ABC...)" \
@@ -2711,6 +2721,7 @@ AGENT_LABELS="$(_guard_conf_value "${labels:-jarvis=${MAIN_AGENT_NAME}}")"
 OWNER_NAME="$(_guard_conf_value "$OPERATOR_NAME")"
 OWNER_TG_ID="$(_guard_conf_value "$TG_USER_ID")"
 OWNER_TIMEZONE="$(_guard_conf_value "${OPERATOR_TIMEZONE:-Europe/Moscow}")"
+OWNER_LANGUAGE="$(_guard_conf_value "${OPERATOR_LANGUAGE:-Russian}")"
 RICHARD_UNIT="claude-richard"
 DOCTOR_NAME="$(_guard_conf_value "$DOCTOR_NAME")"
 RICHARD_ENV="$(_guard_conf_value "${RICHARD_HOME}/.env")"

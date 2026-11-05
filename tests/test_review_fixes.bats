@@ -51,17 +51,20 @@ _f1_collect_without_env() {   # a re-run: no env, Enter on every question
     collect_inputs </dev/null
 }
 
-@test "F1 re-run: owner name and id come back from guard.conf" {
+@test "F1 re-run: owner name, id, timezone and language come back from guard.conf" {
     OPERATOR_NAME="Dashi"; TG_USER_ID="424242"; OPERATOR_TIMEZONE="Asia/Bangkok"; OPERATOR_LANGUAGE="English"
     MAIN_AGENT_NAME="Thrall"; DOCTOR_NAME="Doc"
     _f1_render_conf
     grep -qx 'OWNER_NAME="Dashi"' "${GUARD_LIB_DIR}/guard.conf"
     grep -qx 'OWNER_TG_ID="424242"' "${GUARD_LIB_DIR}/guard.conf"
     grep -qx 'OWNER_TIMEZONE="Asia/Bangkok"' "${GUARD_LIB_DIR}/guard.conf"
+    grep -qx 'OWNER_LANGUAGE="English"' "${GUARD_LIB_DIR}/guard.conf"
 
     _f1_collect_without_env
     [ "$OPERATOR_NAME" = "Dashi" ]
     [ "$TG_USER_ID" = "424242" ]
+    [ "$OPERATOR_TIMEZONE" = "Asia/Bangkok" ]
+    [ "$OPERATOR_LANGUAGE" = "English" ]
 }
 
 @test "F1 re-run: bot tokens are NOT written to guard.conf" {
