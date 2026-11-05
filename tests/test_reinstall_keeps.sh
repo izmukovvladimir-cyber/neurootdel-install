@@ -3,7 +3,7 @@
 # A re-run of the installer without the env of the first run keeps what the first run set:
 # owner id (guard.conf + fact gate --owner), owner name (guard.conf, DOCTOR.md, team-rules.md),
 # owner timezone (guard.conf, DOCTOR.md) and language (guard.conf; older installs: USER.md),
-# agent model (unit), brief (log line); and no run leaves its template clone in TMPDIR.
+# agent model (unit), doctor model (.env, log line), brief (log line); and no run leaves its template clone in TMPDIR.
 # Each "install" is a separate bash process that sources install.sh, like a real re-run.
 # Synthetic names and ids only, no root. Run: bash tests/test_reinstall_keeps.sh
 set -euo pipefail
@@ -36,6 +36,7 @@ source "$REPO/install.sh"
 apply_install_names new
 GUARD_LIB_DIR="$SB/lib"; AGENT_HOME="$SB/home"
 JARVIS_UNIT_FILE="$SB/systemd/channel-jarvis.service"
+RICHARD_ENV_FILE="$SB/richard/.env"
 write_as_user() { mkdir -p "$(dirname "$2")"; install -m "${3:-0644}" "$1" "$2"; }
 as_agent() { "$@"; }
 step() { :; }; log() { :; }; warn() { :; }; err() { :; }
@@ -47,6 +48,14 @@ render_jarvis_unit "$JARVIS_UNIT_FILE" /p/plugin /etc/x/channel.env
 ws="$AGENT_HOME/.claude-lab/jarvis/.claude"
 tmp=$(mktemp); render_agent_claude_md "$tmp"; _write_if_absent "$tmp" "$ws/CLAUDE.md" 0644; rm -f "$tmp"
 render_doctor_role "$SB/richard/DOCTOR.md"
+# the doctor .env as install_richard writes it: the model is an answer only when given this run
+tmp=$(mktemp); render_richard_env "$tmp"
+if [[ -f "$RICHARD_ENV_FILE" ]]; then
+    answers=TELEGRAM_BOT_TOKEN,TELEGRAM_BOT_USERNAME,ALLOWED_USERS
+    [[ "$(env_value DOCTOR_MODEL)" == "$DOCTOR_MODEL" ]] && answers+=",CLAUDE_MODEL"
+    m=$(mktemp); merge_env_file "$tmp" "$RICHARD_ENV_FILE" "$answers" >"$m"; mv "$m" "$tmp"
+fi
+mv "$tmp" "$RICHARD_ENV_FILE"
 ensure_fact_gate_hook "$AGENT_HOME/.claude/settings.json" "$AGENT_HOME/.claude/hooks/fact-number-gate.py" "${TG_USER_ID:-}"
 conf="$GUARD_LIB_DIR/guard.conf"; tmp=$(mktemp); render_guard_conf "$conf" >"$tmp"; mv "$tmp" "$conf"
 render_template "$TEMPLATES_DIR/shared/team-rules.md" "$AGENT_HOME/.claude-lab/shared/team-rules.md" \
@@ -73,6 +82,7 @@ clean_env NEUROOTDEL_TG_USER_ID=777000111 NEUROOTDEL_USER_NAME="Тест-Вла�
 check "run1: owner id in guard.conf"          grep -qx 'OWNER_TG_ID="777000111"' "${SB}/lib/guard.conf"
 check "run1: fact gate --owner"               grep -q 'fact-number-gate.py agent --owner 777000111"' "${SB}/home/.claude/settings.json"
 check "run1: agent model in unit"             grep -q -- '--model claude-sonnet-5-5 ' "${SB}/systemd/channel-jarvis.service"
+check "run1: doctor model in .env"            grep -qx 'CLAUDE_MODEL=claude-opus-5-5' "${SB}/richard/.env"
 check "run1: timezone in guard.conf"          grep -qx 'OWNER_TIMEZONE="Asia/Bangkok"' "${SB}/lib/guard.conf"
 check "run1: language in guard.conf"          grep -qx 'OWNER_LANGUAGE="English"' "${SB}/lib/guard.conf"
 
@@ -96,6 +106,9 @@ check "TZ rerun: timezone kept in DOCTOR.md"    bash -c 'grep -q "по Asia/Bang
 check "LANG rerun: language kept in guard.conf" grep -qx 'OWNER_LANGUAGE="English"' "${SB}/lib/guard.conf"
 check "TZ/LANG rerun: inputs read back"        grep -qx 'INPUTS lang=English tz=Asia/Bangkok' "${TDIR}/run2.log"
 check "rerun: names kept"                     grep -q 'Roles: Тестовый Агент (claude-sonnet-5-5), Тестовый Доктор (' "${TDIR}/run2.log"
+# doctor model: the log line shows the model the doctor keeps running with
+check "DM rerun: doctor model kept in .env"    grep -qx 'CLAUDE_MODEL=claude-opus-5-5' "${SB}/richard/.env"
+check "DM rerun: log shows the kept doctor model" grep -q 'Тестовый Доктор (claude-opus-5-5)' "${TDIR}/run2.log"
 
 # --- run 3: a new value given still wins ------------------------------------------------------
 clean_env NEUROOTDEL_TG_USER_ID=888000222 NEUROOTDEL_USER_NAME="Другой" NEUROOTDEL_AGENT_MODEL=claude-opus-4-8 \
@@ -104,10 +117,13 @@ check "run3: new owner id wins"               grep -qx 'OWNER_TG_ID="888000222"'
 check "run3: new gate owner wins"             grep -q 'fact-number-gate.py agent --owner 888000222"' "${SB}/home/.claude/settings.json"
 check "run3: new name wins"                   grep -qx 'OWNER_NAME="Другой"' "${SB}/lib/guard.conf"
 check "run3: kept tz/lang still kept"         grep -qx 'INPUTS lang=English tz=Asia/Bangkok' "${TDIR}/run3.log"
+check "run3: log keeps doctor model"          grep -q 'Тестовый Доктор (claude-opus-5-5)' "${TDIR}/run3.log"
 check "run3: new agent model wins"            grep -q -- '--model claude-opus-4-8 ' "${SB}/systemd/channel-jarvis.service"
 
 # --- run 4: a new timezone / language given wins ---------------------------------------------
-clean_env NEUROOTDEL_TIMEZONE=Europe/Berlin NEUROOTDEL_LANGUAGE=Deutsch bash -c "$RUN" >"${TDIR}/run4.log" 2>&1 || true
+clean_env NEUROOTDEL_TIMEZONE=Europe/Berlin NEUROOTDEL_LANGUAGE=Deutsch NEUROOTDEL_DOCTOR_MODEL=claude-haiku-5-5 bash -c "$RUN" >"${TDIR}/run4.log" 2>&1 || true
+check "run4: new doctor model in log"         grep -q 'Тестовый Доктор (claude-haiku-5-5)' "${TDIR}/run4.log"
+check "run4: new doctor model in .env"        grep -qx 'CLAUDE_MODEL=claude-haiku-5-5' "${SB}/richard/.env"
 check "run4: new tz/lang win"                 grep -qx 'INPUTS lang=Deutsch tz=Europe/Berlin' "${TDIR}/run4.log"
 check "run4: new tz in guard.conf"            grep -qx 'OWNER_TIMEZONE="Europe/Berlin"' "${SB}/lib/guard.conf"
 check "run4: new language in guard.conf"      grep -qx 'OWNER_LANGUAGE="Deutsch"' "${SB}/lib/guard.conf"
@@ -130,6 +146,8 @@ mkdir -p "${SB2}/lib" "${SB2}/home/.claude/hooks" "${SB2}/home/.claude-lab/jarvi
 SB="$SB2" clean_env SB="$SB2" bash -c "$RUN" >"${TDIR}/fresh.log" 2>&1 || true
 check "fresh: name default friend"            grep -qx 'OWNER_NAME="friend"' "${SB2}/lib/guard.conf"
 check "fresh: no owner id"                    grep -qx 'OWNER_TG_ID=""' "${SB2}/lib/guard.conf"
+check "fresh: default doctor model"          grep -q 'Richard (claude-sonnet-5-5)' "${TDIR}/fresh.log"
+check "fresh: default doctor model in .env"   grep -qx 'CLAUDE_MODEL=claude-sonnet-5-5' "${SB2}/richard/.env"
 check "fresh: default agent model"            grep -q -- '--model claude-opus-5-5 ' "${SB2}/systemd/channel-jarvis.service"
 check "fresh: default tz and language"       grep -qx 'INPUTS lang=Russian tz=Europe/Moscow' "${TDIR}/fresh.log"
 check "fresh: brief not given"                grep -q 'brief: не передан' "${TDIR}/fresh.log"

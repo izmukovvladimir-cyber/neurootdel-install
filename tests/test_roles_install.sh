@@ -31,6 +31,7 @@ set +e
 apply_install_names new
 GUARD_LIB_DIR="${TDIR}/lib"   # guard.conf of this test only (names saved by an earlier run)
 JARVIS_UNIT_FILE="${TDIR}/no-unit"   # no installed unit: the model comes from env or the default
+RICHARD_ENV_FILE="${TDIR}/no-env"     # no doctor .env either
 mkdir -p "$GUARD_LIB_DIR"
 write_as_user() { mkdir -p "$(dirname "$2")"; install -m "${3:-0644}" "$1" "$2"; }
 as_agent() { "$@"; }

@@ -1029,6 +1029,8 @@ DOCTOR_MODEL="$DOCTOR_MODEL_DEFAULT"
 BRIEF_DIR=""
 # Installed unit of the main agent: a re-run reads the model it runs with from here.
 JARVIS_UNIT_FILE="/etc/systemd/system/${JARVIS_UNIT}.service"
+# The doctor's .env: a re-run reads the model he runs with from here (install_richard keeps it).
+RICHARD_ENV_FILE="${RICHARD_HOME}/.env"
 
 # _role_value <SUFFIX> <default> <regex> <what> -- env NEUROOTDEL_<SUFFIX> when it matches, else default.
 _role_value() {
@@ -1053,7 +1055,7 @@ resolve_role_settings() {
     # A full id carries a version (…-<digit>…): aliases like opus/sonnet/default are refused.
     local model_re='^[a-z][a-z0-9._-]{0,40}-[0-9][a-z0-9._-]{0,40}(\[[a-z0-9]{1,8}\])?$'
     local brief_re='^[~/][^"{}\\$`<>|;&[:cntrl:]]{0,200}$'
-    local conf="${GUARD_LIB_DIR}/guard.conf" saved_agent saved_doctor saved_model saved_brief
+    local conf="${GUARD_LIB_DIR}/guard.conf" saved_agent saved_doctor saved_model saved_dmodel saved_brief
     saved_agent=$(_guard_conf_get "$conf" AGENT_LABELS | tr ',' '\n' | sed -n 's/^jarvis=//p' | head -n 1)
     saved_doctor=$(_guard_conf_get "$conf" DOCTOR_NAME)
     [[ "$saved_agent" =~ $name_re ]] || saved_agent="Jarvis"
@@ -1061,13 +1063,15 @@ resolve_role_settings() {
     # The model the installed unit runs with, and the brief the agent's CLAUDE.md points to (kept on re-run).
     saved_model=$(sed -n 's/^ExecStart=.* --model \([^ ]*\) .*$/\1/p' "$JARVIS_UNIT_FILE" 2>/dev/null | head -n 1) || saved_model=""
     [[ "$saved_model" =~ $model_re ]] || saved_model="$AGENT_MODEL_DEFAULT"
+    saved_dmodel=$(sed -n 's/^CLAUDE_MODEL=["]\{0,1\}\([^"]*\)["]\{0,1\}$/\1/p' "$RICHARD_ENV_FILE" 2>/dev/null | tail -n 1) || saved_dmodel=""
+    [[ "$saved_dmodel" =~ $model_re ]] || saved_dmodel="$DOCTOR_MODEL_DEFAULT"
     saved_brief=$(sed -n 's/^- Где бриф и созвоны клиента: \(.*\) (первоисточники;.*$/\1/p' \
         "${AGENT_HOME}/.claude-lab/jarvis/.claude/CLAUDE.md" 2>/dev/null | head -n 1) || saved_brief=""
     [[ "$saved_brief" =~ $brief_re ]] || saved_brief=""
     MAIN_AGENT_NAME=$(_role_value AGENT_NAME "$saved_agent" "$name_re" "name")
     DOCTOR_NAME=$(_role_value DOCTOR_NAME "$saved_doctor" "$name_re" "name")
     AGENT_MODEL=$(_role_value AGENT_MODEL "$saved_model" "$model_re" "model id")
-    DOCTOR_MODEL=$(_role_value DOCTOR_MODEL "$DOCTOR_MODEL_DEFAULT" "$model_re" "model id")
+    DOCTOR_MODEL=$(_role_value DOCTOR_MODEL "$saved_dmodel" "$model_re" "model id")
     BRIEF_DIR=$(_role_value BRIEF_DIR "$saved_brief" "$brief_re" "path (~/... or /...)")
     ok "Roles: ${MAIN_AGENT_NAME} (${AGENT_MODEL}), ${DOCTOR_NAME} (${DOCTOR_MODEL}), brief: ${BRIEF_DIR:-не передан}"
 }
