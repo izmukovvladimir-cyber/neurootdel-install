@@ -1026,6 +1026,8 @@ DOCTOR_NAME="Richard"
 AGENT_MODEL="$AGENT_MODEL_DEFAULT"
 DOCTOR_MODEL="$DOCTOR_MODEL_DEFAULT"
 BRIEF_DIR=""
+# Installed unit of the main agent: a re-run reads the model it runs with from here.
+JARVIS_UNIT_FILE="/etc/systemd/system/${JARVIS_UNIT}.service"
 
 # _role_value <SUFFIX> <default> <regex> <what> -- env NEUROOTDEL_<SUFFIX> when it matches, else default.
 _role_value() {
@@ -1049,16 +1051,23 @@ resolve_role_settings() {
     local name_re='^[^][ "{}\\$`<>|;&,=/[:cntrl:]][^]["{}\\$`<>|;&,=/[:cntrl:]]{0,39}$'
     # A full id carries a version (…-<digit>…): aliases like opus/sonnet/default are refused.
     local model_re='^[a-z][a-z0-9._-]{0,40}-[0-9][a-z0-9._-]{0,40}(\[[a-z0-9]{1,8}\])?$'
-    local conf="${GUARD_LIB_DIR}/guard.conf" saved_agent saved_doctor
+    local brief_re='^[~/][^"{}\\$`<>|;&[:cntrl:]]{0,200}$'
+    local conf="${GUARD_LIB_DIR}/guard.conf" saved_agent saved_doctor saved_model saved_brief
     saved_agent=$(_guard_conf_get "$conf" AGENT_LABELS | tr ',' '\n' | sed -n 's/^jarvis=//p' | head -n 1)
     saved_doctor=$(_guard_conf_get "$conf" DOCTOR_NAME)
     [[ "$saved_agent" =~ $name_re ]] || saved_agent="Jarvis"
     [[ "$saved_doctor" =~ $name_re ]] || saved_doctor="Richard"
+    # The model the installed unit runs with, and the brief the agent's CLAUDE.md points to (kept on re-run).
+    saved_model=$(sed -n 's/^ExecStart=.* --model \([^ ]*\) .*$/\1/p' "$JARVIS_UNIT_FILE" 2>/dev/null | head -n 1) || saved_model=""
+    [[ "$saved_model" =~ $model_re ]] || saved_model="$AGENT_MODEL_DEFAULT"
+    saved_brief=$(sed -n 's/^- Где бриф и созвоны клиента: \(.*\) (первоисточники;.*$/\1/p' \
+        "${AGENT_HOME}/.claude-lab/jarvis/.claude/CLAUDE.md" 2>/dev/null | head -n 1) || saved_brief=""
+    [[ "$saved_brief" =~ $brief_re ]] || saved_brief=""
     MAIN_AGENT_NAME=$(_role_value AGENT_NAME "$saved_agent" "$name_re" "name")
     DOCTOR_NAME=$(_role_value DOCTOR_NAME "$saved_doctor" "$name_re" "name")
-    AGENT_MODEL=$(_role_value AGENT_MODEL "$AGENT_MODEL_DEFAULT" "$model_re" "model id")
+    AGENT_MODEL=$(_role_value AGENT_MODEL "$saved_model" "$model_re" "model id")
     DOCTOR_MODEL=$(_role_value DOCTOR_MODEL "$DOCTOR_MODEL_DEFAULT" "$model_re" "model id")
-    BRIEF_DIR=$(_role_value BRIEF_DIR "" '^[~/][^"{}\\$`<>|;&[:cntrl:]]{0,200}$' "path (~/... or /...)")
+    BRIEF_DIR=$(_role_value BRIEF_DIR "$saved_brief" "$brief_re" "path (~/... or /...)")
     ok "Roles: ${MAIN_AGENT_NAME} (${AGENT_MODEL}), ${DOCTOR_NAME} (${DOCTOR_MODEL}), brief: ${BRIEF_DIR:-не передан}"
 }
 
@@ -1078,7 +1087,12 @@ The installer will now ask a few questions. You need TWO Telegram bots ready
 BRIEF
     fi
 
-    prompt_or_env OPERATOR_NAME     NEUROOTDEL_USER_NAME  "Как к вам обращаться?"                "friend"
+    # Re-run: Enter (or no env) keeps the owner name and id an earlier run saved in guard.conf.
+    local conf="${GUARD_LIB_DIR}/guard.conf" saved_name saved_id
+    saved_name=$(_guard_conf_get "$conf" OWNER_NAME)
+    saved_id=$(_guard_conf_get "$conf" OWNER_TG_ID)
+    [[ "$saved_id" =~ ^[0-9]+$ ]] || saved_id=""
+    prompt_or_env OPERATOR_NAME     NEUROOTDEL_USER_NAME  "Как к вам обращаться?"                "${saved_name:-friend}"
     prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "Russian"
     prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "Europe/Moscow"
 
@@ -1090,7 +1104,7 @@ BRIEF
         "" --secret
     prompt_or_env TG_USER_ID        NEUROOTDEL_TG_USER_ID \
         "Ваш Telegram numeric user ID (from @userinfobot)" \
-        ""
+        "$saved_id"
 
     SUPERVISOR_TG_ID="$(env_value SUPERVISOR_TG_ID)"
     JARVIS_BOT_USERNAME="${NEUROOTDEL_JARVIS_BOT_USER:-}"
@@ -2175,8 +2189,11 @@ install_skills() {
 
     local installed=()
 
+    # Called in this shell, not in $(...): the clone dir must land in TMPDIRS of the
+    # process whose EXIT trap removes it.
     local tpl_dir
-    if tpl_dir=$(fetch_template); then
+    if fetch_template >/dev/null; then
+        tpl_dir="$TEMPLATE_CLONE_DIR"
         local tpl_skills_root="${tpl_dir}/skills"
         [[ -d "$tpl_skills_root" ]] || tpl_skills_root="$tpl_dir"
 
@@ -2196,7 +2213,8 @@ install_skills() {
     fi
 
     local skills_src
-    if skills_src=$(locate_installer_skills); then
+    if locate_installer_skills >/dev/null; then
+        skills_src="$INSTALLER_SKILLS_DIR"
         local name
         for name in "${SKILLS_FROM_INSTALLER[@]}"; do
             local src="${skills_src}/${name}"
