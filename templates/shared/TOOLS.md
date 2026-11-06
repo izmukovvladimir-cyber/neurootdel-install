@@ -8,6 +8,7 @@ Before saying "it is down", check the live state (`systemctl status`, `ss -ltnp`
 | Service | What | Port |
 |---|---|---|
 | `channel-jarvis` | Jarvis, Telegram channel (tmux + claude) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
+| `channel-coder` | Coder, technical specialist (only when installed with its own bot) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
 | `claude-richard` | Richard, server doctor (SDK bot) | |
 
 Restarting another agent's service is Richard's job. Your own service: `echo <agent> > /tmp/channel-restart-request`.
@@ -18,6 +19,8 @@ Restarting another agent's service is Richard's job. Your own service: `echo <ag
 - `agents-reset.sh` (cron every 10 min, --auto): nightly 04:00 and daytime reset of bloated sessions by the
   owner's clock. Dry run: `bash {{LIB}}/agents-reset.sh --dry-run`.
 - `agent-handoff-flush.py <agent>`: "Last 15 actions" into core/hot/handoff.md.
+- `claude-auth-watch.sh` (cron hourly, root): a lost Claude login ("Not logged in", no login, long-lived token
+  near expiry) -> one line to the owner by the agent's own bot. Stop: touch /var/lib/{{USER}}-auth-watch/STOP.
 - `memory-backup.sh` (cron hourly, --auto = 03:30 owner time): ~/backups/memory, 14 days.
 - `include_weight.py`: memory weight per turn. `compact-open-items-reminder.py`: SessionStart after compaction.
 - `gbrain-call.py`: shared memory client (only when gbrain is installed on this server).

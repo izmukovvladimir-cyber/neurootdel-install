@@ -27,7 +27,9 @@
 #   NEUROOTDEL_JARVIS_BOT_USER    Jarvis bot @username (no @)
 #   NEUROOTDEL_RICHARD_BOT_TOKEN  Richard Telegram bot token
 #   NEUROOTDEL_RICHARD_BOT_USER   Richard bot @username (no @)
-#   NEUROOTDEL_TG_USER_ID         Operator Telegram numeric ID
+#   NEUROOTDEL_CODER_BOT_TOKEN    Optional Coder (technical specialist) bot token; empty = no Coder
+#   NEUROOTDEL_CODER_BOT_USER     Coder bot @username (no @)
+#   NEUROOTDEL_TG_USER_ID        Operator Telegram numeric ID
 #   NEUROOTDEL_SUPERVISOR_TG_ID   Optional second trusted Telegram numeric ID (installer
 #                                 supervisor) for the starter secrets rule; empty = none
 #   NEUROOTDEL_USER_NAME          Operator display name (for Jarvis CLAUDE.md)
@@ -46,6 +48,9 @@ readonly PLUGIN_REPO="https://github.com/izmukovvladimir-cyber/dashi-plugin-clau
 # service commands, d846493). NEUROOTDEL_PLUGIN_COMMIT overrides it (40 hex chars).
 readonly PLUGIN_COMMIT_DEFAULT="d846493201d02b92399404c9b2a89a6dbcd89ab5"
 readonly JARVIS_UNIT="channel-jarvis"
+# Optional second channel agent (technical specialist): installed only with its own bot token.
+readonly CODER_UNIT="channel-coder"
+readonly CODER_WEBHOOK_PORT="8090"
 # Pre-plugin Jarvis (v3.0.x). Kept on disk for --rollback, never deleted.
 readonly LEGACY_GATEWAY_UNIT="claude-gateway"
 readonly LEGACY_GATEWAY_DIR_NAME="claude-gateway"
@@ -59,9 +64,10 @@ readonly TEMPLATE_SHA="93cc7ddf10c03472616a3a32ff7e6ac731ebe6f2"
 readonly SUPERPOWERS_REPO="https://github.com/izmukovvladimir-cyber/superpowers.git"
 readonly SUPERPOWERS_SHA="04bad33282e792ecfd1007a138331f1e6b288eed"
 
-# 6 skills from template + 4 bundled with installer = 10 total (prod parity).
+# 6 skills from template + 5 bundled with installer = 11 total (the workshop promises
+# "ten base skills plus skill-finder").
 readonly SKILLS_FROM_TEMPLATE=(groq-voice markdown-new perplexity-research datawrapper excalidraw youtube-transcript)
-readonly SKILLS_FROM_INSTALLER=(onboarding self-compiler quick-reminders present)
+readonly SKILLS_FROM_INSTALLER=(onboarding self-compiler quick-reminders present skill-finder)
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 readonly TEMPLATES_DIR_DEFAULT="${_SCRIPT_DIR}/templates"
@@ -136,6 +142,7 @@ apply_install_names() {
     INSTALL_NAMES="$1"
     AGENT_HOME="/home/${AGENT_USER}"
     JARVIS_ENV_DIR="${CONFIG_ROOT}/jarvis"
+    CODER_ENV_DIR="${CONFIG_ROOT}/coder"
     CHANNEL_CONFIRM_BIN="/usr/local/lib/${AGENT_USER}/channel-confirm.sh"
     CHANNEL_START_BIN="/usr/local/lib/${AGENT_USER}/channel-start.sh"
     # Guard scripts (agents-reset, memory-backup, watchdog, hooks) + guard.conf.
@@ -597,7 +604,9 @@ validate_tg_token() {
 
 tg_get_me() {
     local token=$1
-    curl "${CURL_OPTS[@]}" "https://api.telegram.org/bot${token}/getMe" 2>/dev/null || true
+    # URL (it carries the token) through stdin config, never argv: ps shows argv to every user.
+    printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$token" \
+        | curl "${CURL_OPTS[@]}" -K - 2>/dev/null || true
 }
 
 # =============================================================================
@@ -1004,6 +1013,10 @@ JARVIS_BOT_TOKEN=""
 JARVIS_BOT_USERNAME=""
 RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
+# Optional Coder bot (third bot). Empty and no token on this server = Coder is not installed.
+CODER_BOT_TOKEN=""
+CODER_BOT_USERNAME=""
+CODER_INSTALLED=0
 TG_USER_ID=""
 # Optional second trusted id (installer supervisor), NEUROOTDEL_SUPERVISOR_TG_ID; empty = none.
 SUPERVISOR_TG_ID=""
@@ -1023,6 +1036,7 @@ collect_inputs() {
 The installer will now ask a few questions. You need TWO Telegram bots ready
 (create them in @BotFather beforehand) and your numeric Telegram user ID
 (get it from @userinfobot). Tokens are hidden while typing.
+A THIRD bot for Coder (technical specialist) is optional: press Enter to skip it.
 
 BRIEF
     fi
@@ -1084,6 +1098,8 @@ BRIEF
         log "Richard token empty."
     fi
 
+    collect_coder_input
+
     if [[ -n "$TG_USER_ID" && ! "$TG_USER_ID" =~ ^[0-9]+$ ]]; then
         die "Telegram user ID must be a positive integer (got: ${TG_USER_ID})."
     fi
@@ -1092,6 +1108,55 @@ BRIEF
     fi
 
     ok "Inputs collected: name=${OPERATOR_NAME}, tz=${OPERATOR_TIMEZONE}, lang=${OPERATOR_LANGUAGE}"
+}
+
+# _env_token <env_file> -- TELEGRAM_BOT_TOKEN from an env file (root reads it), empty if none.
+_env_token() {
+    [[ -r "$1" ]] || return 0
+    sed -n 's/^[[:space:]]*TELEGRAM_BOT_TOKEN=//p' "$1" | tail -n 1 | tr -d '"'"'"'[:space:]'
+}
+
+# _coder_bot_clash <coder_token> -- true when it is the Jarvis or the Richard bot. Same bot = same id
+# before ':' (a re-issued token keeps it). Compared with this run's answers AND the tokens already
+# written on this server: an empty answer on a re-run is not "no bot".
+_coder_bot_clash() {
+    local other cid="${1%%:*}"
+    [[ -n "$cid" ]] || return 1
+    for other in "$JARVIS_BOT_TOKEN" "$RICHARD_BOT_TOKEN" \
+            "$(_env_token "${JARVIS_ENV_DIR}/channel.env")" "$(_env_token "${RICHARD_HOME}/.env")"; do
+        [[ -n "$other" && "${other%%:*}" == "$cid" ]] && return 0
+    done
+    return 1
+}
+
+# collect_coder_input -- the optional Coder bot token (third bot). Not asked without a TTY
+# unless NEUROOTDEL_CODER_BOT_TOKEN is set, so an unattended run never warns about it.
+# Must differ from the Jarvis and Richard tokens: two pollers on one bot fight (409).
+collect_coder_input() {
+    if is_noninteractive && [[ -z "$(env_value CODER_BOT_TOKEN)" ]]; then
+        CODER_BOT_TOKEN=""
+    else
+        prompt_or_env CODER_BOT_TOKEN NEUROOTDEL_CODER_BOT_TOKEN \
+            "Coder bot token (необязательно, ТРЕТИЙ бот; Enter = без Coder)" \
+            "" --secret
+    fi
+    CODER_BOT_USERNAME="$(env_value CODER_BOT_USER)"
+    if [[ -z "$CODER_BOT_TOKEN" ]]; then
+        log "Coder token empty -- Coder is skipped unless this server already has one."
+        return 0
+    fi
+    validate_tg_token "$CODER_BOT_TOKEN" || die "Coder token format invalid."
+    _coder_bot_clash "$CODER_BOT_TOKEN" \
+        && die "Coder token must be a SEPARATE bot (not the Jarvis or Richard bot) -- create one in @BotFather."
+    local cresp
+    cresp=$(tg_get_me "$CODER_BOT_TOKEN")
+    if [[ "$(echo "$cresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
+        [[ -z "$CODER_BOT_USERNAME" ]] && \
+            CODER_BOT_USERNAME=$(echo "$cresp" | jq -r '.result.username // ""')
+        ok "Coder bot verified: @${CODER_BOT_USERNAME:-?}"
+    else
+        warn "Telegram getMe for Coder failed -- token will be written as-is."
+    fi
 }
 
 # =============================================================================
@@ -1269,6 +1334,84 @@ install_jarvis() {
     ok "Jarvis installed: plugin ${plugin_dir}, env ${env_file}, unit ${JARVIS_UNIT}"
 }
 
+# coder_wanted -- true when this run got a Coder token or this server already has one
+# in the Coder channel.env (a re-run without answers keeps an installed Coder).
+coder_wanted() {
+    [[ -n "$CODER_BOT_TOKEN" ]] || _env_has_value "${CODER_ENV_DIR}/channel.env" TELEGRAM_BOT_TOKEN
+}
+
+# install_coder -- the optional technical specialist, set up exactly like Jarvis: its own
+# workspace from templates/coder-*.md, its own plugin checkout, channel.env (webhook port
+# CODER_WEBHOOK_PORT) and unit channel-coder. Without a bot token it is skipped cleanly.
+install_coder() {
+    if ! coder_wanted; then
+        log "Coder skipped: no bot token (add one later: sudo bash install.sh, answer the Coder token question)."
+        return 0
+    fi
+    # The token that will really run (this answer or the one kept in the Coder channel.env) must
+    # not be the Jarvis or Richard bot: two pollers on one bot fight (409).
+    if _coder_bot_clash "${CODER_BOT_TOKEN:-$(_env_token "${CODER_ENV_DIR}/channel.env")}"; then
+        die "Coder bot is the same bot as Jarvis or Richard -- give Coder its own bot (@BotFather) and re-run."
+    fi
+    step 6 "Installing Coder (Telegram channel plugin, systemd: ${CODER_UNIT})"
+
+    local wsroot="${AGENT_HOME}/.claude-lab/coder/.claude"
+    local plugin_root="${wsroot}/dashi-plugin-claude-code"
+    local plugin_dir="${plugin_root}/plugin"
+    local state_dir="${AGENT_HOME}/.claude-lab/shared/state/coder/telegram"
+    local env_file="${CODER_ENV_DIR}/channel.env"
+    local shared_groq="${AGENT_HOME}/.claude-lab/shared/secrets/groq-api-key"
+    local groq=""
+
+    install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
+        "${AGENT_HOME}/.claude-lab" \
+        "${AGENT_HOME}/.claude-lab/coder" \
+        "$wsroot" \
+        "${AGENT_HOME}/.claude-lab/shared" \
+        "${AGENT_HOME}/.claude-lab/shared/state"
+    install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" \
+        "${AGENT_HOME}/.claude-lab/shared/state/coder" \
+        "$state_dir"
+    ensure_channel_config_defaults "${state_dir}/config.json"
+
+    _write_agent_workspace "$wsroot" coder
+
+    checkout_plugin "$plugin_root"
+    [[ -f "${plugin_dir}/.mcp.json" ]] || die "Plugin checkout has no plugin/.mcp.json (${plugin_root})."
+    as_agent env -C "$plugin_dir" "${AGENT_HOME}/.bun/bin/bun" install \
+        || die "bun install failed in ${plugin_dir}."
+
+    if ! _env_has_value "$env_file" GROQ_API_KEY && [[ -s "$shared_groq" ]]; then
+        groq="$shared_groq"
+    fi
+    _write_channel_env "$env_file" "$state_dir" "$wsroot" \
+        coder "$CODER_WEBHOOK_PORT" "$CODER_BOT_TOKEN" "$TG_USER_ID" "$groq"
+
+    if ! _accept_trust_dialog "${AGENT_HOME}/.claude.json" "$plugin_root" "$plugin_dir"; then
+        warn "Could not mark ${plugin_root} as trusted in ${AGENT_HOME}/.claude.json -- Coder may stop on the trust prompt."
+    fi
+    if ! _approve_channel_mcp "${plugin_root}/.claude/settings.local.json" "${plugin_dir}/.claude/settings.local.json"; then
+        warn "Could not pre-approve dashi-channel in ${plugin_root}/.claude/settings.local.json -- Coder may start without the channel."
+    fi
+
+    # channel-confirm.sh / channel-start.sh are shared with Jarvis (installed by install_jarvis).
+    local unit_tmp
+    unit_tmp=$(mktemp)
+    TMPFILES+=("$unit_tmp")
+    render_template "${TEMPLATES_DIR}/${CODER_UNIT}.service" "$unit_tmp" \
+        USER           "$AGENT_USER" \
+        HOME           "$AGENT_HOME" \
+        PLUGIN_DIR     "$plugin_dir" \
+        ENV_FILE       "$env_file" \
+        CONFIRM_SCRIPT "$CHANNEL_CONFIRM_BIN" \
+        START_SCRIPT   "$CHANNEL_START_BIN"
+    install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${CODER_UNIT}.service"
+
+    fix_owner "${AGENT_HOME}/.claude-lab/coder"
+    CODER_INSTALLED=1
+    ok "Coder installed: plugin ${plugin_dir}, env ${env_file}, unit ${CODER_UNIT}"
+}
+
 # Jarvis channel inputs, per field: operator answer -> current channel.env
 # (render_channel_env keeps its values) -> old gateway config (first migration
 # only, so a token rotated in channel.env is never replaced by the stale one).
@@ -1322,20 +1465,27 @@ _collect_jarvis_channel_inputs() {
     return 0
 }
 
-# _write_channel_env <env_file> <state_dir> <workspace_root>
+# _write_channel_env <env_file> <state_dir> <workspace_root> [agent port token user_ids groq_file]
 # root:<agent user> 0640 -- systemd reads it for the unit, the agent may read it.
+# Without the optional args it writes the Jarvis env from the Jarvis answers.
 _write_channel_env() {
     local env_file=$1 state_dir=$2 ws_root=$3
-    local tmp
+    local agent=jarvis port="" token=$JARVIS_BOT_TOKEN ids=$JARVIS_ALLOWED_IDS groq=$JARVIS_GROQ_KEY_FILE
+    if (($# > 3)); then
+        agent=$4 port=$5 token=$6 ids=$7 groq=$8
+    fi
+    local env_dir tmp
+    env_dir=$(dirname "$env_file")
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
 
-    CHANNEL_ENV_TOKEN="$JARVIS_BOT_TOKEN" CHANNEL_ENV_CMD_TRUSTED="$(env_value COMMAND_TRUSTED_IDS)" render_channel_env \
-        "$env_file" "$JARVIS_ALLOWED_IDS" "$JARVIS_GROQ_KEY_FILE" "$state_dir" "$ws_root" >"$tmp" \
+    CHANNEL_ENV_TOKEN="$token" CHANNEL_ENV_AGENT_ID="$agent" CHANNEL_ENV_PORT="$port" \
+    CHANNEL_ENV_CMD_TRUSTED="$(env_value COMMAND_TRUSTED_IDS)" render_channel_env \
+        "$env_file" "$ids" "$groq" "$state_dir" "$ws_root" >"$tmp" \
         || die "Could not build ${env_file}."
 
-    install -d -m 0755 -o root -g root "$(dirname "$JARVIS_ENV_DIR")"
-    install -d -m 0750 -o root -g "$AGENT_USER" "$JARVIS_ENV_DIR"
+    install -d -m 0755 -o root -g root "$(dirname "$env_dir")"
+    install -d -m 0750 -o root -g "$AGENT_USER" "$env_dir"
     install -m 0640 -o root -g "$AGENT_USER" "$tmp" "$env_file"
 }
 
@@ -1385,15 +1535,24 @@ if groq_file and Path(groq_file).is_file():
     groq = Path(groq_file).read_text().strip()
 groq = groq or existing.get("GROQ_API_KEY", "")
 
+# Which agent this env belongs to (jarvis by default; coder for the optional second agent).
+agent = os.environ.get("CHANNEL_ENV_AGENT_ID", "").strip() or "jarvis"
+if not re.fullmatch(r"[a-z0-9-]+", agent):
+    sys.exit(f"channel.env: agent id {agent!r} is not [a-z0-9-]")
+port_default = os.environ.get("CHANNEL_ENV_PORT", "").strip() or "8089"
+if not re.fullmatch(r"[0-9]{2,5}", port_default):
+    sys.exit(f"channel.env: webhook port {port_default!r} is not a number")
+label = "Jarvis" if agent == "jarvis" else agent.capitalize()
+
 managed = {
     "TELEGRAM_BOT_TOKEN": token,
     "TELEGRAM_ALLOWED_USER_IDS": ",".join(user_ids),
     "TELEGRAM_ALLOWED_CHAT_IDS": ",".join(chat_ids),
-    "AGENT_ID": existing.get("AGENT_ID") or "jarvis",
+    "AGENT_ID": existing.get("AGENT_ID") or agent,
     "TELEGRAM_WORKSPACE_ROOT": existing.get("TELEGRAM_WORKSPACE_ROOT") or ws_root,
     "TELEGRAM_STATE_DIR": existing.get("TELEGRAM_STATE_DIR") or state_dir,
     "TELEGRAM_WEBHOOK_HOST": existing.get("TELEGRAM_WEBHOOK_HOST") or "127.0.0.1",
-    "TELEGRAM_WEBHOOK_PORT": existing.get("TELEGRAM_WEBHOOK_PORT") or "8089",
+    "TELEGRAM_WEBHOOK_PORT": existing.get("TELEGRAM_WEBHOOK_PORT") or port_default,
     # Bearer of the local webhook (guard nudges, fallback replies); generated once, then kept.
     "TELEGRAM_WEBHOOK_TOKEN": existing.get("TELEGRAM_WEBHOOK_TOKEN") or secrets.token_hex(24),
 }
@@ -1428,10 +1587,10 @@ for key, value in managed.items():
         sys.exit(f"channel.env: {key} contains whitespace or quotes")
 
 out = [
-    "# Jarvis Telegram channel. Written by the installer; a re-run keeps your values.",
+    f"# {label} Telegram channel. Written by the installer; a re-run keeps your values.",
     "# Fill the three TELEGRAM_* lines (bot token from @BotFather, your numeric id",
     "# from @userinfobot in BOTH id lines), then restart:",
-    "#   sudo systemctl enable channel-jarvis && sudo systemctl restart channel-jarvis",
+    f"#   sudo systemctl enable channel-{agent} && sudo systemctl restart channel-{agent}",
     "# TELEGRAM_ALLOWED_CHAT_IDS must contain your id too: without it every private",
     "# message is dropped silently. Voice needs GROQ_API_KEY=<key> (optional).",
     "# TELEGRAM_EXPECTED_BOT_ID is set at every start from the token (channel-start.sh).",
@@ -1619,11 +1778,12 @@ _write_if_absent() {
     write_as_user "$@"
 }
 
-# _write_agent_workspace <wsroot> -- lays down CLAUDE.md + core/ tree for Jarvis.
+# _write_agent_workspace <wsroot> [jarvis|coder] -- lays down CLAUDE.md + core/ tree for
+# Jarvis (default) or Coder (templates/coder-CLAUDE.md + templates/coder-rules.md).
 # Matches prod smoke-check #5: ls ~/.claude-lab/jarvis/.claude/ must show
 # CLAUDE.md, USER.md (under core/), skills/.
 _write_agent_workspace() {
-    local ws="$1"
+    local ws="$1" kind="${2:-jarvis}"
 
     install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" \
         "$ws" \
@@ -1637,12 +1797,21 @@ _write_agent_workspace() {
     local claude_md_tmp
     claude_md_tmp=$(mktemp)
     TMPFILES+=("$claude_md_tmp")
-    render_template "${TEMPLATES_DIR}/CLAUDE.md" "$claude_md_tmp" \
-        AGENT_NAME "Jarvis" \
-        AGENT_ROLE "operator's daily AI assistant" \
-        USER_NAME  "$OPERATOR_NAME" \
-        LANGUAGE   "$OPERATOR_LANGUAGE" \
-        TIMEZONE   "$OPERATOR_TIMEZONE"
+    if [[ "$kind" == coder ]]; then
+        render_template "${TEMPLATES_DIR}/coder-CLAUDE.md" "$claude_md_tmp" \
+            USER_NAME   "$OPERATOR_NAME" \
+            LANGUAGE    "$OPERATOR_LANGUAGE" \
+            TIMEZONE    "$OPERATOR_TIMEZONE" \
+            USER        "$AGENT_USER" \
+            CONFIG_ROOT "$CONFIG_ROOT"
+    else
+        render_template "${TEMPLATES_DIR}/CLAUDE.md" "$claude_md_tmp" \
+            AGENT_NAME "Jarvis" \
+            AGENT_ROLE "operator's daily AI assistant" \
+            USER_NAME  "$OPERATOR_NAME" \
+            LANGUAGE   "$OPERATOR_LANGUAGE" \
+            TIMEZONE   "$OPERATOR_TIMEZONE"
+    fi
     _write_if_absent "$claude_md_tmp" "${ws}/CLAUDE.md" 0644
 
     # core/USER.md -- operator profile
@@ -1681,6 +1850,11 @@ UEOF
 - Отправил человеку сообщение из handoff = сразу вычеркни этот пункт в handoff, в том же ходе.
 - После рестарта, прежде чем отправлять что-то из handoff, открой этот чат и проверь, не ушло ли уже. Ушло = вычеркни, не повторяй.
 REOF
+    if [[ "$kind" == coder ]]; then
+        render_template "${TEMPLATES_DIR}/coder-rules.md" "$rules_tmp" \
+            TIMEZONE "$OPERATOR_TIMEZONE" \
+            USER     "$AGENT_USER"
+    fi
     _write_if_absent "$rules_tmp" "${ws}/core/rules.md" 0644
 
     # Stub cold memory + hot/warm files so @includes in CLAUDE.md resolve.
@@ -2113,7 +2287,24 @@ install_skills() {
 
     fix_owner "$dst_parent"
     link_skills_into_plugin "$dst_parent" "${AGENT_HOME}/.claude-lab/jarvis/.claude/dashi-plugin-claude-code"
-    ok "Skills installed: ${installed[*]:-<none>} (${#installed[@]}/10)"
+    ok "Skills installed: ${installed[*]:-<none>} (${#installed[@]}/$(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} )))"
+
+    # Coder gets the same set in its own skills dir (a copy, so each agent may change its own).
+    # Only missing skills are copied: a re-run never overwrites what the owner changed there.
+    if [[ "$CODER_INSTALLED" == "1" ]]; then
+        local coder_skills="${AGENT_HOME}/.claude-lab/coder/.claude/skills" copied=0 present=0
+        install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$coder_skills"
+        for name in "${installed[@]}"; do
+            if [[ -e "${coder_skills}/${name}" ]]; then
+                present=$((present + 1))
+            elif install_skill_bundle "${dst_parent}/${name}" "$coder_skills" "$name"; then
+                copied=$((copied + 1))
+            fi
+        done
+        fix_owner "$coder_skills"
+        link_skills_into_plugin "$coder_skills" "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code"
+        ok "Coder skills: ${copied} copied, ${present} already there (kept) in ${coder_skills}"
+    fi
 }
 
 # link_skills_into_plugin <skills_dir> <plugin_root>
@@ -2373,6 +2564,18 @@ install_sudoers() {
 # STEP 12: MEMORY ROTATION SCRIPTS + CRON
 # =============================================================================
 
+# _coder_memory_cron_lines <scripts_dir> -- the same four jobs for the Coder workspace
+# (AGENT_WS points the scripts at it), five minutes after the Jarvis ones; empty without Coder.
+_coder_memory_cron_lines() {
+    [[ "${CODER_INSTALLED:-0}" == "1" ]] || return 0
+    local s=$1 ws="${AGENT_HOME}/.claude-lab/coder/.claude" log="${AGENT_HOME}/.claude-lab/coder/logs/memory-cron.log"
+    printf '%s\n' \
+        "35 4 * * * AGENT_WS=${ws} ${s}/rotate-warm.sh >> ${log} 2>&1" \
+        "5 5 * * *  AGENT_WS=${ws} ${s}/trim-hot.sh >> ${log} 2>&1" \
+        "5 6 * * *  AGENT_WS=${ws} ${s}/compress-warm.sh >> ${log} 2>&1" \
+        "5 21 * * * AGENT_WS=${ws} ${s}/memory-rotate.sh >> ${log} 2>&1"
+}
+
 # Install the 4 memory-rotation scripts into the jarvis workspace and register
 # them with the agent user's crontab: rotate-warm / trim-hot / compress-warm /
 # memory-rotate. (ov-session-sync is not scheduled: it idles without OpenViking.)
@@ -2434,6 +2637,12 @@ HOME=${AGENT_HOME}
 # ${INSTALL_TAG} memory rotation end
 CRON
 )
+    local coder_lines
+    coder_lines=$(_coder_memory_cron_lines "$scripts_dst")
+    if [[ -n "$coder_lines" ]]; then
+        install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "${AGENT_HOME}/.claude-lab/coder/logs"
+        cron_block="${cron_block%$'\n'*}"$'\n'"${coder_lines}"$'\n'"${cron_block##*$'\n'}"
+    fi
 
     local current_tmp new_tmp
     current_tmp=$(mktemp)
@@ -2542,6 +2751,18 @@ render_guard_conf() {
     fself=$(_gate_conf_pick "$existing" FACT_GATE_SELF_IDS)
     if ! _env_is_set FACT_GATE_SELF_IDS && ! _guard_conf_has "$existing" FACT_GATE_SELF_IDS && [[ "${JARVIS_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then fself="${BASH_REMATCH[1]}"; fi
     [[ -z "$fself" || "$fself" =~ ^[0-9]+([\ ,]+[0-9]+)*$ ]] || { warn "FACT_GATE_SELF_IDS '${fself}' is not a list of ids -- ignored."; fself=""; }
+    # Coder installed: it is a channel agent watched by the guard, and its bot id is "self" for the
+    # gate too (one guard.conf serves both sessions). Owner choices are kept: an env SELF_IDS wins,
+    # an empty SELF_IDS stays empty.
+    if [[ "${CODER_INSTALLED:-0}" == "1" ]]; then
+        agents="${agents:-jarvis}"
+        [[ " ${agents} " == *" coder "* ]] || agents="${agents} coder"
+        labels="${labels:-jarvis=Jarvis}"
+        [[ ",${labels}," == *",coder="* ]] || labels="${labels},coder=Coder"
+        if ! _env_is_set FACT_GATE_SELF_IDS && [[ -n "$fself" && "${CODER_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then
+            [[ " ${fself//,/ } " == *" ${BASH_REMATCH[1]} "* ]] || fself="${fself} ${BASH_REMATCH[1]}"
+        fi
+    fi
     fbots=$(_gate_conf_pick "$existing" FACT_GATE_BOT_IDS)
     if ! _env_is_set FACT_GATE_BOT_IDS && ! _guard_conf_has "$existing" FACT_GATE_BOT_IDS && [[ "${RICHARD_BOT_TOKEN:-}" =~ ^([0-9]+): ]]; then fbots="${BASH_REMATCH[1]}"; fi
     [[ -z "$fbots" || "$fbots" =~ ^[0-9]+([\ ,]+[0-9]+)*$ ]] || { warn "FACT_GATE_BOT_IDS '${fbots}' is not a list of ids -- ignored."; fbots=""; }
@@ -2644,10 +2865,6 @@ setup_agent_hooks() {
 
     local lib="$GUARD_LIB_DIR" hooks="${GUARD_LIB_DIR}/hooks"
     local user_settings="${AGENT_HOME}/.claude/settings.json"
-    local ws="${AGENT_HOME}/.claude-lab/jarvis/.claude"
-    local plugin_dir="${ws}/dashi-plugin-claude-code/plugin"
-    local plugin_settings="${plugin_dir}/.claude/settings.json"
-    local fact_state="${AGENT_HOME}/.claude-lab/shared/state/jarvis/factcheck"
     local fail=0
 
     add_hook "$user_settings" SessionStart compact "python3 ${lib}/compact-open-items-reminder.py" 20 || fail=1
@@ -2658,12 +2875,37 @@ setup_agent_hooks() {
     add_hook "$user_settings" PostToolUse 'Edit|Write|MultiEdit' "bash ${hooks}/review-reminder.sh" 5 || fail=1
     merge_json_file "$user_settings" '.env = (.env // {}) | (if .env | has("CLAUDE_CODE_AUTO_COMPACT_WINDOW") then . else .env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "400000" end)' || fail=1
 
+    _setup_plugin_hooks jarvis "$JARVIS_ENV_DIR" 8089 || fail=1
+    if [[ "$CODER_INSTALLED" == "1" ]]; then
+        _setup_plugin_hooks coder "$CODER_ENV_DIR" "$CODER_WEBHOOK_PORT" || fail=1
+    fi
+
+    if [[ "$fail" -ne 0 ]]; then
+        err "Some hooks were NOT switched on -- see the warnings above."
+        return 1
+    fi
+    ok "Hooks on: ${user_settings} (all sessions), plugin settings of jarvis$([[ "$CODER_INSTALLED" == "1" ]] && echo " + coder")."
+}
+
+# _setup_plugin_hooks <agent> <env_dir> <default_port> -- the per-agent hooks in
+# ~/.claude-lab/<agent>/.claude/dashi-plugin-claude-code/plugin/.claude/settings.json
+# (the service's cwd): correction capture, auto-recall, critical thinking, fact-check gate,
+# fallback reply (webhook port from <env_dir>/channel.env), lessons at start, pre-compaction flush.
+_setup_plugin_hooks() {
+    local agent=$1 env_dir=$2 default_port=$3
+    local lib="$GUARD_LIB_DIR" hooks="${GUARD_LIB_DIR}/hooks"
+    local ws="${AGENT_HOME}/.claude-lab/${agent}/.claude"
+    local plugin_dir="${ws}/dashi-plugin-claude-code/plugin"
+    local plugin_settings="${plugin_dir}/.claude/settings.json"
+    local fact_state="${AGENT_HOME}/.claude-lab/shared/state/${agent}/factcheck"
+    local fail=0
+
     if [[ -d "$plugin_dir" ]]; then
         as_agent mkdir -p "${plugin_dir}/.claude" "$fact_state" || fail=1
         local port
-        port=$(sed -n 's/^TELEGRAM_WEBHOOK_PORT=\([0-9]*\)$/\1/p' "${JARVIS_ENV_DIR}/channel.env" 2>/dev/null | tail -n 1)
+        port=$(sed -n 's/^TELEGRAM_WEBHOOK_PORT=\([0-9]*\)$/\1/p' "${env_dir}/channel.env" 2>/dev/null | tail -n 1)
         add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/correction-detector.py ${ws}" 10 || fail=1
-        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/auto-recall.py jarvis" 10 || fail=1
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/auto-recall.py ${agent}" 10 || fail=1
         add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/critical-check.py" 5 || fail=1
         # The gate checks edits too; an entry of an earlier install (matcher reply only) is moved to the new matcher.
         local fact_cmd="python3 ${hooks}/fact-check-gate.py ${fact_state}"
@@ -2674,20 +2916,16 @@ setup_agent_hooks() {
                                       | map(select((.hooks | type) != "array" or (.hooks | length) > 0)))
             else . end' --arg old mcp__dashi-channel__reply --arg cmd "$fact_cmd" || fail=1
         add_hook "$plugin_settings" PreToolUse 'mcp__dashi-channel__reply|mcp__dashi-channel__edit_message' "$fact_cmd" 10 || fail=1
-        add_hook "$plugin_settings" Stop "" "TELEGRAM_FALLBACK_REPLY_URL='http://127.0.0.1:${port:-8089}/hooks/fallback-reply' ${AGENT_HOME}/.bun/bin/bun '${plugin_dir}/scripts/fallback-reply-hook.ts'" 30 \
+        add_hook "$plugin_settings" Stop "" "TELEGRAM_FALLBACK_REPLY_URL='http://127.0.0.1:${port:-$default_port}/hooks/fallback-reply' ${AGENT_HOME}/.bun/bin/bun '${plugin_dir}/scripts/fallback-reply-hook.ts'" 30 \
             "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
         add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1
-        add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh jarvis" 40 || fail=1
+        add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh ${agent}" 40 || fail=1
     else
-        warn "Plugin dir ${plugin_dir} missing -- main agent hooks NOT set."
+        warn "Plugin dir ${plugin_dir} missing -- ${agent} hooks NOT set."
         fail=1
     fi
 
-    if [[ "$fail" -ne 0 ]]; then
-        err "Some hooks were NOT switched on -- see the warnings above."
-        return 1
-    fi
-    ok "Hooks on: ${user_settings} (all sessions), ${plugin_settings} (main agent)."
+    return "$fail"
 }
 
 # install_agents_guard_cron -- the root watchdog, once a minute (stall, login, limit,
@@ -2700,6 +2938,22 @@ install_agents_guard_cron() {
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 * * * * * root /usr/bin/python3 ${GUARD_LIB_DIR}/agents-guard.py >/dev/null 2>>/var/log/${AGENT_USER}-guard.err
+CRON
+)"
+}
+
+# install_auth_watch_cron -- the hourly Claude login watch (claude-auth-watch.sh): a lost login
+# reaches the owner by the agent's own bot instead of a silent agent.
+install_auth_watch_cron() {
+    install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-auth-watch"
+    _install_cron_file "${AGENT_USER}-auth-watch" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: Claude login watch ("Not logged in" on an agent screen, no login at all,
+# long-lived token close to expiry) -> one line to the owner by the agent's own bot.
+# Stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP ; remove this file to uninstall.
+# Long-lived token (claude setup-token): echo YYYY-MM-DD > /var/lib/${AGENT_USER}-auth-watch/oauth-issued
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 * * * * root /bin/bash ${GUARD_LIB_DIR}/claude-auth-watch.sh >> /var/log/${AGENT_USER}-auth-watch.log 2>&1
 CRON
 )"
 }
@@ -2802,7 +3056,8 @@ CRON
     install_agents_guard_cron
     install_service_watch_cron "$shared_state"
     install_memory_weight_cron
-    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight}"
+    install_auth_watch_cron
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight,auth-watch}"
 }
 
 # =============================================================================
@@ -3128,6 +3383,19 @@ install_team_refs() {
 
     _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
 
+    # Coder: the same team rules, auto-memory layout and archive/library dirs in its own workspace.
+    if [[ "$CODER_INSTALLED" == "1" ]]; then
+        local cws="${AGENT_HOME}/.claude-lab/coder/.claude" cmem
+        cmem="${AGENT_HOME}/.claude/projects/$(printf '%s' "${cws}/dashi-plugin-claude-code" | sed 's/[^A-Za-z0-9]/-/g')/memory"
+        as_agent mkdir -p "$cmem" "${cws}/core/archive" "${cws}/library" \
+            || die "Could not create Coder reference dirs as ${AGENT_USER}."
+        for f in MEMORY index-work index-people index-content index-infra; do
+            _agent_write "${tdir}/memory/${f}.md" "${cmem}/${f}.md" 0644 1 || fail=1
+        done
+        _agent_write "${tdir}/memory/library-INDEX.md" "${cws}/library/INDEX.md" 0644 1 || fail=1
+        _ensure_marked_block "${cws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+    fi
+
     if [[ "$fail" -ne 0 ]]; then
         err "Team references are not all in place -- see the warnings above."
         return 1
@@ -3169,6 +3437,23 @@ enable_services() {
             fi
         else
             log "${JARVIS_UNIT} enabled -- will start after OAuth under ${AGENT_USER}."
+        fi
+    fi
+
+    if [[ "$CODER_INSTALLED" == "1" ]]; then
+        if ! _env_has_value "${CODER_ENV_DIR}/channel.env" TELEGRAM_BOT_TOKEN; then
+            log "${CODER_UNIT} NOT enabled (no token in ${CODER_ENV_DIR}/channel.env)."
+        else
+            systemctl enable "${CODER_UNIT}.service" --quiet
+            if [[ "$oauth_ready" == "yes" ]]; then
+                if systemctl restart "${CODER_UNIT}.service" 2>/dev/null; then
+                    ok "${CODER_UNIT} enabled + started."
+                else
+                    warn "${CODER_UNIT} enabled, but start failed -- check 'journalctl -u ${CODER_UNIT}'."
+                fi
+            else
+                log "${CODER_UNIT} enabled -- will start after OAuth under ${AGENT_USER}."
+            fi
         fi
     fi
 
@@ -3283,6 +3568,12 @@ report_claude_plan() {
     esac
 }
 
+# _coder_unit_word -- " channel-coder" when Coder is installed, else nothing (for the command lines).
+_coder_unit_word() {
+    [[ "$CODER_INSTALLED" == "1" ]] && printf ' %s' "$CODER_UNIT"
+    return 0
+}
+
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
@@ -3301,8 +3592,11 @@ Installed on this VPS:
   - Claude:    ${AGENT_HOME}/.local/bin/claude  (per-user, on PATH)
   - Jarvis:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/  (systemd: ${JARVIS_UNIT})
                env: ${JARVIS_ENV_DIR}/channel.env
+  - Coder:     $([[ "$CODER_INSTALLED" == "1" ]] && echo "${AGENT_HOME}/.claude-lab/coder/.claude/  (systemd: ${CODER_UNIT}, env: ${CODER_ENV_DIR}/channel.env, bot: @${CODER_BOT_USERNAME:-<fill-in>})" || echo "not installed (optional third bot: re-run sudo bash install.sh and answer the Coder token question)")
   - Richard:   ${RICHARD_HOME}                       (systemd: claude-richard)
-  - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  (10 skills)
+  - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  ($(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} )) skills)
+  - Login watch: hourly, the agent's own bot tells you when Claude login is lost
+                 (stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP)
   - Plugin:    ${AGENT_HOME}/.claude/plugins/superpowers/
   - Sudoers:   ${SUDOERS_FILE}  (narrow, 0440)
 
@@ -3325,9 +3619,9 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         #   Permission prompts ("allow this command?") go only to TELEGRAM_ALLOWED_USER_IDS
         # Richard: ${RICHARD_HOME}/.env -- TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>
 
-        sudo systemctl enable ${JARVIS_UNIT} claude-richard
-        sudo systemctl restart ${JARVIS_UNIT} claude-richard
-        sudo systemctl status  ${JARVIS_UNIT} claude-richard --no-pager
+        sudo systemctl enable ${JARVIS_UNIT}$(_coder_unit_word) claude-richard
+        sudo systemctl restart ${JARVIS_UNIT}$(_coder_unit_word) claude-richard
+        sudo systemctl status  ${JARVIS_UNIT}$(_coder_unit_word) claude-richard --no-pager
         sudo journalctl -u ${JARVIS_UNIT} -f       # Jarvis logs
         sudo -u ${AGENT_USER} tmux -L ${JARVIS_UNIT} capture-pane -p -t ${JARVIS_UNIT} | tail -30   # Jarvis screen
 
@@ -3343,9 +3637,9 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         sudo -u ${AGENT_USER} bash -lc 'which claude'         # ${AGENT_HOME}/.local/bin/claude
         ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/          # CLAUDE.md, core/, skills/
         systemctl is-active ${JARVIS_UNIT}                       # active (after steps 1+2)
-        systemctl is-active claude-richard                      # active (after steps 1+2)
+        systemctl is-active claude-richard                      # active (after steps 1+2)$([[ "$CODER_INSTALLED" == "1" ]] && printf '\n        systemctl is-active %s                       # active (after steps 1+2)' "$CODER_UNIT")
         ls -la ${SUDOERS_FILE}                    # exists, 0440
-        ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # 10
+        ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # $(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))
         ls ${AGENT_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
 
   $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Group watch (status: ${GROUP_WATCH_STATUS:-off}). Jarvis does not see group messages by itself;
@@ -3389,6 +3683,7 @@ main() {
     install_bun
     collect_inputs
     install_jarvis
+    install_coder
     install_richard
     setup_global_claude
     install_skills
