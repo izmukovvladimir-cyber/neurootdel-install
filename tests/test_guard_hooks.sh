@@ -181,6 +181,24 @@ if setup_agent_hooks >/dev/null 2>&1; then hk_rc=0; else hk_rc=$?; fi
 check "hooks: missing plugin dir -> nonzero" test "$hk_rc" -ne 0
 AGENT_HOME="$H"
 
+# --- Coder: the Codex commit gate is wired for the Coder only -----------------------------
+CWS="${H}/.claude-lab/coder/.claude"
+CODER_ENV_DIR="${TDIR}/etc/coder"
+CODER_WEBHOOK_PORT=8094
+mkdir -p "$CODER_ENV_DIR" "${CWS}/dashi-plugin-claude-code/plugin"
+echo 'TELEGRAM_WEBHOOK_PORT=8094' >"${CODER_ENV_DIR}/channel.env"
+CODER_INSTALLED=1 setup_agent_hooks
+CPS="${CWS}/dashi-plugin-claude-code/plugin/.claude/settings.json"
+check "codex gate: coder PreToolUse Bash check" jqtrue "$CPS" '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] | any(test("codex-commit-guard.py check coder$"))'
+check "codex gate: no PostToolUse hook needed" jqtrue "$CPS" '[.hooks.PostToolUse[]?.hooks[]?.command] | any(test("codex-commit-guard")) | not'
+check "codex gate: not on jarvis"            jqtrue "$PS" '[.. | .command? // empty] | any(test("codex-commit-guard")) | not'
+check "codex gate: not in user settings"     jqtrue "$US" '[.. | .command? // empty] | any(test("codex-commit-guard")) | not'
+cp "$CPS" "${TDIR}/cps1"
+CODER_INSTALLED=1 setup_agent_hooks
+check "codex gate: re-run adds nothing"      cmp -s "$CPS" "${TDIR}/cps1"
+check "codex gate: conf switch documented"   grep -qxF 'CODEX_COMMIT_GUARD=1' "${REPO}/templates/editorial.conf"
+check "codex gate: coder rules name it"      grep -qF 'CODEX_COMMIT_GUARD=0' "${REPO}/templates/coder-rules.md"
+
 # --- channel.env webhook token + plugin config webhook ----------------------------------
 ENV1="${TDIR}/env1"
 CHANNEL_ENV_TOKEN="" render_channel_env "" "555" "" /st /ws >"$ENV1"

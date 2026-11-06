@@ -65,4 +65,15 @@ verdict=$(awk '
     | grep -oE 'APPROVE|REQUEST_CHANGES' | sort -u || true)
 [[ "$verdict" == *$'\n'* ]] && verdict=CONFLICT
 echo "codex: model=$shown verdict=${verdict:-EMPTY}"
+# A real APPROVE leaves the marker the Coder's commit gate reads (lib/hooks/codex-commit-guard.py):
+# ~/.claude-lab/shared/state/<agent>/codex-review-marker, the agent taken from where this skill is installed
+# (~/.claude-lab/<agent>/.claude/skills/codex-check/scripts/). A failed write only warns.
+if [[ "$verdict" == APPROVE ]]; then
+    agent="$(basename "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd)")"
+    if [[ "$agent" =~ ^[a-z][a-z0-9_-]{0,31}$ ]]; then
+        mdir="$HOME/.claude-lab/shared/state/$agent"
+        { mkdir -p "$mdir" && date +%s > "$mdir/codex-review-marker"; } 2>/dev/null \
+            || echo "codex-check: метка одобрения не записана в $mdir" >&2
+    fi
+fi
 cat "$out"
