@@ -1,0 +1,26 @@
+[Unit]
+Description=Coder -- Telegram channel (Telegram -> Claude Code)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# claude needs a TTY, so it lives in a detached tmux session (dedicated socket).
+Type=forking
+User={{USER}}
+Group={{USER}}
+WorkingDirectory={{PLUGIN_DIR}}
+EnvironmentFile={{ENV_FILE}}
+Environment=HOME={{HOME}}
+Environment=PATH={{HOME}}/.bun/bin:{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+# channel-start.sh sets TELEGRAM_EXPECTED_BOT_ID from the token, then tmux.
+ExecStart=/bin/bash {{START_SCRIPT}} channel-coder claude --model {{MODEL}} --dangerously-skip-permissions --dangerously-load-development-channels server:dashi-channel
+# Walks the start-up prompts (imports, dev-channel warning, bypass mode).
+ExecStartPost=/bin/bash {{CONFIRM_SCRIPT}} channel-coder
+TimeoutStartSec=120
+ExecStop=/usr/bin/tmux -L channel-coder kill-server
+Restart=on-failure
+RestartSec=15s
+
+[Install]
+WantedBy=multi-user.target

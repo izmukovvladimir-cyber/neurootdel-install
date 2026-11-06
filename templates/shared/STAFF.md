@@ -11,10 +11,12 @@ Filled in by the owner and the agents. The installer writes this file only when 
 | Name | Bus name | Role | Service | Workspace |
 |---|---|---|---|---|
 | {{AGENT_NAME}} | `jarvis` | main assistant, coordinator | `channel-jarvis` | `~/.claude-lab/jarvis/.claude` |
+| Coder | `coder` | technical specialist: bots, scripts, integrations (only when installed with its own bot) | `channel-coder` | `~/.claude-lab/coder/.claude` |
 | {{DOCTOR_NAME}} | `richard` | server doctor: raises fallen agents, backups | `claude-richard` | home dir |
 
 ## Who gets what
 - Texts, decisions, the owner's day: {{AGENT_NAME}}.
+- Bots, scripts, integrations, automation: Coder (when installed).
 - Service down, disk, memory, agent silent: {{DOCTOR_NAME}}.
 
 ## How agents talk
