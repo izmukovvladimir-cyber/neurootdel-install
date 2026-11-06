@@ -3281,6 +3281,25 @@ CRON
 )"
 }
 
+# install_root_requests_cron -- the root request carrier (agents-root-requests.sh): agents without
+# sudo ask for restart / allow-user / allow-chat / revoke-user / permissions / model / model-revert /
+# cron-restore with a one-line file; root runs only the pre-written action. No sudoers line needed.
+install_root_requests_cron() {
+    local u="$AGENT_USER" base="/var/lib/${AGENT_USER}-requests"
+    install -d -m 0755 -o root -g root "$base"
+    install -d -m 0770 -o "$u" -g "$u" "${base}/requests"
+    install -d -m 0750 -o root -g "$u" "${base}/results"
+    _install_cron_file "${u}-root-requests" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: root request carrier for the agents (agents-root-requests.sh), every minute.
+# Requests: ${base}/requests (${u}), results: ${base}/results, journal: /var/log/${u}-root-requests.log.
+# Stop: touch /etc/${u}-root-requests.STOP ; remove this file to uninstall. Memo: ~/.claude-lab/shared/TOOLS-root-requests.md
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * root /usr/bin/flock -n /run/${u}-root-requests.lock /bin/bash ${GUARD_LIB_DIR}/agents-root-requests.sh >/dev/null 2>>/var/log/${u}-root-requests.err
+CRON
+)"
+}
+
 install_guard() {
     step 12 "Installing agent guard: session reset, memory backup, watchdog (cron ON)"
 
@@ -3340,7 +3359,8 @@ CRON
     install_service_watch_cron "$shared_state"
     install_memory_weight_cron
     install_auth_watch_cron
-    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight,auth-watch}"
+    install_root_requests_cron
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight,auth-watch,root-requests}"
 }
 
 # =============================================================================
@@ -3684,6 +3704,13 @@ install_team_refs() {
 
     _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
 
+    # Root request carrier memo (managed): how to ask for a privileged action, @ in each channel agent.
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    render_template "${tdir}/shared/TOOLS-root-requests.md" "$tmp" LIB "$GUARD_LIB_DIR" USER "$AGENT_USER"
+    _agent_write "$tmp" "${shared}/TOOLS-root-requests.md" 0644 0 || fail=1
+    _ensure_marked_block "${ws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
+
     # Coder: the same team rules, auto-memory layout and archive/library dirs in its own workspace.
     if [[ "$CODER_INSTALLED" == "1" ]]; then
         local cws="${AGENT_HOME}/.claude-lab/coder/.claude" cmem
@@ -3695,6 +3722,7 @@ install_team_refs() {
         done
         _agent_write "${tdir}/memory/library-INDEX.md" "${cws}/library/INDEX.md" 0644 1 || fail=1
         _ensure_marked_block "${cws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+        _ensure_marked_block "${cws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
     fi
 
     _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1

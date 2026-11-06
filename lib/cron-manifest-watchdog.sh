@@ -30,6 +30,7 @@ readonly -a EXPECTED=(
     "$CD/${U}-memory-backup::memory-backup.sh --auto::бэкап памяти (03:30)"
     "$CD/${U}-memory-weight::memory_weight_watch.py::вес памяти агентов (04:20)"
     "$CD/${U}-auth-watch::claude-auth-watch.sh::сторож входа в Claude (ежечасно)"
+    "$CD/${U}-root-requests::agents-root-requests.sh::заявки агентов на root (1/мин)"
     "$CD/${U}-service-watch::resource-watchdog.sh::сторож ресурсов (*/5)"
     "$CD/${U}-service-watch::disk-clean-old.sh::чистка старых файлов (04:30)"
     "$CD/${U}-service-watch::agents-git-autosync.sh::git-история агентов (*/30)"
@@ -42,6 +43,7 @@ readonly -a SCRIPTS=(
     "$L/resource-watchdog.sh" "$L/disk-clean-old.sh" "$L/agents-git-autosync.sh"
     "$L/claude-usage-collector.py" "$L/outbox-put.py" "$L/memory_weight_watch.py" "$L/restart_unanswered.py"
     "$L/hooks/precompact-flush.sh" "$L/cron-manifest-watchdog.sh" "$L/claude-auth-watch.sh"
+    "$L/agents-root-requests.sh"
 )
 
 DRY=0
