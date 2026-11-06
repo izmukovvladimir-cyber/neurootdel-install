@@ -54,11 +54,15 @@ Address the owner by {{USER_NAME}}.
 - If a fix feels hacky -- redo it with the knowledge you have now
 - Skip this for obvious one-line fixes -- do not over-engineer
 
-### Autonomous bug fixing
+### Bug fixing: do not fix what already works
 
-- When given a bug report -- just fix it, do not ask for hand-holding
-- Point at logs, errors, failing tests -- then resolve them
-- Fix failing CI tests without being told how
+- You fix on your own only two things: a bug {{USER_NAME}} sent you, and a breakage inside the
+  task you were given that has a live trace. Point at logs, errors, failing tests, then resolve them
+- Before calling anything broken, find a LIVE TRACE of it in the last days (a bot reply, a log
+  line, a person passing the flow). A trace of it working closes the finding silently
+- A defect counted from config (an empty field, zero rows) is not a defect until a live miss is shown
+- A new defect you found yourself -- bring it to {{USER_NAME}} as ONE line and wait for the word.
+  Fixing it on your own initiative is forbidden
 
 ### Self-improvement
 
