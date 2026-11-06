@@ -278,16 +278,16 @@ CODER_INSTALLED=1
 OUT=$(install_skills 2>&1)
 JSK="${FAKE_HOME}/.claude-lab/jarvis/.claude/skills"
 CSK="${FAKE_HOME}/.claude-lab/coder/.claude/skills"
-check "skills: jarvis 11/11"            grep -q '(11/11)' <<<"$OUT"
+check "skills: jarvis 12/12"            grep -q '(12/12)' <<<"$OUT"
 check "skills: jarvis has skill-finder" test -f "${JSK}/skill-finder/SKILL.md"
-check "skills: coder copy 11"           grep -q 'Coder skills: 11 copied, 0 already there' <<<"$OUT"
+check "skills: coder copy 12"           grep -q 'Coder skills: 12 copied, 0 already there' <<<"$OUT"
 check "skills: coder has skill-finder"  test -f "${CSK}/skill-finder/SKILL.md"
 check "skills: coder copy is a copy"    test ! -L "${CSK}/present"
 check "skills: coder plugin linked"     test "$(readlink "${PR}/.claude/skills")" = "$CSK"
 echo 'OWNER EDIT' >>"${CSK}/present/SKILL.md"; echo 'mine' >"${CSK}/present/extra.txt"
 OUT=$(install_skills 2>&1)
 check "skills: re-run keeps coder edits" bash -c "grep -q 'OWNER EDIT' '${CSK}/present/SKILL.md' && test -f '${CSK}/present/extra.txt'"
-check "skills: re-run reports kept"     grep -q 'Coder skills: 0 copied, 11 already there' <<<"$OUT"
+check "skills: re-run reports kept"     grep -q 'Coder skills: 0 copied, 12 already there' <<<"$OUT"
 CODER_INSTALLED=0; rm -rf "${CSK:?}"
 install_skills >/dev/null 2>&1
 check "skills: no coder -> no copy"     test ! -e "$CSK"
