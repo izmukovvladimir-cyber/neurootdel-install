@@ -4,8 +4,7 @@
 #
 # Behavior:
 #   - recent.md > 12KB: keep last 50 "### " entries, shrink until < 12KB (min 10).
-#   - handoff.md > 4KB: UTF-8-safe byte trim to 4KB, snap to last newline.
-#   - handoff.md mtime > 6h: overwrite with "stale" placeholder.
+#   - handoff.md: never cut or overwritten; over 15KB only a warning line in the log.
 set -euo pipefail
 
 AGENT_WS="${AGENT_WS:-$HOME/.claude-lab/jarvis/.claude}"
@@ -58,44 +57,21 @@ PY
     fi
 fi
 
-# -------- handoff.md: staleness + byte cap --------
-HANDOFF_SIZE_LIMIT=4096
-HANDOFF_STALE_HOURS=6
+# -------- handoff.md: DO NOT CUT, only warn (memory scheme parity, 06.11.2026) --------
+# Before: a blind tail cut to 4 KB and a stub overwrite when mtime was older than 6 h. Both
+# destroyed open items: the tail is where the newest entries and the auto block live, and the
+# stub replaced the whole file (logged here as "stale ... cleared"). handoff.md holds ONLY open
+# items and is cleaned by its owner agent by meaning (rule 5b); a script cannot tell an open item
+# from a closed one, so it only names the size. The nightly weight guard
+# (memory_weight_watch.py) wakes the owner when the file stays over the cap.
+HANDOFF_WARN_LIMIT=15360   # 15 KB, the journal cap of rule 5b
 
 if [ -f "$HANDOFF" ]; then
-    FILE_MOD=$(stat -c%Y "$HANDOFF" 2>/dev/null || echo 0)
-    NOW=$(date +%s)
-    AGE_HOURS=$(( (NOW - FILE_MOD) / 3600 ))
-
-    if [ "$AGE_HOURS" -ge "$HANDOFF_STALE_HOURS" ]; then
-        cat > "$HANDOFF" <<STALE
-# handoff.md -- last 10 entries (@include)
-
-Previous session ended more than ${HANDOFF_STALE_HOURS}h ago. Context stale.
-Start a fresh session: recall recent work from core/hot/recent.md if needed.
-STALE
-        log "handoff.md stale (${AGE_HOURS}h), cleared"
+    SIZE=$(wc -c < "$HANDOFF" | tr -d ' ')
+    if [ "$SIZE" -gt "$HANDOFF_WARN_LIMIT" ]; then
+        log "handoff.md ${SIZE}B > ${HANDOFF_WARN_LIMIT}B - owner must compress by meaning (file not touched)"
     else
-        SIZE=$(wc -c < "$HANDOFF" | tr -d ' ')
-        if [ "$SIZE" -gt "$HANDOFF_SIZE_LIMIT" ]; then
-            TMPFILE=$(mktemp "${HANDOFF}.XXXXXX")
-            python3 - "$HANDOFF" "$TMPFILE" "$HANDOFF_SIZE_LIMIT" <<'PY'
-from pathlib import Path
-import sys
-handoff = Path(sys.argv[1])
-tmpfile = Path(sys.argv[2])
-max_bytes = int(sys.argv[3])
-content = handoff.read_text(encoding='utf-8', errors='replace')
-while len(content.encode('utf-8')) > max_bytes:
-    content = content[:len(content)-100]
-last_nl = content.rfind('\n')
-if last_nl > 0:
-    content = content[:last_nl]
-tmpfile.write_text(content, encoding='utf-8')
-PY
-            mv "$TMPFILE" "$HANDOFF"
-            log "handoff.md trimmed from ${SIZE}B to <=${HANDOFF_SIZE_LIMIT}B"
-        fi
+        log "handoff.md ok (${SIZE}B)"
     fi
 fi
 
