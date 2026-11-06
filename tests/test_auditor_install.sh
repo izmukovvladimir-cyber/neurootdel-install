@@ -127,6 +127,10 @@ check "config: provider openai-codex" has "$CALLS" "config set model.provider op
 check "config: default model"         has "$CALLS" "config set model.default ${AUDITOR_MODEL_DEFAULT}"
 check "config: no interim messages"   has "$CALLS" "config set display.platforms.telegram.interim_assistant_messages false"
 check "bus: folders"                  bash -c 'for d in inbox work done failed; do test -d "$1/$d" || exit 1; done' _ "${FAKE_HOME}/var/lib/auditor-bus"
+# The read-only drop-in lists the engine state dirs with "-" (skipped when missing at unit start): on a clean
+# server they must exist before the first start, or ProtectHome keeps them read-only and Telegram never connects.
+check "state dirs: engine state exists before start" test -d "${FAKE_HOME}/.local/state/hermes"
+check "state dirs: cache exists before start"        test -d "${FAKE_HOME}/.cache"
 U="${TDIR}/systemd/hermes-auditor.service"
 check "unit: written"                 test -f "$U"
 check "unit: runs pinned binary"      has "$U" "ExecStart=\"${HH}/hermes-agent/.hermes/bin/hermes\" \"gateway\" \"run\""
