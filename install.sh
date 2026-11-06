@@ -1839,8 +1839,29 @@ install_auditor() {
         USER "$AGENT_USER" LIB_DIR "$GUARD_LIB_DIR" BUS_DIR "$bus"
     install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${AUDITOR_BRIDGE_UNIT}.service"
 
+    install_auditor_reset_cron || warn "Auditor session reset cron not written: the Auditor session will grow without a reset."
+
     AUDITOR_INSTALLED=1
     ok "Auditor installed: ${hh} (role SOUL.md, plugins ${AUDITOR_PLUGINS[*]}), units ${AUDITOR_UNIT}, ${AUDITOR_BRIDGE_UNIT}"
+}
+
+# install_auditor_reset_cron -- session hygiene of the Auditor, only with the Auditor (lib/hermes-auditor-reset.sh):
+# every 10 min a session over 250k (average turn) is reset after its memory is saved (restart through the root
+# request carrier), and nightly at 03:xx of the owner's clock the day's memory is saved. Runs as the agent user.
+install_auditor_reset_cron() {
+    local st="${AGENT_HOME}/.claude-lab/shared/state/hermes-auditor-reset"
+    as_agent mkdir -p "$st" || return 1
+    as_agent chmod 0700 "$st" || true
+    _install_cron_file "${AGENT_USER}-hermes-reset" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: Auditor (hermes-auditor) session reset at 250k, memory saved first
+# (hermes-auditor-reset.sh), and the nightly memory save at 03:xx of the owner's clock. Quiet: nothing goes to a chat.
+# Stop: touch ${st}/STOP ; remove this file to uninstall. Log: ${st}/reset.log
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+*/10 * * * * ${AGENT_USER} /usr/bin/flock -n ${st}/run.lock /bin/bash ${GUARD_LIB_DIR}/hermes-auditor-reset.sh >> ${st}/reset.log 2>&1
+50 * * * * ${AGENT_USER} /bin/bash ${GUARD_LIB_DIR}/hermes-auditor-reset.sh --nightly-flush >> ${st}/reset.log 2>&1
+CRON
+)"
 }
 
 # render_jarvis_unit <dst> <plugin_dir> <env_file> -- the main agent's unit, explicit model id.

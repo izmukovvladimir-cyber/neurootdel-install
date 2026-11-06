@@ -264,6 +264,9 @@ check_auditor() {
     check "Auditor: роль SOUL.md и плагины проверки на месте" \
         "запусти установщик снова с --stage intensive" \
         bash -c '[[ -f "$1/SOUL.md" && -d "$1/plugins/factcheck" && -d "$1/plugins/secretguard" && -d "$1/plugins/readonly" ]]' _ "$HERMES_HOME"
+    check "Auditor: сброс сессии аудитора по расписанию (250k, память сохраняется до сброса)" \
+        "запусти установщик снова с --stage intensive; если стоит стоп: rm ${H}/.claude-lab/shared/state/hermes-auditor-reset/STOP" \
+        cron_on "${U}-hermes-reset" "${H}/.claude-lab/shared/state/hermes-auditor-reset/STOP"
     check "Auditor: мост для задач от агентов работает" \
         "sudo systemctl restart hermes-auditor-bridge; если стоит стоп: rm ${bus}/STOP" \
         bash -c '[[ "$(systemctl is-active hermes-auditor-bridge 2>/dev/null)" == active && -d "$1/inbox" && ! -e "$1/STOP" ]]' _ "$bus"

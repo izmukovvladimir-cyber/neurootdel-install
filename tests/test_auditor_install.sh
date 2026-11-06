@@ -54,6 +54,7 @@ install() {    # drop -o/-g/-m: the sandbox user cannot chown to root
     command install "${args[@]}"
 }
 step() { :; }
+_install_cron_file() { mkdir -p "${TDIR}/cron.d"; printf '%s\n' "$2" >"${TDIR}/cron.d/$1"; }   # never the real /etc/cron.d
 OPERATOR_NAME="Анна"; OPERATOR_LANGUAGE="Russian"; OPERATOR_TIMEZONE="Asia/Bangkok"; TG_USER_ID="555"
 
 TOKEN_J="123456789:AAHabcdefghijklmnopqrstuvwxyz0123456"
@@ -102,6 +103,7 @@ AUDITOR_BOT_TOKEN="$TOKEN_A"
 install_auditor >"${TDIR}/out1" 2>&1; RC=$?
 check "full: rc 0"                    test "$RC" -eq 0
 check "full: marked installed"        test "$AUDITOR_INSTALLED" = 1
+check "full: session reset cron written" grep -q "hermes-auditor-reset.sh --nightly-flush" "${TDIR}/cron.d/neurootdel-hermes-reset"
 S="${HH}/SOUL.md"
 check "soul: engine default kept as .bak-install" grep -q 'Nous Research' "${S}.bak-install"
 check "soul: role written"            grep -q '^# Аудитор AI-отдела' "$S"
