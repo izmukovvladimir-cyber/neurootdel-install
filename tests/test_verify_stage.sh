@@ -53,6 +53,7 @@ EOF
 chmod +x "${BIN}"/*
 
 # --- a synthetic green install -------------------------------------------------------------------
+OTAG=$(printf '%s' git@github.com:owner/agents-memory.git | sha256sum | cut -c1-12)
 build() {
     rm -rf "${TDIR}/root"
     R="${TDIR}/root"; H="${R}/home/neurootdel"; CR="${R}/etc/vp"; LIB="${R}/lib"
@@ -68,6 +69,7 @@ RICHARD_UNIT="claude-richard"
 RICHARD_ENV="${R}/opt/richard/.env"
 INSTALL_STAGE="${1:-workshop}"
 SKILLS_EXPECTED="3"
+OFFSITE_REPO="git@github.com:owner/agents-memory.git"
 EOF
     printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_USER_IDS=%s,777\nTELEGRAM_ALLOWED_CHAT_IDS=%s\n' "$TOKEN_J" "$OWNER" "$OWNER" >"$CR/jarvis/channel.env"
     printf 'TELEGRAM_BOT_TOKEN=%s\nALLOWED_USERS=%s\n' "$TOKEN_R" "$OWNER" >"${R}/opt/richard/.env"
@@ -75,7 +77,8 @@ EOF
     printf '{"hooks":"block-dangerous.py protect-files.sh compact-open-items-reminder.py"}\n' >"$H/.claude/settings.json"
     mkdir -p "$H/.claude-lab/shared"; echo team >"$H/.claude-lab/shared/team-rules.md"
     mkws jarvis
-    for f in agents-reset agents-guard auth-watch memory-backup root-requests; do echo "* * * * * x" >"${CRON}/neurootdel-${f}"; done
+    for f in agents-reset agents-guard auth-watch memory-backup memory-offsite root-requests; do echo "* * * * * x" >"${CRON}/neurootdel-${f}"; done
+    mkdir -p "$H/backups/offsite"; printf 'OK %s %s выгружено\n' "$(date +%s)" "$OTAG" >"$H/backups/offsite/last"
     printf '# neurootdel-install v3: memory rotation\n0 4 * * * x\n# neurootdel-install memory rotation end\n' >"${TDIR}/crontab"
     printf 'claude-richard\nchannel-jarvis\n' >"${TDIR}/active"
     : >"${TDIR}/dead_bots"; : >"${TDIR}/curl.argv"; : >"${TDIR}/curl.stdin"
@@ -148,6 +151,28 @@ check "Richard on Jarvis's bot: ❌"           fails_with "У каждого а�
 check "shared bot: exit 1"                     test "$RC" -eq 1
 build intensive; mkcoder; mkauditor; printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_USERS=%s\n' "$TOKEN_C" "$OWNER" >"$H/.hermes/.env"; run
 check "Auditor on Coder's bot: ❌"            fails_with "У каждого агента свой бот"
+build; sed -i 's/^OFFSITE_REPO=.*/OFFSITE_REPO=""/' "${LIB}/guard.conf"; run
+check "no offsite repo: ❌ «копии вне сервера нет»" fails_with "Копии памяти вне сервера нет"
+check "no offsite repo: hint names the setup"   out_has "sudo neurootdel-offsite-setup"
+check "no offsite repo: exit 1"                 test "$RC" -eq 1
+build; printf 'ERR %s %s push failed\n' "$(date +%s)" "$OTAG" >"$H/backups/offsite/last"; run
+check "offsite last run ERR: ❌"                fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; run
+check "offsite fresh OK: ✅"                    out_has "✅ Копия памяти вне сервера (GitHub, каждую ночь)"
+build; printf 'OK %s %s old\n' "$(( $(date +%s) - 31 * 3600 ))" "$OTAG" >"$H/backups/offsite/last"; run
+check "offsite OK older than 30 h: ❌"         fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; printf 'OK 4102444800 %s future\n' "$OTAG" >"$H/backups/offsite/last"; run
+check "offsite OK from the future: ❌"         fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; rm "$H/backups/offsite/last"; run
+check "offsite never ran: ❌"                  fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; : >"$H/backups/offsite/last"; run
+check "offsite empty status: ❌"               fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; printf 'OFF %s - x\n' "$(date +%s)" >"$H/backups/offsite/last"; run
+check "offsite status OFF: ❌"                 fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; printf 'OK %s %s of-another-repo\n' "$(date +%s)" "$(printf '%s' git@github.com:owner/old.git | sha256sum | cut -c1-12)" >"$H/backups/offsite/last"; run
+check "offsite OK of another repo: ❌"        fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
+build; rm "${CRON}/neurootdel-memory-offsite"; run
+check "offsite cron missing: ❌"               fails_with "Копия памяти вне сервера (GitHub, каждую ночь)"
 build; rm "$H/.claude-lab/shared/team-rules.md"; run
 check "@ path missing: Jarvis ❌"              fails_with "Jarvis: файлы по ссылкам @ из CLAUDE.md существуют (загружаются)"
 check "@ path missing: Richard ❌"             fails_with "Richard: общий CLAUDE.md на месте, файлы по ссылкам @ существуют"
