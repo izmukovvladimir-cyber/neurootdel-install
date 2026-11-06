@@ -9,6 +9,8 @@
 #   - Jarvis: izmukovvladimir-cyber/dashi-plugin-claude-code (pinned commit, PLUGIN_COMMIT_DEFAULT) -> systemd unit channel-jarvis
 #     (a server that still runs the old claude-gateway is migrated; see --rollback)
 #   - Richard: izmukovvladimir-cyber/claude-code-telegram v1.6.0 -> systemd unit claude-richard
+#   - Auditor (optional, own bot): Hermes Agent (NousResearch, pinned commit HERMES_COMMIT) on GPT through the
+#     owner's ChatGPT login -> systemd units hermes-auditor + hermes-auditor-bridge
 #
 # Both agents share Anthropic Max OAuth from /home/neurootdel/.claude/
 # Operator runs `sudo -u neurootdel -i bash -lc 'claude auth login'` once after install finishes.
@@ -29,6 +31,9 @@
 #   NEUROOTDEL_RICHARD_BOT_USER   Richard bot @username (no @)
 #   NEUROOTDEL_CODER_BOT_TOKEN    Optional Coder (technical specialist) bot token; empty = no Coder
 #   NEUROOTDEL_CODER_BOT_USER     Coder bot @username (no @)
+#   NEUROOTDEL_AUDITOR_BOT_TOKEN  Optional Auditor (Hermes on GPT) bot token; empty = no Auditor
+#   NEUROOTDEL_AUDITOR_BOT_USER   Auditor bot @username (no @)
+#   NEUROOTDEL_AUDITOR_MODEL      Auditor model on the ChatGPT login (default: AUDITOR_MODEL_DEFAULT)
 #   NEUROOTDEL_TG_USER_ID        Operator Telegram numeric ID
 #   NEUROOTDEL_SUPERVISOR_TG_ID   Optional second trusted Telegram numeric ID (installer
 #                                 supervisor) for the starter secrets rule; empty = none
@@ -58,6 +63,17 @@ readonly JARVIS_UNIT="channel-jarvis"
 # Optional second channel agent (technical specialist): installed only with its own bot token.
 readonly CODER_UNIT="channel-coder"
 readonly CODER_WEBHOOK_PORT="8090"
+# Optional Auditor: Hermes Agent (NousResearch) with its own bot, model through the owner's ChatGPT login
+# (provider openai-codex). Same engine version as the reference install (v0.22.2). The engine's own installer is
+# taken from the same commit and checked by sha256 before it runs.
+readonly AUDITOR_UNIT="hermes-auditor"
+readonly AUDITOR_BRIDGE_UNIT="hermes-auditor-bridge"
+readonly HERMES_COMMIT="d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+readonly HERMES_INSTALLER_URL="https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_COMMIT}/scripts/install.sh"
+readonly HERMES_INSTALLER_SHA256="f4cdb0e20f1aca2c3871a76b962fd4db61510f549cf973759c753ac13349beb5"
+readonly HERMES_API_PORT="8642"
+readonly AUDITOR_PLUGINS=(factcheck secretguard readonly)
+readonly AUDITOR_MODEL_DEFAULT="gpt-6.1-sol"
 # Pre-plugin Jarvis (v3.0.x). Kept on disk for --rollback, never deleted.
 readonly LEGACY_GATEWAY_UNIT="claude-gateway"
 readonly LEGACY_GATEWAY_DIR_NAME="claude-gateway"
@@ -1026,6 +1042,9 @@ RICHARD_BOT_USERNAME=""
 CODER_BOT_TOKEN=""
 CODER_BOT_USERNAME=""
 CODER_INSTALLED=0
+AUDITOR_BOT_TOKEN=""
+AUDITOR_BOT_USERNAME=""
+AUDITOR_INSTALLED=0
 TG_USER_ID=""
 # Optional second trusted id (installer supervisor), NEUROOTDEL_SUPERVISOR_TG_ID; empty = none.
 SUPERVISOR_TG_ID=""
@@ -1177,6 +1196,7 @@ BRIEF
     fi
 
     collect_coder_input
+    collect_auditor_input
 
     if [[ -n "$TG_USER_ID" && ! "$TG_USER_ID" =~ ^[0-9]+$ ]]; then
         die "Telegram user ID must be a positive integer (got: ${TG_USER_ID})."
@@ -1234,6 +1254,48 @@ collect_coder_input() {
         ok "Coder bot verified: @${CODER_BOT_USERNAME:-?}"
     else
         warn "Telegram getMe for Coder failed -- token will be written as-is."
+    fi
+}
+
+# _auditor_bot_clash <auditor_token> -- true when it is the Jarvis, Richard or Coder bot (same id before ':'),
+# compared with this run's answers and the tokens already written on this server.
+_auditor_bot_clash() {
+    local other aid="${1%%:*}"
+    [[ -n "$aid" ]] || return 1
+    for other in "$JARVIS_BOT_TOKEN" "$RICHARD_BOT_TOKEN" "$CODER_BOT_TOKEN" \
+            "$(_env_token "${JARVIS_ENV_DIR}/channel.env")" "$(_env_token "${RICHARD_HOME}/.env")" \
+            "$(_env_token "${CODER_ENV_DIR}/channel.env")"; do
+        [[ -n "$other" && "${other%%:*}" == "$aid" ]] && return 0
+    done
+    return 1
+}
+
+# collect_auditor_input -- the optional Auditor bot token (its own bot). Not asked without a TTY unless
+# NEUROOTDEL_AUDITOR_BOT_TOKEN is set. Must differ from every other agent's bot: two pollers fight (409).
+collect_auditor_input() {
+    if is_noninteractive && [[ -z "$(env_value AUDITOR_BOT_TOKEN)" ]]; then
+        AUDITOR_BOT_TOKEN=""
+    else
+        prompt_or_env AUDITOR_BOT_TOKEN NEUROOTDEL_AUDITOR_BOT_TOKEN \
+            "Auditor bot token (необязательно, отдельный бот Аудитора на Hermes и GPT; Enter = без Аудитора)" \
+            "" --secret
+    fi
+    AUDITOR_BOT_USERNAME="$(env_value AUDITOR_BOT_USER)"
+    if [[ -z "$AUDITOR_BOT_TOKEN" ]]; then
+        log "Auditor token empty -- Auditor is skipped unless this server already has one."
+        return 0
+    fi
+    validate_tg_token "$AUDITOR_BOT_TOKEN" || die "Auditor token format invalid."
+    _auditor_bot_clash "$AUDITOR_BOT_TOKEN" \
+        && die "Auditor token must be a SEPARATE bot (not the Jarvis, Richard or Coder bot) -- create one in @BotFather."
+    local aresp
+    aresp=$(tg_get_me "$AUDITOR_BOT_TOKEN")
+    if [[ "$(echo "$aresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
+        [[ -z "$AUDITOR_BOT_USERNAME" ]] && \
+            AUDITOR_BOT_USERNAME=$(echo "$aresp" | jq -r '.result.username // ""')
+        ok "Auditor bot verified: @${AUDITOR_BOT_USERNAME:-?}"
+    else
+        warn "Telegram getMe for Auditor failed -- token will be written as-is."
     fi
 }
 
@@ -1483,6 +1545,229 @@ install_coder() {
     fix_owner "${AGENT_HOME}/.claude-lab/coder"
     CODER_INSTALLED=1
     ok "Coder installed: plugin ${plugin_dir}, env ${env_file}, unit ${CODER_UNIT}"
+}
+
+# =============================================================================
+# OPTIONAL AUDITOR: Hermes Agent on GPT (ChatGPT login), own bot, bridge to the agents
+# =============================================================================
+
+auditor_hermes_home() { printf '%s/.hermes' "$AGENT_HOME"; }
+auditor_hermes_bin()  { printf '%s/hermes-agent/.hermes/bin/hermes' "$(auditor_hermes_home)"; }
+auditor_bus_dir()     { printf '%s/var/lib/auditor-bus' "$AGENT_HOME"; }
+
+# _auditor_env_token -- TELEGRAM_BOT_TOKEN kept in ~/.hermes/.env, read BY the agent user (its home).
+_auditor_env_token() {
+    as_agent sed -n 's/^[[:space:]]*TELEGRAM_BOT_TOKEN=//p' "$(auditor_hermes_home)/.env" 2>/dev/null \
+        | tail -n 1 | tr -d '"'"'"'[:space:]'
+}
+
+auditor_wanted() {
+    [[ -n "$AUDITOR_BOT_TOKEN" || -n "$(_auditor_env_token)" ]]
+}
+
+# _hermes <args...> -- the pinned Hermes CLI as the agent user, on the Auditor's own home.
+_hermes() {
+    as_agent env HERMES_HOME="$(auditor_hermes_home)" "$(auditor_hermes_bin)" "$@"
+}
+
+# _auditor_logged_in -- true when the ChatGPT (openai-codex) login is in the Hermes credential pool.
+_auditor_logged_in() {
+    local auth
+    auth="$(auditor_hermes_home)/auth.json"
+    # read BY the agent user: the file lives in its home
+    as_agent jq -e '(.credential_pool["openai-codex"] // []) | length > 0' "$auth" >/dev/null 2>&1
+}
+
+# _install_hermes_engine -- Hermes at HERMES_COMMIT through the engine's own installer taken from that commit
+# (sha256 checked). An existing checkout at another commit is left alone: a live auditor is never up- or
+# downgraded behind the owner's back.
+_install_hermes_engine() {
+    local hh bin head dir inst
+    hh=$(auditor_hermes_home)
+    bin=$(auditor_hermes_bin)
+    if [[ -x "$bin" ]]; then
+        head=$(as_agent git -C "${hh}/hermes-agent" rev-parse HEAD 2>/dev/null || true)
+        if [[ "$head" == "$HERMES_COMMIT" ]]; then
+            ok "Hermes already at ${HERMES_COMMIT:0:12}."
+        else
+            warn "Hermes is already installed at ${head:0:12} (installer pins ${HERMES_COMMIT:0:12}) -- left as it is."
+        fi
+        return 0
+    fi
+    apt_install_missing libatomic1 || true   # the engine's Node needs it; its installer can not sudo as the agent
+    dir=$(mktemp -d)
+    TMPDIRS+=("$dir")
+    chmod 0755 "$dir"
+    inst="${dir}/hermes-install.sh"
+    curl "${CURL_OPTS[@]}" "$HERMES_INSTALLER_URL" -o "$inst" || die "Could not download the Hermes installer."
+    echo "${HERMES_INSTALLER_SHA256}  ${inst}" | sha256sum -c --quiet - \
+        || die "Hermes installer checksum mismatch -- refusing to run it."
+    chmod 0644 "$inst"
+    as_agent env HERMES_HOME="$hh" bash "$inst" --commit "$HERMES_COMMIT" --hermes-home "$hh" \
+            --skip-setup --skip-browser --skip-computer-use </dev/null \
+        || die "Hermes install failed (log: ${hh}/logs/install.log)."
+    [[ -x "$bin" ]] || die "Hermes installed, but ${bin} is missing."
+    ok "Hermes installed at ${HERMES_COMMIT:0:12}."
+}
+
+# _auditor_soul <hermes_home> -- the role from templates/auditor-SOUL.md. A SOUL.md the installer did not write
+# (the engine's default) is kept as .bak-install and replaced; our own one (the owner may have edited it) stays,
+# a changed template goes next to it as SOUL.md.new-install. Every read and write in the agent's home is done BY
+# the agent user (a symlink planted there never makes root read or write somewhere else).
+_auditor_soul() {
+    local hh=$1 tmp soul
+    soul="${hh}/SOUL.md"
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    render_template "${TEMPLATES_DIR}/auditor-SOUL.md" "$tmp" \
+        USER_NAME   "${OPERATOR_NAME:-владелец}" \
+        TIMEZONE    "${OPERATOR_TIMEZONE:-Europe/Moscow}" \
+        AGENT_NAME  "$MAIN_AGENT_NAME" \
+        DOCTOR_NAME "$DOCTOR_NAME"
+    chmod 0644 "$tmp"
+    if as_agent test -L "$soul"; then
+        warn "${soul} is a symlink -- Auditor role not written."
+        return 1
+    fi
+    if ! as_agent test -e "$soul"; then
+        _agent_write "$tmp" "$soul" 600
+    elif ! as_agent grep -qF "установщик Нейроотдела" "$soul"; then
+        as_agent cp -p --no-clobber -- "$soul" "${soul}.bak-install" || return 1
+        _agent_write "$tmp" "$soul" 600
+    elif ! as_agent cmp -s - "$soul" <"$tmp"; then
+        _agent_write "$tmp" "${soul}.new-install" 600 || return 1
+        warn "Auditor role kept as you edited it; the installer's version is in ${soul}.new-install."
+    fi
+}
+
+# Runs AS the agent user: merges ~/.hermes/.env (argv: path, owner id, api port; the bot token on stdin, never
+# argv). Sets the bot token (when given), the owner as the only allowed user (when unset), the local api_server
+# for the bridge (127.0.0.1, random key made once). Other keys of the file stay. Exit 3: the file is a symlink.
+_AUDITOR_ENV_PY=$(cat <<'PY'
+import os, re, secrets, sys, tempfile
+
+path, owner, port = sys.argv[1], sys.argv[2], sys.argv[3]
+token = sys.stdin.read().strip()
+if os.path.islink(path):
+    sys.exit(3)
+lines = []
+if os.path.exists(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+key_re = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+have = {}
+for i, line in enumerate(lines):
+    m = key_re.match(line)
+    if m and not line.lstrip().startswith("#"):
+        have[m.group(1)] = (i, m.group(2).strip("'\""))
+
+def put(key, value, force):
+    if key in have:
+        if force or not have[key][1]:
+            lines[have[key][0]] = f"{key}={value}"
+    else:
+        lines.append(f"{key}={value}")
+        have[key] = (len(lines) - 1, value)
+
+if token:
+    put("TELEGRAM_BOT_TOKEN", token, True)
+if owner:
+    put("TELEGRAM_ALLOWED_USERS", owner, False)
+put("API_SERVER_KEY", secrets.token_hex(32), False)
+put("API_SERVER_HOST", "127.0.0.1", True)
+put("API_SERVER_PORT", port, False)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".env.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+)
+
+# _auditor_env <hermes_home> -- see _AUDITOR_ENV_PY.
+_auditor_env() {
+    local hh=$1 rc=0
+    as_agent python3 -c "$_AUDITOR_ENV_PY" "${hh}/.env" "$TG_USER_ID" "$HERMES_API_PORT" \
+        <<<"$AUDITOR_BOT_TOKEN" || rc=$?
+    [[ $rc -eq 3 ]] && warn "${hh}/.env is a symlink -- not written."
+    return "$rc"
+}
+
+# _auditor_config -- model on the ChatGPT login, plugins on, no interim Telegram messages (they skip the plugin
+# checks). The model is set on the first install or when NEUROOTDEL_AUDITOR_MODEL is given; a model the owner
+# picked later with `hermes model` stays.
+_auditor_config() {
+    local model p cur
+    model="$(env_value AUDITOR_MODEL)"
+    cur=$(_hermes config get model.provider 2>/dev/null || true)
+    if [[ "$cur" != *openai-codex* ]]; then
+        _hermes config set model.provider openai-codex >/dev/null || warn "hermes config set model.provider failed."
+        model="${model:-$AUDITOR_MODEL_DEFAULT}"
+    fi
+    if [[ -n "$model" ]]; then
+        _hermes config set model.default "$model" >/dev/null || warn "hermes config set model.default failed."
+    fi
+    _hermes config set display.platforms.telegram.interim_assistant_messages false >/dev/null \
+        || warn "hermes config set display.platforms.telegram.interim_assistant_messages failed."
+    for p in "${AUDITOR_PLUGINS[@]}"; do
+        _hermes plugins enable "$p" --no-allow-tool-override >/dev/null 2>&1 \
+            || warn "Auditor plugin ${p} not enabled -- run: sudo -u ${AGENT_USER} -H bash -lc 'hermes plugins enable ${p}'"
+    done
+}
+
+# install_auditor -- the optional Auditor: Hermes (pinned), role, plugins factcheck / secretguard / readonly, the
+# bridge to the channel agents, units hermes-auditor (+ read-only drop-in) and hermes-auditor-bridge.
+# Without a bot token it is skipped cleanly. The ChatGPT login is the owner's step (final notes, lesson).
+install_auditor() {
+    if ! auditor_wanted; then
+        log "Auditor skipped: no bot token (add one later: sudo bash install.sh, answer the Auditor token question)."
+        return 0
+    fi
+    if _auditor_bot_clash "${AUDITOR_BOT_TOKEN:-$(_auditor_env_token)}"; then
+        die "Auditor bot is the same bot as Jarvis, Richard or Coder -- give the Auditor its own bot (@BotFather) and re-run."
+    fi
+    step 12 "Installing Auditor (Hermes on GPT, systemd: ${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT})"
+
+    local hh bus p f unit_tmp
+    hh=$(auditor_hermes_home)
+    bus=$(auditor_bus_dir)
+
+    _install_hermes_engine
+    as_agent mkdir -p "$hh" "${hh}/plugins" "${bus}/inbox" "${bus}/work" "${bus}/done" "${bus}/failed" \
+        || die "Could not create ${hh} / ${bus} as ${AGENT_USER}."
+    as_agent chmod 0700 "$hh" "$bus" || true
+
+    _auditor_soul "$hh" || die "Could not write the Auditor role ${hh}/SOUL.md."
+    _auditor_env "$hh" || die "Could not write ${hh}/.env."
+    for p in "${AUDITOR_PLUGINS[@]}"; do
+        as_agent mkdir -p "${hh}/plugins/${p}" || die "Could not create ${hh}/plugins/${p}."
+        for f in "${TEMPLATES_DIR}/hermes-plugins/${p}"/*; do
+            [[ -f "$f" ]] || continue
+            _agent_write "$f" "${hh}/plugins/${p}/$(basename "$f")" 644 \
+                || die "Could not write Auditor plugin file ${hh}/plugins/${p}/$(basename "$f")."
+        done
+    done
+    _auditor_config
+
+    unit_tmp=$(mktemp)
+    TMPFILES+=("$unit_tmp")
+    render_template "${TEMPLATES_DIR}/${AUDITOR_UNIT}.service" "$unit_tmp" \
+        USER "$AGENT_USER" HOME "$AGENT_HOME" HERMES_HOME "$hh" HERMES_BIN "$(auditor_hermes_bin)"
+    install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${AUDITOR_UNIT}.service"
+    install -d -m 0755 -o root -g root "/etc/systemd/system/${AUDITOR_UNIT}.service.d"
+    render_template "${TEMPLATES_DIR}/hermes-auditor-readonly.conf" "$unit_tmp" HOME "$AGENT_HOME" HERMES_HOME "$hh"
+    install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${AUDITOR_UNIT}.service.d/10-readonly.conf"
+    render_template "${TEMPLATES_DIR}/${AUDITOR_BRIDGE_UNIT}.service" "$unit_tmp" \
+        USER "$AGENT_USER" LIB_DIR "$GUARD_LIB_DIR" BUS_DIR "$bus"
+    install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${AUDITOR_BRIDGE_UNIT}.service"
+
+    AUDITOR_INSTALLED=1
+    ok "Auditor installed: ${hh} (role SOUL.md, plugins ${AUDITOR_PLUGINS[*]}), units ${AUDITOR_UNIT}, ${AUDITOR_BRIDGE_UNIT}"
 }
 
 # render_jarvis_unit <dst> <plugin_dir> <env_file> -- the main agent's unit, explicit model id.
@@ -3607,6 +3892,19 @@ enable_services() {
         fi
     fi
 
+    if [[ "$AUDITOR_INSTALLED" == "1" ]]; then
+        systemctl enable "${AUDITOR_UNIT}.service" "${AUDITOR_BRIDGE_UNIT}.service" --quiet
+        if _auditor_logged_in; then
+            if systemctl restart "${AUDITOR_UNIT}.service" "${AUDITOR_BRIDGE_UNIT}.service" 2>/dev/null; then
+                ok "${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT} enabled + started."
+            else
+                warn "${AUDITOR_UNIT} enabled, but start failed -- check 'journalctl -u ${AUDITOR_UNIT}'."
+            fi
+        else
+            log "${AUDITOR_UNIT} enabled -- will start after the ChatGPT login under ${AGENT_USER} (final notes)."
+        fi
+    fi
+
     if [[ -n "$RICHARD_BOT_TOKEN" ]]; then
         systemctl enable claude-richard.service --quiet
         if [[ "$oauth_ready" == "yes" ]]; then
@@ -3718,6 +4016,30 @@ report_claude_plan() {
     esac
 }
 
+# _auditor_final_notes -- the owner's ChatGPT login step for the Auditor (only when it is installed).
+_auditor_final_notes() {
+    [[ "$AUDITOR_INSTALLED" == "1" ]] || return 0
+    local state="not logged in yet"
+    _auditor_logged_in && state="logged in"
+    cat <<EON
+  $(printf '%b' "$C_YELLOW")2a.$(printf '%b' "$C_NC") Auditor (Hermes on GPT), ChatGPT login: ${state}. The STUDENT does it (their ChatGPT account),
+      once, under ${AGENT_USER}. In ChatGPT: Settings -> Security -> enable device code authorization for Codex. Then:
+
+        sudo -u ${AGENT_USER} -H bash -lc 'HERMES_HOME=$(auditor_hermes_home) $(auditor_hermes_bin) auth add openai-codex --type oauth --no-browser'
+
+      Open the link it prints, enter the code, then start and check:
+
+        sudo systemctl restart ${AUDITOR_UNIT} ${AUDITOR_BRIDGE_UNIT}
+        systemctl is-active ${AUDITOR_UNIT} ${AUDITOR_BRIDGE_UNIT}
+        sudo -u ${AGENT_USER} -H bash -lc 'HERMES_HOME=$(auditor_hermes_home) $(auditor_hermes_bin) plugins list'
+
+      Model: ${AUDITOR_MODEL_DEFAULT} by default; another one: sudo -u ${AGENT_USER} -H bash -lc 'HERMES_HOME=$(auditor_hermes_home) $(auditor_hermes_bin) model'
+      Agents give it tasks: python3 ${GUARD_LIB_DIR}/auditor-ask.py --from jarvis "task"
+      Lesson: docs/lesson-auditor.md in the installer repo.
+
+EON
+}
+
 # _coder_unit_word -- " channel-coder" when Coder is installed, else nothing (for the command lines).
 _coder_unit_word() {
     [[ "$CODER_INSTALLED" == "1" ]] && printf ' %s' "$CODER_UNIT"
@@ -3744,6 +4066,7 @@ Installed on this VPS:
                env: ${JARVIS_ENV_DIR}/channel.env
   - Coder:     $([[ "$CODER_INSTALLED" == "1" ]] && echo "${AGENT_HOME}/.claude-lab/coder/.claude/  (systemd: ${CODER_UNIT}, env: ${CODER_ENV_DIR}/channel.env, bot: @${CODER_BOT_USERNAME:-<fill-in>})" || echo "not installed (optional third bot: re-run sudo bash install.sh and answer the Coder token question)")
   - Richard:   ${RICHARD_HOME}                       (systemd: claude-richard)
+  - Auditor:   $([[ "$AUDITOR_INSTALLED" == "1" ]] && echo "$(auditor_hermes_home)/  (Hermes on GPT, systemd: ${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT}, bot: @${AUDITOR_BOT_USERNAME:-<fill-in>}, role: $(auditor_hermes_home)/SOUL.md)" || echo "not installed (optional own bot: re-run sudo bash install.sh and answer the Auditor token question)")
   - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  ($(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} )) skills)
   - Login watch: hourly, the agent's own bot tells you when Claude login is lost
                  (stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP)
@@ -3779,6 +4102,7 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
 
         sudo bash install.sh --rollback
 
+$(_auditor_final_notes)
   $(printf '%b' "$C_YELLOW")3.$(printf '%b' "$C_NC") Smoke-checks:
 
         id ${AGENT_USER}                                      # uid >= 1000
@@ -3846,6 +4170,7 @@ main() {
     install_memory_cron
     install_guard
     install_group_watch
+    install_auditor
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
     install_team_refs || die "Team references are not all in place; fix the warnings above and re-run the installer."
     enable_services

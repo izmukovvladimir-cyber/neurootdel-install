@@ -1,0 +1,24 @@
+# Bridge agents <-> Auditor (Hermes): a task from auditor-ask.py in, the answer back into the sender's session.
+# Installed by neurootdel-install. Stop: touch {{BUS_DIR}}/STOP, or sudo systemctl disable --now hermes-auditor-bridge
+[Unit]
+Description=Bridge agents <-> Auditor (hermes-auditor): task delivery and reply back
+After=network-online.target hermes-auditor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+ExecStart=/usr/bin/python3 {{LIB_DIR}}/auditor-bridge.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{BUS_DIR}}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

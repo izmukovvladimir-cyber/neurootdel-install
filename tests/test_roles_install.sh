@@ -54,7 +54,7 @@ render_all() {
     render_richard_env "$1/richard.env"
     render_doctor_role "$1/DOCTOR.md"
     render_template "${TEMPLATES_DIR}/shared/STAFF.md" "$1/STAFF.md" USER_NAME "$OPERATOR_NAME" \
-        AGENT_NAME "$MAIN_AGENT_NAME" DOCTOR_NAME "$DOCTOR_NAME"
+        LIB "$GUARD_LIB_DIR" AGENT_NAME "$MAIN_AGENT_NAME" DOCTOR_NAME "$DOCTOR_NAME"
 }
 
 # --- role pair 1 ------------------------------------------------------------------------------
