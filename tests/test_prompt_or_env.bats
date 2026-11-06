@@ -3,8 +3,13 @@
 
 setup() {
     export INSTALL_SH_SOURCED_FOR_TESTING=1
+    # install.sh sets `trap _cleanup EXIT`, which replaces bats' own EXIT trap: a failing
+    # test then vanishes ("Executed N instead of expected M") instead of "not ok". Keep bats' trap.
+    local bats_exit_trap
+    bats_exit_trap="$(trap -p EXIT)"
     # shellcheck disable=SC1091
     source "${BATS_TEST_DIRNAME}/../install.sh"
+    eval "${bats_exit_trap:-trap - EXIT}"
 }
 
 @test "prompt_or_env: env var wins over default" {

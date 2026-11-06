@@ -14,7 +14,7 @@ Environment=HOME={{HOME}}
 Environment=PATH={{HOME}}/.bun/bin:{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=LANG=C.UTF-8
 # channel-start.sh sets TELEGRAM_EXPECTED_BOT_ID from the token, then tmux.
-ExecStart=/bin/bash {{START_SCRIPT}} channel-jarvis claude --model opus --dangerously-skip-permissions --dangerously-load-development-channels server:dashi-channel
+ExecStart=/bin/bash {{START_SCRIPT}} channel-jarvis claude --model {{MODEL}} --dangerously-skip-permissions --dangerously-load-development-channels server:dashi-channel
 # Walks the start-up prompts (imports, dev-channel warning, bypass mode).
 ExecStartPost=/bin/bash {{CONFIRM_SCRIPT}} channel-jarvis
 TimeoutStartSec=120

@@ -62,8 +62,10 @@ Address the owner by {{USER_NAME}}.
 
 ### Self-improvement
 
-- After any correction from the owner -- write the pattern to `tasks/lessons.md`
-- Review lessons at session start
+- After any correction from the owner -- fix it, then record it ONE way: a feedback note in your auto
+  memory + one line in its MEMORY.md (fields: area, source = who said it and where, cancellation).
+  Command and details: `~/.claude-lab/shared/team-rules.md`, section «Memory». Nowhere else.
+- A new rule that replaces an old one says «отменяет X»; the old note and its line are deleted
 - Iterate until the same mistake stops happening
 
 ### Escalation rule (3 strikes)
@@ -78,7 +80,7 @@ Address the owner by {{USER_NAME}}.
 - Verify the plan with the owner before implementing
 - Mark items complete as you go
 - After completion -- add a review section to `tasks/todo.md`
-- Capture any correction into `tasks/lessons.md`
+- A correction goes the one way of «Self-improvement» above, not into `tasks/`
 
 ## Git
 

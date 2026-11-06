@@ -57,7 +57,7 @@ check "protect: memory edit allowed"         test "$(echo "{\"tool_input\":{\"fi
 OUT=$(owner_msg 555 "ты опять забыл про отчёт" | python3 "${HK}/correction-detector.py" "$WS")
 check "correction: owner correction noticed" grep -q 'correction-detector' <<<"$OUT"
 check "correction: capture written"          grep -q 'опять' "${WS}/core/corrections-inbox.md"
-check "correction: points to the engine"     grep -q 'learnings-engine.py' <<<"$OUT"
+check "correction: points to the one route"  grep -q 'feedback-note.py' <<<"$OUT"
 OUT=$(owner_msg 777 "ты опять забыл" | python3 "${HK}/correction-detector.py" "$WS")
 check "correction: stranger ignored"         test -z "$OUT"
 
