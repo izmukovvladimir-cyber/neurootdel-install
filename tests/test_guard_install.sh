@@ -203,10 +203,15 @@ check "reset: dry run logs a decision"        grep -qE 'result jarvis: (skipped|
 check "reset: dry run wrote no quiet marker"  test ! -e "${AGENT_HOME}/.claude-lab/shared/state/quiet-restart/channel-jarvis"
 check "reset: STOP honoured"                  bash -c 'touch "$1/STOP"; bash "$2" --dry-run 2>/dev/null; tail -n1 "$1/agents-reset.log" | grep -q "STOP file present"; rc=$?; rm -f "$1/STOP"; exit $rc' _ "${AGENT_HOME}/.claude-lab/shared/state/agents-reset" "${REPO}/lib/agents-reset.sh"
 check "reset: context measured from prefix"   bash -c 'grep -q "agents-reset start" "$0"' "$RLOG"
+mkdir -p "${WS}/library/voice"
+echo '# sample' >"${WS}/library/voice/sample.md"
+echo 'X=1' >"${WS}/library/.env"
 OUT=$(bash "${REPO}/lib/memory-backup.sh" 2>&1)
 check "backup: archive written"               grep -q '^.* OK .*memory-.*\.tar\.gz' <<<"$OUT"
 ARCH=$(ls "${AGENT_HOME}/backups/memory/"memory-*.tar.gz 2>/dev/null | head -n1)
 check "backup: rules.md inside"               bash -c 'tar -tzf "$0" | grep -qx ".claude-lab/jarvis/.claude/core/rules.md"' "$ARCH"
+check "backup: library/ inside"             bash -c 'tar -tzf "$0" | grep -qx ".claude-lab/jarvis/.claude/library/voice/sample.md"' "$ARCH"
+check "backup: secret in library/ skipped"   bash -c '! tar -tzf "$0" | grep -q "library/.env"' "$ARCH"
 check "backup: dir is private"                test "$(stat -c %a "${AGENT_HOME}/backups/memory")" = 700
 check "reset: --auto runs only on the owner's clock" bash "${REPO}/tests/helpers/auto_window.sh" "$RLOG" "${REPO}/lib/agents-reset.sh"
 OUT=$(python3 "${REPO}/lib/include_weight.py" "${AGENT_HOME}/.claude-lab" 2>&1)

@@ -4,7 +4,7 @@
 # /etc/cron.d/<user>-memory-backup hourly with --auto: the backup is made only in the 03:xx
 # hour of the OWNER's clock (OWNER_TIMEZONE), before the nightly session reset at 04:00.
 #
-# What: each agent's .claude/{CLAUDE.md,core,memory}, their auto-memory dirs
+# What: each agent's .claude/{CLAUDE.md,core,memory,library}, their auto-memory dirs
 # ~/.claude/projects/*/memory, ~/.claude/CLAUDE.md, ~/knowledge, the shared team rules file.
 # Not: secrets, sessions, .env/.key/.pem, credentials, *.bak-* copies.
 # Where: $DEST/memory-YYYYmmdd-HHMM.tar.gz (dir 700, files 600), kept KEEP_DAYS days.
@@ -42,7 +42,7 @@ flock -n 9 || die "another run holds $DEST/.lock"
 
 items=()
 for a in "${AGENTS[@]}"; do
-    for part in CLAUDE.md core memory; do
+    for part in CLAUDE.md core memory library; do
         [[ -e "$H/.claude-lab/$a/.claude/$part" ]] && items+=(".claude-lab/$a/.claude/$part")
     done
 done
