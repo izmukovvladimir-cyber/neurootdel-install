@@ -83,7 +83,7 @@ readonly SUPERPOWERS_SHA="04bad33282e792ecfd1007a138331f1e6b288eed"
 # 6 skills from template + 5 bundled with installer = 11 total (the workshop promises
 # "ten base skills plus skill-finder").
 readonly SKILLS_FROM_TEMPLATE=(groq-voice markdown-new perplexity-research datawrapper excalidraw youtube-transcript)
-readonly SKILLS_FROM_INSTALLER=(onboarding self-compiler quick-reminders present skill-finder)
+readonly SKILLS_FROM_INSTALLER=(onboarding self-compiler quick-reminders present skill-finder codex-check)
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 readonly TEMPLATES_DIR_DEFAULT="${_SCRIPT_DIR}/templates"
@@ -3710,6 +3710,15 @@ install_team_refs() {
     render_template "${tdir}/shared/TOOLS-root-requests.md" "$tmp" LIB "$GUARD_LIB_DIR" USER "$AGENT_USER"
     _agent_write "$tmp" "${shared}/TOOLS-root-requests.md" 0644 0 || fail=1
     _ensure_marked_block "${ws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
+
+    # Editorial loop (codex-check skill + text-critics.sh): settings OFF until the owner logs into
+    # Codex, and an empty text standard. Both written only when missing: the owner's from then on.
+    as_agent mkdir -p "${shared}/checklists" || fail=1
+    tmp=$(mktemp)
+    TMPFILES+=("$tmp")
+    render_template "${tdir}/editorial.conf" "$tmp" USER "$AGENT_USER"
+    _agent_write "$tmp" "${shared}/editorial.conf" 0644 1 || fail=1
+    _agent_write "${tdir}/checklists/text-standard.md" "${shared}/checklists/text-standard.md" 0644 1 || fail=1
 
     # Coder: the same team rules, auto-memory layout and archive/library dirs in its own workspace.
     if [[ "$CODER_INSTALLED" == "1" ]]; then
