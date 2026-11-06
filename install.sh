@@ -3773,12 +3773,30 @@ _ensure_marked_block() {
     esac
 }
 
+# _install_learned_practices <plugin_dir> -- the learned-practices pack for one channel agent.
+#   <plugin_dir>/.claude/rules/learned-practices.md: project rule, claude (cwd plugin/) loads it
+#     on every turn;
+#   <plugin_dir>/.claude/learned-practices/learned-practices-more.md: read on demand, the path the
+#     main file names ("learned-practices/learned-practices-more.md next to rules/").
+# Written only when missing: the owner's edits survive every re-run. Richard is not covered: his
+# claude runs in the home dir, whose .claude/rules is ~/.claude/rules, loaded by every agent of
+# this user, so a copy there would load twice into Jarvis and Coder.
+_install_learned_practices() {
+    local base="${1}/.claude" tdir="${TEMPLATES_DIR}" fail=0
+    as_agent mkdir -p "${base}/rules" "${base}/learned-practices" \
+        || { warn "Could not create ${base}/rules as ${AGENT_USER}."; return 1; }
+    _agent_write "${tdir}/rules/learned-practices.md" "${base}/rules/learned-practices.md" 0644 1 || fail=1
+    _agent_write "${tdir}/learned-practices/learned-practices-more.md" \
+        "${base}/learned-practices/learned-practices-more.md" 0644 1 || fail=1
+    return "$fail"
+}
+
 # install_team_refs -- the shared team references, code style rules and the memory layout.
 #   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
 #                                      between markers in the agent's CLAUDE.md;
 #   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
 #     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
-#     library/INDEX.md, core/archive/.
+#     library/INDEX.md, core/archive/, the learned-practices pack (_install_learned_practices).
 # Every file lands through the agent user (_agent_write), never a root write into its home.
 install_team_refs() {
     step 12 "Installing team rules, references, code style rules, memory layout"
@@ -3829,6 +3847,11 @@ install_team_refs() {
         done
         _agent_write "${tdir}/memory/library-INDEX.md" "${cws}/library/INDEX.md" 0644 1 || fail=1
         _ensure_marked_block "${cws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+    fi
+
+    _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+    if [[ "$CODER_INSTALLED" == "1" ]]; then
+        _install_learned_practices "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1
     fi
 
     if [[ "$fail" -ne 0 ]]; then
