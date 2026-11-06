@@ -49,5 +49,16 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 - Never restart your own service directly. Ask for it: `echo <agent> > /tmp/channel-restart-request`;
   the guard restarts it quietly when the turn is over.
 
+## Deliver the whole thing, never a stub
+- A partial output is a broken output. Asked for a full file, deliver the full file; asked for five items,
+  deliver five.
+- Banned in code: `// ...`, `// rest of code`, `// TODO`, a bare `...` standing in for omitted lines,
+  "the rest follows the same pattern".
+- Banned in prose: "for brevity", "similarly for the remaining", "let me know if you want me to continue"
+  when the continuation IS the task.
+- A real length limit is announced, not hidden: say where you stopped and continue in the next message.
+  Silence about a cut is the defect, not the cut.
+- Not a license for length: completeness applies to the deliverable, brevity to the talk about it.
+
 ## References (cold, Read when needed)
 - ~/.claude-lab/shared/{STAFF,AGENTS,TOOLS,PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER}.md
