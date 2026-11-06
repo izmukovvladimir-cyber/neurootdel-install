@@ -21,6 +21,13 @@ traceback and any subprocess that inherits the descriptors.
 A token cut over two writes is still masked: whole lines are filtered, and an
 unfinished line is held back from its trailing run of token characters on.
 
+His rules load in his own runtime: claude-code-telegram builds ClaudeAgentOptions with
+setting_sources=["project"] only, so the global rules and hooks of ~/.claude are lost whenever his
+working dir is not the home dir. Before the bot starts, the launcher wraps that constructor in the
+child: RICHARD_SETTING_SOURCES (e.g. "user,project") replaces the sources, and RICHARD_ROLE_FILE
+(the doctor's role written by the installer) is appended to the system prompt. Both empty = the
+package's own behaviour; a failure to patch is logged and the bot still starts.
+
 The parent ignores SIGTERM/SIGINT/SIGHUP (systemd signals the whole cgroup, the child
 gets them directly), drains the pipe, and ends the way the child ended: its exit code,
 or the same signal. The fix lives outside the package's site-packages, so a pip
@@ -121,6 +128,59 @@ def _write_all(fd: int, data: bytes) -> None:
         data = data[n:]
 
 
+_SOURCES = ("user", "project", "local")
+
+
+def sources_from_env(env: dict[str, str]) -> list[str] | None:
+    """RICHARD_SETTING_SOURCES as a list of known SDK sources; None = keep the package's own."""
+    picked = [x.strip() for x in env.get("RICHARD_SETTING_SOURCES", "").split(",") if x.strip() in _SOURCES]
+    return list(dict.fromkeys(picked)) or None
+
+
+def role_from_env(env: dict[str, str]) -> str:
+    """Text of RICHARD_ROLE_FILE, empty when unset or unreadable."""
+    path = env.get("RICHARD_ROLE_FILE", "").strip()
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def patch_options(module: object, sources: list[str] | None, role: str) -> bool:
+    """Wrap module.ClaudeAgentOptions so every session gets these sources and the role text."""
+    orig = getattr(module, "ClaudeAgentOptions", None)
+    if orig is None or (sources is None and not role):
+        return False
+
+    def build(*args: object, **kwargs: object) -> object:
+        if sources is not None:
+            kwargs["setting_sources"] = list(sources)
+        prompt = kwargs.get("system_prompt")
+        if role and (prompt is None or isinstance(prompt, str)):
+            kwargs["system_prompt"] = f"{prompt}\n\n{role}" if prompt else role
+        return orig(*args, **kwargs)
+
+    setattr(module, "ClaudeAgentOptions", build)
+    return True
+
+
+def _apply_runtime_settings() -> None:
+    sources, role = sources_from_env(dict(os.environ)), role_from_env(dict(os.environ))
+    if os.environ.get("RICHARD_ROLE_FILE", "").strip() and not role:
+        print("richard_launch: RICHARD_ROLE_FILE set but unreadable or empty -- role not loaded", file=sys.stderr, flush=True)
+    if sources is None and not role:
+        return
+    try:
+        import src.claude.sdk_integration as sdk
+
+        patch_options(sdk, sources, role)
+    except Exception as exc:  # the bot must start even when the package layout changed
+        print(f"richard_launch: rules/role not applied ({type(exc).__name__}: {exc})", file=sys.stderr, flush=True)
+
+
 def _child(read_end: int, write_end: int) -> None:
     os.close(read_end)
     os.dup2(write_end, 1)
@@ -131,6 +191,8 @@ def _child(read_end: int, write_end: int) -> None:
 
     for _name in ("httpx", "httpcore"):
         logging.getLogger(_name).setLevel(logging.WARNING)
+
+    _apply_runtime_settings()
 
     from src.main import run
 

@@ -46,7 +46,7 @@ MEM="${H}/.claude/projects/$(printf '%s' "${WS}/dashi-plugin-claude-code" | sed 
 
 install_team_refs; rc=$?
 check "refs: rc 0"                            test "$rc" -eq 0
-for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER; do
+for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER ROLE-ACCEPTANCE; do
     check "refs: shared/${f}.md"              test -s "${SH}/${f}.md"
 done
 check "refs: placeholders filled"             bash -c '! grep -l "{{" "$0"/*.md' "$SH"

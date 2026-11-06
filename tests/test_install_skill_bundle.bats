@@ -3,8 +3,13 @@
 
 setup() {
     export INSTALL_SH_SOURCED_FOR_TESTING=1
+    # install.sh sets `trap _cleanup EXIT`, which replaces bats' own EXIT trap: a failing
+    # test then vanishes ("Executed N instead of expected M") instead of "not ok". Keep bats' trap.
+    local bats_exit_trap
+    bats_exit_trap="$(trap -p EXIT)"
     # shellcheck disable=SC1091
     source "${BATS_TEST_DIRNAME}/../install.sh"
+    eval "${bats_exit_trap:-trap - EXIT}"
 
     TDIR="$(mktemp -d)"
     SRC_SKILL="${TDIR}/src/my-skill"
@@ -45,10 +50,15 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
-@test "install_skill_bundle: records skill name in INSTALLED_SKILLS" {
-    INSTALLED_SKILLS=()
+# v3.0.0 dropped the global INSTALLED_SKILLS (install_skills keeps its own list). What the
+# helper itself tracks now is its staging dir, in TMPDIRS for the EXIT cleanup.
+@test "install_skill_bundle: staging dir is in TMPDIRS and gone after success" {
+    TMPDIRS=()
     install_skill_bundle "$SRC_SKILL" "$DST_PARENT" "my-skill"
-    [ "${INSTALLED_SKILLS[0]}" = "my-skill" ]
+    [ "${#TMPDIRS[@]}" -eq 1 ]
+    [ "${TMPDIRS[0]}" = "${DST_PARENT}/.my-skill.staging.$$" ]
+    [ ! -e "${TMPDIRS[0]}" ]
+    [ ! -e "${DST_PARENT}/my-skill.prev" ]
 }
 
 @test "install_skill_bundle: dst_parent is created if missing" {

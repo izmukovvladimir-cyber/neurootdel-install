@@ -10,15 +10,15 @@ Filled in by the owner and the agents. The installer writes this file only when 
 ## Agents
 | Name | Bus name | Role | Service | Workspace |
 |---|---|---|---|---|
-| Jarvis | `jarvis` | main assistant, coordinator | `channel-jarvis` | `~/.claude-lab/jarvis/.claude` |
+| {{AGENT_NAME}} | `jarvis` | main assistant, coordinator | `channel-jarvis` | `~/.claude-lab/jarvis/.claude` |
 | Coder | `coder` | technical specialist: bots, scripts, integrations (only when installed with its own bot) | `channel-coder` | `~/.claude-lab/coder/.claude` |
-| Richard | `richard` | server doctor: raises fallen agents, backups | `claude-richard` | home dir |
+| {{DOCTOR_NAME}} | `richard` | server doctor: raises fallen agents, backups | `claude-richard` | home dir |
 | Auditor | `auditor` | independent check of reports, numbers, texts, funnels; never fixes (only when installed with its own bot) | `hermes-auditor` (Hermes on GPT) | `~/.hermes` |
 
 ## Who gets what
-- Texts, decisions, the owner's day: Jarvis.
+- Texts, decisions, the owner's day: {{AGENT_NAME}}.
 - Bots, scripts, integrations, automation: Coder (when installed).
-- Service down, disk, memory, agent silent: Richard.
+- Service down, disk, memory, agent silent: {{DOCTOR_NAME}}.
 - "Is this really done / are these numbers right / check before it goes out": Auditor (when installed).
 
 ## How agents talk
