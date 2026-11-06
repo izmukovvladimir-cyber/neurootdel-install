@@ -176,7 +176,14 @@ def run() -> int:
                           capture_output=True, text=True, timeout=20)
     cases.append(("CLI: pass after check (пустой stdout)", out2.stdout.strip() == "" and out2.returncode == 0))
     logl = (env_log / "testagent.log").read_text(encoding="utf-8").splitlines()
-    cases.append(("CLI: лог без текста, 2 строки", len(logl) == 2 and "51" not in logl[0]))
+    # The text's number must not reach the log: look at the content fields only, apart from
+    # the clock ("ts") and the digest ("hash"), whose digits may hold "51" by chance.
+    recs = [json.loads(line) for line in logl]
+    content = [{k: v for k, v in r.items() if k not in ("ts", "hash")} for r in recs]
+    cases.append(("CLI: лог без текста, 2 строки", len(logl) == 2
+                  and all("text" not in r for r in recs)
+                  and all("51" not in json.dumps(c, ensure_ascii=False) for c in content)
+                  and all(TEXT not in line for line in logl)))
     out3 = subprocess.run([sys.executable, str(tmp_script), "testagent"], input="not json",
                           capture_output=True, text=True, timeout=20)
     cases.append(("CLI: мусор на входе -> exit 0", out3.returncode == 0 and out3.stdout == ""))

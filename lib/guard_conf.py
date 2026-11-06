@@ -53,6 +53,7 @@ class Conf:
     richard_env: str
     alert_mode: str
     alert_tg_chat_id: str
+    correction_group_chat_ids: str = ""
     labels: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -100,5 +101,6 @@ def load(path: Path | None = None) -> Conf:
         richard_env=raw.get("RICHARD_ENV", ""),
         alert_mode=raw.get("ALERT_MODE") or "outbox",
         alert_tg_chat_id=raw.get("ALERT_TG_CHAT_ID", ""),
+        correction_group_chat_ids=raw.get("CORRECTION_GROUP_CHAT_IDS", ""),
         labels=labels,
     )

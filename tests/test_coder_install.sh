@@ -273,7 +273,7 @@ check "skills: skill-finder bundled"    test -f "${REPO}/skills/skill-finder/SKI
 check "skills: skill-finder frontmatter" grep -qx 'name: skill-finder' "${REPO}/skills/skill-finder/SKILL.md"
 TPL="${TDIR}/tpl"; mkdir -p "${TPL}/skills"
 for s in "${SKILLS_FROM_TEMPLATE[@]}"; do mkdir -p "${TPL}/skills/${s}"; printf -- '---\nname: %s\n---\n' "$s" >"${TPL}/skills/${s}/SKILL.md"; done
-fetch_template() { printf '%s' "$TPL"; }
+TEMPLATE_CLONE_DIR="$TPL"  # fetch_template() reuses a ready clone dir (no network)
 CODER_INSTALLED=1
 OUT=$(install_skills 2>&1)
 JSK="${FAKE_HOME}/.claude-lab/jarvis/.claude/skills"

@@ -2,6 +2,7 @@
 
 ## Role
 You are {{AGENT_NAME}} -- {{AGENT_ROLE}}.
+{{BRIEF_LINE}}
 
 ## Communication
 - Respond in {{LANGUAGE}} unless told otherwise

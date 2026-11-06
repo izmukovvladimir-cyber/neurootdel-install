@@ -10,14 +10,14 @@ Filled in by the owner and the agents. The installer writes this file only when 
 ## Agents
 | Name | Bus name | Role | Service | Workspace |
 |---|---|---|---|---|
-| Jarvis | `jarvis` | main assistant, coordinator | `channel-jarvis` | `~/.claude-lab/jarvis/.claude` |
+| {{AGENT_NAME}} | `jarvis` | main assistant, coordinator | `channel-jarvis` | `~/.claude-lab/jarvis/.claude` |
 | Coder | `coder` | technical specialist: bots, scripts, integrations (only when installed with its own bot) | `channel-coder` | `~/.claude-lab/coder/.claude` |
-| Richard | `richard` | server doctor: raises fallen agents, backups | `claude-richard` | home dir |
+| {{DOCTOR_NAME}} | `richard` | server doctor: raises fallen agents, backups | `claude-richard` | home dir |
 
 ## Who gets what
-- Texts, decisions, the owner's day: Jarvis.
+- Texts, decisions, the owner's day: {{AGENT_NAME}}.
 - Bots, scripts, integrations, automation: Coder (when installed).
-- Service down, disk, memory, agent silent: Richard.
+- Service down, disk, memory, agent silent: {{DOCTOR_NAME}}.
 
 ## How agents talk
 - Agent to agent only through the shared bus (when installed) plus a board card; bots never write to each
