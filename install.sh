@@ -1810,6 +1810,10 @@ install_auditor() {
     as_agent mkdir -p "$hh" "${hh}/plugins" "${bus}/inbox" "${bus}/work" "${bus}/done" "${bus}/failed" \
         || die "Could not create ${hh} / ${bus} as ${AGENT_USER}."
     as_agent chmod 0700 "$hh" "$bus" || true
+    # The read-only drop-in names these "-<path>": a path missing at unit start is skipped and stays read-only
+    # under ProtectHome, so on a clean server Hermes could not create its state dir and Telegram never connected.
+    as_agent mkdir -p "${AGENT_HOME}/.local/state/hermes" "${AGENT_HOME}/.cache" \
+        || die "Could not create ${AGENT_HOME}/.local/state/hermes / ${AGENT_HOME}/.cache as ${AGENT_USER}."
 
     _auditor_soul "$hh" || die "Could not write the Auditor role ${hh}/SOUL.md."
     _auditor_env "$hh" || die "Could not write ${hh}/.env."
