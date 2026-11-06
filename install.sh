@@ -99,8 +99,8 @@ readonly TEMPLATE_SHA="93cc7ddf10c03472616a3a32ff7e6ac731ebe6f2"
 readonly SUPERPOWERS_REPO="https://github.com/izmukovvladimir-cyber/superpowers.git"
 readonly SUPERPOWERS_SHA="04bad33282e792ecfd1007a138331f1e6b288eed"
 
-# 6 skills from template + 5 bundled with installer = 11 total (the workshop promises
-# "ten base skills plus skill-finder").
+# 6 skills from template + 6 bundled with installer = 12 total (the workshop promises
+# "ten base skills plus skill-finder and codex-check").
 readonly SKILLS_FROM_TEMPLATE=(groq-voice markdown-new perplexity-research datawrapper excalidraw youtube-transcript)
 readonly SKILLS_FROM_INSTALLER=(onboarding self-compiler quick-reminders present skill-finder codex-check)
 
