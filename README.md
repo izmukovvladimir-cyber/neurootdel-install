@@ -10,6 +10,17 @@
 curl -fsSL https://raw.githubusercontent.com/izmukovvladimir-cyber/neurootdel-install/main/install.sh -o /root/neurootdel-install.sh && sudo bash /root/neurootdel-install.sh
 ```
 
+Установка идёт этапами, у каждого агента свой бот в Telegram, и на своём этапе каждый бот обязателен
+(как создать ботов: [docs/lesson-create-bots.md](docs/lesson-create-bots.md)):
+
+```bash
+sudo bash /root/neurootdel-install.sh --stage workshop    # мастер-класс: Jarvis и Richard
+sudo bash /root/neurootdel-install.sh --stage intensive   # интенсив: ещё Coder и Auditor
+sudo neurootdel-verify                                    # проверка этапа, в любой момент
+```
+
+Проверка запускается сама в конце каждого этапа и печатает список ✅/❌ с подсказкой под каждым ❌.
+
 ## Что устанавливается
 
 | Компонент | Версия | Назначение |

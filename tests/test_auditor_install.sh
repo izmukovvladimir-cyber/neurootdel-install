@@ -64,9 +64,9 @@ HH="${FAKE_HOME}/.hermes"
 
 # --- token question ----------------------------------------------------------------------------------
 unset NEUROOTDEL_AUDITOR_BOT_TOKEN EDGELAB_AUDITOR_BOT_TOKEN
-OUT=$(NEUROOTDEL_NONINTERACTIVE=1 collect_auditor_input 2>&1 </dev/null; printf 'tok=%s' "$AUDITOR_BOT_TOKEN")
-check "input: unattended without env -> no Auditor" grep -q 'tok=$' <<<"$OUT"
-check "input: unattended run does not warn"         bash -c "! grep -q 'not set' <<<\"\$1\"" _ "$OUT"
+OUT=$( (NEUROOTDEL_NONINTERACTIVE=1 collect_auditor_input </dev/null) 2>&1; printf 'rc=%s' "$?")
+check "input: unattended without env -> stop (bot required)" grep -q 'rc=1$' <<<"$OUT"
+check "input: stop says Auditor needs its own bot"          grep -q 'Auditor needs its own bot' <<<"$OUT"
 JARVIS_BOT_TOKEN="$TOKEN_J"; RICHARD_BOT_TOKEN="$TOKEN_R"; CODER_BOT_TOKEN="$TOKEN_C"
 check "clash: Jarvis bot"      _auditor_bot_clash "${TOKEN_J%%:*}:XXXabcdefghijklmnopqrstuvwxyz0123456"
 check "clash: Coder bot"       _auditor_bot_clash "$TOKEN_C"
@@ -81,7 +81,7 @@ check "input: bad format refused"      grep -q 'rc=1$' <<<"$OUT"
 AUDITOR_BOT_TOKEN=""; AUDITOR_INSTALLED=0
 OUT=$(install_auditor 2>&1); RC=$?
 check "skip: rc 0"                  test "$RC" -eq 0
-check "skip: says how to add later" grep -q 'answer the Auditor token question' <<<"$OUT"
+check "skip: says how to add later" grep -q 'stage intensive' <<<"$OUT"
 check "skip: no hermes home"        test ! -e "$HH"
 check "skip: no unit"               test ! -e "${TDIR}/systemd/hermes-auditor.service"
 check "skip: not marked installed"  test "$AUDITOR_INSTALLED" = 0
@@ -232,12 +232,12 @@ check "final: ask command"            grep -qF "${GUARD_LIB_DIR}/auditor-ask.py 
 check "final: no token printed"       bash -c "! grep -q AUDabc <<<\"\$1\"" _ "$OUT"
 AUDITOR_INSTALLED=0
 OUT=$(final_instructions 2>&1)
-check "final: how to add later"       grep -q 'Auditor:   not installed (optional own bot' <<<"$OUT"
+check "final: how to add later"       grep -q 'Auditor:   not installed: intensive stage' <<<"$OUT"
 check "final: no login step without it" bash -c "! grep -q 'auth add openai-codex' <<<\"\$1\"" _ "$OUT"
 
 # --- wiring: main order, guard, team refs, lib scripts ---------------------------------------------------
 check "main: install_auditor after guard + group watch" bash -c "grep -A2 '^    install_guard\$' '${REPO}/install.sh' | tail -n 1 | grep -qx '    install_auditor'"
-check "inputs: auditor asked after coder"  bash -c "grep -A1 '^    collect_coder_input\$' '${REPO}/install.sh' | grep -qx '    collect_auditor_input'"
+check "inputs: auditor asked after coder"  bash -c "grep -A1 '^        collect_coder_input\$' '${REPO}/install.sh' | grep -qx '        collect_auditor_input'"
 check "guard: watches the bridge unit"     grep -q '"hermes-auditor-bridge")' "${REPO}/lib/agents-guard.py"
 check "staff: Auditor row"                 grep -q '^| Auditor | `auditor` |' "${REPO}/templates/shared/STAFF.md"
 check "staff: how to ask the Auditor"      grep -qF '{{LIB}}/auditor-ask.py --from' "${REPO}/templates/shared/STAFF.md"
