@@ -2,9 +2,9 @@
 
 Lessons useful to more than one agent go here: a mistake in a shared tool, in handing work between agents,
 in working with the owner, that anyone could repeat.
-An agent's own lesson goes to its own files:
-`python3 {{LIB}}/hooks/learnings-engine.py <workspace> capture ...`
-(`core/episodes.jsonl` + a line in `core/LEARNINGS.md`, top 5 return at session start).
+An agent's own lesson and every owner correction go the one route of team-rules.md «Memory»:
+a feedback note in auto memory + a line in MEMORY.md (`python3 {{LIB}}/feedback-note.py ...`).
+A rule cancelled there is deleted from here too, if it was copied here.
 
 Entry format:
 

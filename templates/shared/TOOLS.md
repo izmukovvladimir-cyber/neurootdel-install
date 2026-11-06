@@ -7,13 +7,13 @@ Before saying "it is down", check the live state (`systemctl status`, `ss -ltnp`
 ## Services (systemd)
 | Service | What | Port |
 |---|---|---|
-| `channel-jarvis` | Jarvis, Telegram channel (tmux + claude) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
+| `channel-jarvis` | {{AGENT_NAME}}, Telegram channel (tmux + claude) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
 | `channel-coder` | Coder, technical specialist (only when installed with its own bot) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
-| `claude-richard` | Richard, server doctor (SDK bot) | |
+| `claude-richard` | {{DOCTOR_NAME}}, server doctor (SDK bot) | |
 | `hermes-auditor` | Auditor, Hermes Agent on GPT (only when installed with its own bot) | api_server 127.0.0.1:8642 |
 | `hermes-auditor-bridge` | bridge agents <-> Auditor (folder ~/var/lib/auditor-bus) | |
 
-Restarting another agent's service is Richard's job. Your own service: `echo <agent> > /tmp/channel-restart-request`.
+Restarting another agent's service is {{DOCTOR_NAME}}'s job. Your own service: `echo <agent> > /tmp/channel-restart-request`.
 
 ## Scripts `{{LIB}}/` (root-owned; changes only through the shell with the owner's decision)
 - `agents-guard.py` (cron every minute, root): stall, permission question, login, limit + auto-answer,

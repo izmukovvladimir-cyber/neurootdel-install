@@ -34,9 +34,14 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 ## Memory
 - core/hot/handoff.md = open items only; closed items leave one 2-4 line trace in core/warm/decisions.md.
   15 KB cap per journal file; older decisions go to core/archive/. Measure: `python3 {{LIB}}/include_weight.py`.
-- The owner's correction: fix it, then record the lesson:
-  `python3 {{LIB}}/hooks/learnings-engine.py <workspace> capture --type correction --source owner --rule "..."`
-  (top 5 return at session start). Team-wide lesson: also ~/.claude-lab/shared/LEARNINGS.md.
+- The owner's correction has ONE route. Fix it, then: a feedback note in your auto memory + one line in
+  its MEMORY.md (`~/.claude/projects/<your project>/memory/`; the correction hook prints the exact dir):
+  `python3 {{LIB}}/feedback-note.py <memory dir> add --name <slug> --rule "..." --area "..." --source "..."`
+  Fields: area (where it applies), source (who said it, where, when), cancellation. A correction of the
+  owner's TEXT also goes as one line into pravki.md when you have one (`--pravki <file>`).
+  Not into core/rules.md, CLAUDE.md, LEARNINGS.md or a lessons file: one rule, one carrier.
+- Cancel: a new note with `--cancels <old slug>` («отменяет X»); the old note and its line are deleted.
+- Team-wide lesson (a shared tool, hand-offs between agents): also ~/.claude-lab/shared/LEARNINGS.md.
 - Starter lessons every agent shares (rule, why, how): ~/.claude-lab/shared/LESSONS-STARTER.md.
   Read it once when you start and again before similar work.
 
@@ -49,5 +54,16 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 - Never restart your own service directly. Ask for it: `echo <agent> > /tmp/channel-restart-request`;
   the guard restarts it quietly when the turn is over.
 
+## Deliver the whole thing, never a stub
+- A partial output is a broken output. Asked for a full file, deliver the full file; asked for five items,
+  deliver five.
+- Banned in code: `// ...`, `// rest of code`, `// TODO`, a bare `...` standing in for omitted lines,
+  "the rest follows the same pattern".
+- Banned in prose: "for brevity", "similarly for the remaining", "let me know if you want me to continue"
+  when the continuation IS the task.
+- A real length limit is announced, not hidden: say where you stopped and continue in the next message.
+  Silence about a cut is the defect, not the cut.
+- Not a license for length: completeness applies to the deliverable, brevity to the talk about it.
+
 ## References (cold, Read when needed)
-- ~/.claude-lab/shared/{STAFF,AGENTS,TOOLS,PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER}.md
+- ~/.claude-lab/shared/{STAFF,AGENTS,TOOLS,PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md

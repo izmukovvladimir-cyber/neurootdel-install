@@ -40,6 +40,13 @@
 #   NEUROOTDEL_USER_NAME          Operator display name (for Jarvis CLAUDE.md)
 #   NEUROOTDEL_LANGUAGE           Operator language (default: Russian)
 #   NEUROOTDEL_TIMEZONE           Operator timezone (default: Europe/Moscow)
+#   NEUROOTDEL_AGENT_NAME         Main agent's name (default: Jarvis)
+#   NEUROOTDEL_DOCTOR_NAME        Server-doctor's name (default: Richard)
+#   NEUROOTDEL_AGENT_MODEL        Model id of the main agent (default: AGENT_MODEL_DEFAULT)
+#   NEUROOTDEL_DOCTOR_MODEL       Model id of the server-doctor (default: DOCTOR_MODEL_DEFAULT)
+#   NEUROOTDEL_BRIEF_DIR          Where the client's brief and call transcripts lie, e.g.
+#                                 ~/knowledge/istochniki/ (empty = "бриф не передан")
+#   NEUROOTDEL_CORRECTION_GROUP_CHAT_IDS  Groups (-100...) where the owner's corrections are caught
 
 set -euo pipefail
 
@@ -72,6 +79,9 @@ readonly LEGACY_GATEWAY_UNIT="claude-gateway"
 readonly LEGACY_GATEWAY_DIR_NAME="claude-gateway"
 readonly RICHARD_REPO_SPEC="git+https://github.com/izmukovvladimir-cyber/claude-code-telegram@v1.6.0"
 readonly RICHARD_HOME="/opt/richard"
+# Explicit model ids (an alias like "opus" moves under the agents silently).
+readonly AGENT_MODEL_DEFAULT="claude-opus-5-5"
+readonly DOCTOR_MODEL_DEFAULT="claude-sonnet-5-5"
 readonly NODE_MAJOR="22"
 
 # Template bundle (inherited from v2.2.6 -- pinned SHAs for supply chain).
@@ -620,9 +630,8 @@ validate_tg_token() {
 
 tg_get_me() {
     local token=$1
-    # URL (it carries the token) through stdin config, never argv: ps shows argv to every user.
-    printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$token" \
-        | curl "${CURL_OPTS[@]}" -K - 2>/dev/null || true
+    # The URL holds the token: pass it in a curl config on stdin, never in argv (ps, /proc).
+    curl "${CURL_OPTS[@]}" -K - 2>/dev/null <<<"url = \"https://api.telegram.org/bot${token}/getMe\"" || true
 }
 
 # =============================================================================
@@ -1042,6 +1051,60 @@ SUPERVISOR_TG_ID=""
 OPERATOR_NAME=""
 OPERATOR_LANGUAGE=""
 OPERATOR_TIMEZONE=""
+# Roles of this install (resolve_role_settings): names, explicit model ids, brief location.
+MAIN_AGENT_NAME="Jarvis"
+DOCTOR_NAME="Richard"
+AGENT_MODEL="$AGENT_MODEL_DEFAULT"
+DOCTOR_MODEL="$DOCTOR_MODEL_DEFAULT"
+BRIEF_DIR=""
+# Installed unit of the main agent: a re-run reads the model it runs with from here.
+JARVIS_UNIT_FILE="/etc/systemd/system/${JARVIS_UNIT}.service"
+# The doctor's .env: a re-run reads the model he runs with from here (install_richard keeps it).
+RICHARD_ENV_FILE="${RICHARD_HOME}/.env"
+
+# _role_value <SUFFIX> <default> <regex> <what> -- env NEUROOTDEL_<SUFFIX> when it matches, else default.
+_role_value() {
+    local v
+    v="$(env_value "$1")"
+    if [[ -z "$v" ]]; then
+        printf '%s' "$2"
+    elif [[ "$v" =~ $3 ]]; then
+        printf '%s' "$v"
+    else
+        warn "NEUROOTDEL_$1 '${v}' is not a valid $4 -- using '${2:-empty}'."
+        printf '%s' "$2"
+    fi
+}
+
+# resolve_role_settings -- names, model ids and brief dir from the install data, checked.
+# Names: env of this run -> the names saved in guard.conf by an earlier run -> Jarvis/Richard,
+# so a re-run without the env never renames a team the owner already has.
+resolve_role_settings() {
+    # Names and paths go into CLAUDE.md, .env and guard.conf: no quotes, $, `, braces, separators.
+    local name_re='^[^][ "{}\\$`<>|;&,=/[:cntrl:]][^]["{}\\$`<>|;&,=/[:cntrl:]]{0,39}$'
+    # A full id carries a version (…-<digit>…): aliases like opus/sonnet/default are refused.
+    local model_re='^[a-z][a-z0-9._-]{0,40}-[0-9][a-z0-9._-]{0,40}(\[[a-z0-9]{1,8}\])?$'
+    local brief_re='^[~/][^"{}\\$`<>|;&[:cntrl:]]{0,200}$'
+    local conf="${GUARD_LIB_DIR}/guard.conf" saved_agent saved_doctor saved_model saved_dmodel saved_brief
+    saved_agent=$(_guard_conf_get "$conf" AGENT_LABELS | tr ',' '\n' | sed -n 's/^jarvis=//p' | head -n 1)
+    saved_doctor=$(_guard_conf_get "$conf" DOCTOR_NAME)
+    [[ "$saved_agent" =~ $name_re ]] || saved_agent="Jarvis"
+    [[ "$saved_doctor" =~ $name_re ]] || saved_doctor="Richard"
+    # The model the installed unit runs with, and the brief the agent's CLAUDE.md points to (kept on re-run).
+    saved_model=$(sed -n 's/^ExecStart=.* --model \([^ ]*\) .*$/\1/p' "$JARVIS_UNIT_FILE" 2>/dev/null | head -n 1) || saved_model=""
+    [[ "$saved_model" =~ $model_re ]] || saved_model="$AGENT_MODEL_DEFAULT"
+    saved_dmodel=$(sed -n 's/^CLAUDE_MODEL=["]\{0,1\}\([^"]*\)["]\{0,1\}$/\1/p' "$RICHARD_ENV_FILE" 2>/dev/null | tail -n 1) || saved_dmodel=""
+    [[ "$saved_dmodel" =~ $model_re ]] || saved_dmodel="$DOCTOR_MODEL_DEFAULT"
+    saved_brief=$(sed -n 's/^- Где бриф и созвоны клиента: \(.*\) (первоисточники;.*$/\1/p' \
+        "${AGENT_HOME}/.claude-lab/jarvis/.claude/CLAUDE.md" 2>/dev/null | head -n 1) || saved_brief=""
+    [[ "$saved_brief" =~ $brief_re ]] || saved_brief=""
+    MAIN_AGENT_NAME=$(_role_value AGENT_NAME "$saved_agent" "$name_re" "name")
+    DOCTOR_NAME=$(_role_value DOCTOR_NAME "$saved_doctor" "$name_re" "name")
+    AGENT_MODEL=$(_role_value AGENT_MODEL "$saved_model" "$model_re" "model id")
+    DOCTOR_MODEL=$(_role_value DOCTOR_MODEL "$saved_dmodel" "$model_re" "model id")
+    BRIEF_DIR=$(_role_value BRIEF_DIR "$saved_brief" "$brief_re" "path (~/... or /...)")
+    ok "Roles: ${MAIN_AGENT_NAME} (${AGENT_MODEL}), ${DOCTOR_NAME} (${DOCTOR_MODEL}), brief: ${BRIEF_DIR:-не передан}"
+}
 
 collect_inputs() {
     step 5 "Collecting operator inputs"
@@ -1060,9 +1123,24 @@ A THIRD bot for Coder (technical specialist) is optional: press Enter to skip it
 BRIEF
     fi
 
-    prompt_or_env OPERATOR_NAME     NEUROOTDEL_USER_NAME  "Как к вам обращаться?"                "friend"
-    prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "Russian"
-    prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "Europe/Moscow"
+    # Re-run: Enter (or no env) keeps the owner name, id, language and timezone an earlier run
+    # saved in guard.conf. An install made before OWNER_LANGUAGE existed: the agent's USER.md.
+    local conf="${GUARD_LIB_DIR}/guard.conf" saved_name saved_id saved_lang saved_tz
+    saved_name=$(_guard_conf_get "$conf" OWNER_NAME)
+    saved_id=$(_guard_conf_get "$conf" OWNER_TG_ID)
+    [[ "$saved_id" =~ ^[0-9]+$ ]] || saved_id=""
+    saved_lang=$(_guard_conf_get "$conf" OWNER_LANGUAGE)
+    if [[ -z "$saved_lang" ]]; then
+        saved_lang=$(sed -n 's/^\*\*Preferred language:\*\* *\(.*[^ ]\) *$/\1/p' \
+            "${AGENT_HOME}/.claude-lab/jarvis/.claude/core/USER.md" 2>/dev/null | head -n 1) || saved_lang=""
+    fi
+    local lang_re='^[^"\\$`<>|;&[:cntrl:]]{1,40}$'
+    [[ "$saved_lang" =~ $lang_re ]] || saved_lang=""
+    saved_tz=$(_guard_conf_get "$conf" OWNER_TIMEZONE)
+    [[ "$saved_tz" =~ ^[A-Za-z][A-Za-z0-9_+/-]{0,63}$ ]] || saved_tz=""
+    prompt_or_env OPERATOR_NAME     NEUROOTDEL_USER_NAME  "Как к вам обращаться?"                "${saved_name:-friend}"
+    prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "${saved_lang:-Russian}"
+    prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "${saved_tz:-Europe/Moscow}"
 
     prompt_or_env JARVIS_BOT_TOKEN  NEUROOTDEL_JARVIS_BOT_TOKEN \
         "Jarvis bot token (from @BotFather, формат 1234567890:ABC...)" \
@@ -1072,7 +1150,7 @@ BRIEF
         "" --secret
     prompt_or_env TG_USER_ID        NEUROOTDEL_TG_USER_ID \
         "Ваш Telegram numeric user ID (from @userinfobot)" \
-        ""
+        "$saved_id"
 
     SUPERVISOR_TG_ID="$(env_value SUPERVISOR_TG_ID)"
     JARVIS_BOT_USERNAME="${NEUROOTDEL_JARVIS_BOT_USER:-}"
@@ -1383,13 +1461,7 @@ install_jarvis() {
     local unit_tmp
     unit_tmp=$(mktemp)
     TMPFILES+=("$unit_tmp")
-    render_template "${TEMPLATES_DIR}/${JARVIS_UNIT}.service" "$unit_tmp" \
-        USER           "$AGENT_USER" \
-        HOME           "$AGENT_HOME" \
-        PLUGIN_DIR     "$plugin_dir" \
-        ENV_FILE       "$env_file" \
-        CONFIRM_SCRIPT "$CHANNEL_CONFIRM_BIN" \
-        START_SCRIPT   "$CHANNEL_START_BIN"
+    render_jarvis_unit "$unit_tmp" "$plugin_dir" "$env_file"
     install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${JARVIS_UNIT}.service"
 
     fix_owner "${AGENT_HOME}/.claude-lab"
@@ -1466,7 +1538,8 @@ install_coder() {
         PLUGIN_DIR     "$plugin_dir" \
         ENV_FILE       "$env_file" \
         CONFIRM_SCRIPT "$CHANNEL_CONFIRM_BIN" \
-        START_SCRIPT   "$CHANNEL_START_BIN"
+        START_SCRIPT   "$CHANNEL_START_BIN" \
+        MODEL          "$AGENT_MODEL"
     install -m 0644 -o root -g root "$unit_tmp" "/etc/systemd/system/${CODER_UNIT}.service"
 
     fix_owner "${AGENT_HOME}/.claude-lab/coder"
@@ -1547,8 +1620,10 @@ _auditor_soul() {
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
     render_template "${TEMPLATES_DIR}/auditor-SOUL.md" "$tmp" \
-        USER_NAME "${OPERATOR_NAME:-владелец}" \
-        TIMEZONE  "${OPERATOR_TIMEZONE:-Europe/Moscow}"
+        USER_NAME   "${OPERATOR_NAME:-владелец}" \
+        TIMEZONE    "${OPERATOR_TIMEZONE:-Europe/Moscow}" \
+        AGENT_NAME  "$MAIN_AGENT_NAME" \
+        DOCTOR_NAME "$DOCTOR_NAME"
     chmod 0644 "$tmp"
     if as_agent test -L "$soul"; then
         warn "${soul} is a symlink -- Auditor role not written."
@@ -1693,6 +1768,18 @@ install_auditor() {
 
     AUDITOR_INSTALLED=1
     ok "Auditor installed: ${hh} (role SOUL.md, plugins ${AUDITOR_PLUGINS[*]}), units ${AUDITOR_UNIT}, ${AUDITOR_BRIDGE_UNIT}"
+}
+
+# render_jarvis_unit <dst> <plugin_dir> <env_file> -- the main agent's unit, explicit model id.
+render_jarvis_unit() {
+    render_template "${TEMPLATES_DIR}/${JARVIS_UNIT}.service" "$1" \
+        USER           "$AGENT_USER" \
+        HOME           "$AGENT_HOME" \
+        PLUGIN_DIR     "$2" \
+        ENV_FILE       "$3" \
+        CONFIRM_SCRIPT "$CHANNEL_CONFIRM_BIN" \
+        START_SCRIPT   "$CHANNEL_START_BIN" \
+        MODEL          "$AGENT_MODEL"
 }
 
 # Jarvis channel inputs, per field: operator answer -> current channel.env
@@ -2061,6 +2148,26 @@ _write_if_absent() {
     write_as_user "$@"
 }
 
+# _brief_line -- the role's pointer to the client's brief and calls (BRIEF_DIR), or the mark that none was given.
+_brief_line() {
+    if [[ -n "$BRIEF_DIR" ]]; then
+        printf -- '- Где бриф и созвоны клиента: %s (первоисточники; открывай Read, когда задача касается клиента, его продукта или договорённостей)' "$BRIEF_DIR"
+    else
+        printf -- '- Бриф не передан: первоисточников клиента на сервере нет, договорённости спрашивай у владельца.'
+    fi
+}
+
+# render_agent_claude_md <dst> -- the main agent's CLAUDE.md from the install data.
+render_agent_claude_md() {
+    render_template "${TEMPLATES_DIR}/CLAUDE.md" "$1" \
+        AGENT_NAME "$MAIN_AGENT_NAME" \
+        AGENT_ROLE "operator's daily AI assistant" \
+        USER_NAME  "$OPERATOR_NAME" \
+        LANGUAGE   "$OPERATOR_LANGUAGE" \
+        TIMEZONE   "$OPERATOR_TIMEZONE" \
+        BRIEF_LINE "$(_brief_line)"
+}
+
 # _write_agent_workspace <wsroot> [jarvis|coder] -- lays down CLAUDE.md + core/ tree for
 # Jarvis (default) or Coder (templates/coder-CLAUDE.md + templates/coder-rules.md).
 # Matches prod smoke-check #5: ls ~/.claude-lab/jarvis/.claude/ must show
@@ -2086,14 +2193,11 @@ _write_agent_workspace() {
             LANGUAGE    "$OPERATOR_LANGUAGE" \
             TIMEZONE    "$OPERATOR_TIMEZONE" \
             USER        "$AGENT_USER" \
-            CONFIG_ROOT "$CONFIG_ROOT"
+            CONFIG_ROOT "$CONFIG_ROOT" \
+            AGENT_NAME  "$MAIN_AGENT_NAME" \
+            DOCTOR_NAME "$DOCTOR_NAME"
     else
-        render_template "${TEMPLATES_DIR}/CLAUDE.md" "$claude_md_tmp" \
-            AGENT_NAME "Jarvis" \
-            AGENT_ROLE "operator's daily AI assistant" \
-            USER_NAME  "$OPERATOR_NAME" \
-            LANGUAGE   "$OPERATOR_LANGUAGE" \
-            TIMEZONE   "$OPERATOR_TIMEZONE"
+        render_agent_claude_md "$claude_md_tmp"
     fi
     _write_if_absent "$claude_md_tmp" "${ws}/CLAUDE.md" 0644
 
@@ -2122,7 +2226,7 @@ UEOF
 
 - Ask before destructive operations (rm -rf, DROP TABLE, sudo on shared infra).
 - Never commit secrets. Never print tokens/keys in plain text.
-- On each correction: update LEARNINGS.md so the mistake does not repeat.
+- On each correction of the owner: one feedback note in auto memory + one line in MEMORY.md (route and command: ~/.claude-lab/shared/team-rules.md, «Memory»). Not here, not in LEARNINGS.md.
 - Prefer small, reversible changes.
 
 ## One reply per question
@@ -2165,6 +2269,29 @@ REOF
 # STEP 7: INSTALL RICHARD
 # =============================================================================
 
+# render_richard_env <dst> -- Richard's .env: bot, owner, explicit model, his rules sources.
+render_richard_env() {
+    render_template "${TEMPLATES_DIR}/richard.env" "$1" \
+        RICHARD_BOT_TOKEN    "$RICHARD_BOT_TOKEN" \
+        RICHARD_BOT_USERNAME "$RICHARD_BOT_USERNAME" \
+        TG_USER_ID           "$TG_USER_ID" \
+        USER                 "$AGENT_USER" \
+        DOCTOR_MODEL         "$DOCTOR_MODEL" \
+        RICHARD_HOME         "$RICHARD_HOME"
+}
+
+# render_doctor_role <dst> -- the doctor's role file: the client's agent names come from this install.
+render_doctor_role() {
+    render_template "${TEMPLATES_DIR}/richard-DOCTOR.md" "$1" \
+        DOCTOR_NAME "$DOCTOR_NAME" \
+        AGENT_NAME  "$MAIN_AGENT_NAME" \
+        AGENT_UNIT  "$JARVIS_UNIT" \
+        USER_NAME   "$OPERATOR_NAME" \
+        TIMEZONE    "$OPERATOR_TIMEZONE" \
+        HOME        "$AGENT_HOME" \
+        LIB         "$GUARD_LIB_DIR"
+}
+
 install_richard() {
     step 7 "Installing Richard (claude-code-telegram)"
 
@@ -2190,14 +2317,18 @@ install_richard() {
     install -m 0644 -o root -g root "${TEMPLATES_DIR}/richard-launch.py" \
         "${RICHARD_HOME}/launch/richard_launch.py"
 
+    # Doctor's role (names, powers, report form): root-owned, read by the launcher into his
+    # system prompt, so it holds whatever directory his sessions run in.
+    local role_tmp
+    role_tmp=$(mktemp)
+    TMPFILES+=("$role_tmp")
+    render_doctor_role "$role_tmp"
+    install -m 0644 -o root -g root "$role_tmp" "${RICHARD_HOME}/DOCTOR.md"
+
     # .env
     local env_tmp
     env_tmp=$(mktemp)
-    render_template "${TEMPLATES_DIR}/richard.env" "$env_tmp" \
-        RICHARD_BOT_TOKEN    "$RICHARD_BOT_TOKEN" \
-        RICHARD_BOT_USERNAME "$RICHARD_BOT_USERNAME" \
-        TG_USER_ID           "$TG_USER_ID" \
-        USER                 "$AGENT_USER"
+    render_richard_env "$env_tmp"
     # Re-run (migration): an Enter on the token / id questions must not
     # blank a working Richard -- merge with the existing .env, back it up.
     local richard_env="${RICHARD_HOME}/.env"
@@ -2206,8 +2337,10 @@ install_richard() {
         merged_tmp=$(mktemp)
         TMPFILES+=("$merged_tmp")
         local merge_rc=0
-        merge_env_file "$env_tmp" "$richard_env" \
-            TELEGRAM_BOT_TOKEN,TELEGRAM_BOT_USERNAME,ALLOWED_USERS >"$merged_tmp" \
+        # The model is an answer only when given this run; otherwise a hand-set one stays.
+        local answers=TELEGRAM_BOT_TOKEN,TELEGRAM_BOT_USERNAME,ALLOWED_USERS
+        [[ "$(env_value DOCTOR_MODEL)" == "$DOCTOR_MODEL" ]] && answers+=",CLAUDE_MODEL"
+        merge_env_file "$env_tmp" "$richard_env" "$answers" >"$merged_tmp" \
             || merge_rc=$?
         if [[ "$merge_rc" -eq 3 ]]; then
             warn "${richard_env} has lines the installer cannot merge safely -- left as it is (edit it by hand if needed)."
@@ -2531,8 +2664,11 @@ install_skills() {
 
     local installed=()
 
+    # Called in this shell, not in $(...): the clone dir must land in TMPDIRS of the
+    # process whose EXIT trap removes it.
     local tpl_dir
-    if tpl_dir=$(fetch_template); then
+    if fetch_template >/dev/null; then
+        tpl_dir="$TEMPLATE_CLONE_DIR"
         local tpl_skills_root="${tpl_dir}/skills"
         [[ -d "$tpl_skills_root" ]] || tpl_skills_root="$tpl_dir"
 
@@ -2552,7 +2688,8 @@ install_skills() {
     fi
 
     local skills_src
-    if skills_src=$(locate_installer_skills); then
+    if locate_installer_skills >/dev/null; then
+        skills_src="$INSTALLER_SKILLS_DIR"
         local name
         for name in "${SKILLS_FROM_INSTALLER[@]}"; do
             local src="${skills_src}/${name}"
@@ -3010,7 +3147,7 @@ _guard_conf_has() {
 # when this run gave none.
 render_guard_conf() {
     local existing="${1:-}"
-    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle
+    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle cgroups
     agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
     wrules="$(env_value WEIGHT_RULES_KB)"
     [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
@@ -3019,6 +3156,11 @@ render_guard_conf() {
     [[ -n "$wclaude" ]] || wclaude=$(_guard_conf_get "$existing" WEIGHT_CLAUDE_KB)
     [[ -z "$wclaude" || "$wclaude" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_CLAUDE_KB '${wclaude}' is not a number -- using 40."; wclaude=""; }
     labels=$(_guard_conf_get "$existing" AGENT_LABELS)
+    # A name given this run (NEUROOTDEL_AGENT_NAME) replaces the main agent's label.
+    if [[ -n "$(env_value AGENT_NAME)" ]]; then
+        labels=$(printf '%s' "$labels" | tr ',' '\n' | { grep -v '^jarvis=' || true; } | paste -sd, -)
+        labels="jarvis=${MAIN_AGENT_NAME}${labels:+,${labels}}"
+    fi
     mode="$(env_value GUARD_ALERTS)"
     [[ -n "$mode" ]] || mode=$(_guard_conf_get "$existing" ALERT_MODE)
     case "${mode:-outbox}" in
@@ -3054,6 +3196,9 @@ render_guard_conf() {
     fenv=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_ENV)
     [[ -z "$fenv" || "$fenv" =~ ^/[A-Za-z0-9._/-]+$ ]] || { warn "FACT_GATE_CHIP_ENV '${fenv}' is not an absolute path -- chip off."; fenv=""; }
     fstyle=$(_gate_conf_pick "$existing" FACT_GATE_STYLE_BANNED)
+    # Groups whose owner messages count as corrections: only this explicit list (kept on re-run).
+    cgroups=$(_gate_conf_pick "$existing" CORRECTION_GROUP_CHAT_IDS)
+    [[ -z "$cgroups" || "$cgroups" =~ ^-[0-9]+([\ ,]+-[0-9]+)*$ ]] || { warn "CORRECTION_GROUP_CHAT_IDS '${cgroups}' is not a list of group ids (-100...) -- no group counts."; cgroups=""; }
     cat <<EOF
 # ${INSTALL_TAG} v${INSTALLER_VERSION}: settings of the agent guard scripts. No secrets here.
 # A re-run of the installer rewrites this file and keeps CHANNEL_AGENTS, AGENT_LABELS,
@@ -3074,17 +3219,22 @@ render_guard_conf() {
 #                ready-post exception off, the gate makes no network calls);
 #   CHIP_ENV     file with CHIP_API_TOKEN=... readable by the agent (needed with CHIP_URL);
 #   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check).
+# CORRECTION_GROUP_CHAT_IDS: groups (-100...) where the owner's messages are caught as corrections by
+#   hooks/correction-detector.py; empty = only the owner's private chat. Kept on re-run, an env
+#   NEUROOTDEL_CORRECTION_GROUP_CHAT_IDS wins ("" clears).
 AGENT_USER="$(_guard_conf_value "$AGENT_USER")"
 AGENT_HOME="$(_guard_conf_value "$AGENT_HOME")"
 LIB_DIR="$(_guard_conf_value "$GUARD_LIB_DIR")"
 CONFIG_ROOT="$(_guard_conf_value "$CONFIG_ROOT")"
 CHANNEL_AGENTS="$(_guard_conf_value "${agents:-jarvis}")"
 MAIN_AGENT="jarvis"
-AGENT_LABELS="$(_guard_conf_value "${labels:-jarvis=Jarvis}")"
+AGENT_LABELS="$(_guard_conf_value "${labels:-jarvis=${MAIN_AGENT_NAME}}")"
 OWNER_NAME="$(_guard_conf_value "$OPERATOR_NAME")"
 OWNER_TG_ID="$(_guard_conf_value "$TG_USER_ID")"
 OWNER_TIMEZONE="$(_guard_conf_value "${OPERATOR_TIMEZONE:-Europe/Moscow}")"
+OWNER_LANGUAGE="$(_guard_conf_value "${OPERATOR_LANGUAGE:-Russian}")"
 RICHARD_UNIT="claude-richard"
+DOCTOR_NAME="$(_guard_conf_value "$DOCTOR_NAME")"
 RICHARD_ENV="$(_guard_conf_value "${RICHARD_HOME}/.env")"
 ALERT_MODE="${mode}"
 ALERT_TG_CHAT_ID="$(_guard_conf_value "$chat")"
@@ -3095,6 +3245,7 @@ FACT_GATE_BOT_IDS="$(_guard_conf_value "$fbots")"
 FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
 FACT_GATE_CHIP_ENV="$(_guard_conf_value "$fenv")"
 FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
+CORRECTION_GROUP_CHAT_IDS="$(_guard_conf_value "$cgroups")"
 EOF
 }
 
@@ -3644,7 +3795,7 @@ _install_learned_practices() {
 #   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
 #                                      between markers in the agent's CLAUDE.md;
 #   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
-#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
+#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
 #     library/INDEX.md, core/archive/, the learned-practices pack (_install_learned_practices).
 # Every file lands through the agent user (_agent_write), never a root write into its home.
 install_team_refs() {
@@ -3661,11 +3812,12 @@ install_team_refs() {
     as_agent mkdir -p "$shared" "${AGENT_HOME}/.claude/rules" "$mem_dir" \
         "${ws}/core/archive" "${ws}/library" || die "Could not create reference dirs as ${AGENT_USER}."
 
-    for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER; do
+    for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER ROLE-ACCEPTANCE; do
         tmp=$(mktemp)
         TMPFILES+=("$tmp")
         render_template "${tdir}/shared/${f}.md" "$tmp" \
-            USER_NAME "$OPERATOR_NAME" LIB "$GUARD_LIB_DIR" CONFIG_ROOT "$CONFIG_ROOT" USER "$AGENT_USER"
+            USER_NAME "$OPERATOR_NAME" LIB "$GUARD_LIB_DIR" CONFIG_ROOT "$CONFIG_ROOT" USER "$AGENT_USER" \
+            AGENT_NAME "$MAIN_AGENT_NAME" DOCTOR_NAME "$DOCTOR_NAME"
         if [[ "$f" == team-rules ]]; then
             _agent_write "$tmp" "${shared}/${f}.md" 0644 0 || fail=1
         else
@@ -4027,6 +4179,7 @@ main() {
     install_claude_cli
     install_bun
     collect_inputs
+    resolve_role_settings
     install_jarvis
     install_coder
     install_richard
