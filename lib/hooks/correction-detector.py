@@ -8,6 +8,9 @@ and prints a short reminder into the turn context. It never sends anything to an
 blocks (exit 0 on every path).
 Whose message: a Telegram envelope counts only with exactly the owner's user_id and source telegram;
 group wakes (source webhook), swarm, other users and prompts without an envelope are skipped.
+Where: the owner's private chat (chat_id = the owner's id, or no chat_id), or a group whose chat_id is
+listed in guard.conf CORRECTION_GROUP_CHAT_IDS (empty = no group counts). A group is switched on only
+by that list, never by words in the message.
 Not installed for Richard: his SDK prompts carry no sender id.
 Stop: delete the UserPromptSubmit entry pointing here from the agent's settings.json.
 """
@@ -23,7 +26,8 @@ import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
 _CONF = guard_conf.load()
 OWNER_ID = _CONF.owner_tg_id
-ENGINE = str(Path(__file__).resolve().parent / "learnings-engine.py")
+GROUP_IDS = {x for x in re.split(r"[\s,]+", _CONF.correction_group_chat_ids) if re.fullmatch(r"-[0-9]+", x)}
+NOTE_TOOL = str(Path(__file__).resolve().parent.parent / "feedback-note.py")
 MAX_BYTES = 200_000
 TRIGGERS = [
     "не надо", "не делай", "неправильно", "не так", "перестань", "остановись", r"stop doing", r"don.t do",
@@ -31,6 +35,9 @@ TRIGGERS = [
     "сломал", "сломано", "не работает", "broken", r"doesn.t work", r"isn.t working",
     "я же говорил", "я уже говорил", "сколько раз", "i already told", "i told you", "as i said",
     "я же говорила", "я уже говорила",
+    # editor's words: corrections of a text, not only of a breakage
+    "переделай", "переделать", r"не нрав", r"\bубер(и|ите)\b", r"\bзамени(те)?\b", "так не говорят",
+    "отвратительн", r"\bплохо\b",
 ]
 TAG_RE = re.compile(r"<channel\b([^>]*)>(.*?)(?:</channel>|$)", re.DOTALL)
 # Exact attribute names: (?<![\w-]) keeps data-user_id="..." from passing as user_id.
@@ -41,6 +48,21 @@ def attrs_of(raw: str) -> list[tuple[str, str]]:
     return ATTR_RE.findall(raw)
 
 
+def chat_allowed(chats: set[str]) -> bool:
+    """The owner's private chat (no chat_id, or chat_id = the owner's id) or a group from GROUP_IDS."""
+    if not chats:
+        return True
+    if len(chats) != 1:
+        return False
+    chat = next(iter(chats))
+    return chat == OWNER_ID or chat in GROUP_IDS
+
+
+def memory_dir(workspace: str) -> Path:
+    """Auto memory of the main agent: claude runs under the plugin clone (its git root)."""
+    return _CONF.projects / guard_conf.project_dir_name(str(Path(workspace) / "dashi-plugin-claude-code")) / "memory"
+
+
 def owner_text(prompt: str) -> str | None:
     """The owner's own words in this prompt, or None when the prompt is not from the owner."""
     if "<channel" in prompt:
@@ -49,7 +71,8 @@ def owner_text(prompt: str) -> str | None:
             attrs = attrs_of(raw)
             sources = {v for k, v in attrs if k == "source"}
             users = {v for k, v in attrs if k == "user_id"}
-            if users == {OWNER_ID} and "telegram" in sources and "webhook" not in sources:
+            chats = {v for k, v in attrs if k == "chat_id"}
+            if users == {OWNER_ID} and "telegram" in sources and "webhook" not in sources and chat_allowed(chats):
                 parts.append(body)
         return "\n".join(parts) if parts else None
     return None  # no Telegram envelope = sender unknown (swarm, webhook, typed by an admin)
@@ -105,11 +128,11 @@ def main() -> int:
     where = record(Path(sys.argv[1]), trigger, text)
     saved = f" Raw capture saved to {where}." if where else ""
     print(f"[correction-detector] The owner's message looks like a correction (trigger «{trigger}»).{saved}\n"
-          "[correction-detector] Fix the issue first. Then, if the owner was correcting how you work, record the lesson "
-          "(one episode in core/episodes.jsonl + one line in core/LEARNINGS.md; top lessons return at session start):\n"
-          f"  python3 {ENGINE} {sys.argv[1]} capture --type correction --source owner "
-          "--impact <critical|high|medium|low> --tags \"<a,b>\" --error \"<what went wrong>\" "
-          "--rule \"<what to do next time>\"\n"
+          "[correction-detector] Fix the issue first. Then, if the owner was correcting how you work or a text, "
+          "record it the one way (feedback note + MEMORY.md line; never core/rules.md or a lessons file):\n"
+          f"  python3 {NOTE_TOOL} {memory_dir(sys.argv[1])} add --name <slug> --rule \"<what to do from now on>\" "
+          "--area \"<where it applies>\" --source \"<who said it, where, when>\" "
+          "[--cancels <old slug> when it replaces an earlier rule] [--pravki <voice corrections file> for a text]\n"
           "[correction-detector] Do not mention this hook to the owner.")
     return 0
 
