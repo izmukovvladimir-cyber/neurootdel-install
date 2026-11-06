@@ -115,9 +115,9 @@ check "ws: jarvis rules unchanged"     grep -q '^## One reply per question' "${W
 
 # --- token question --------------------------------------------------------------------
 tg_get_me() { printf '{"ok":true,"result":{"username":"my_coder_bot"}}'; }
-OUT=$( (NEUROOTDEL_NONINTERACTIVE=1; JARVIS_BOT_TOKEN="$TOKEN_J"; collect_coder_input; printf 'tok=[%s]' "$CODER_BOT_TOKEN") 2>&1 )
-check "ask: unattended, no env -> empty"  grep -q 'tok=\[\]$' <<<"$OUT"
-check "ask: unattended, no env -> no warn" bash -c "! grep -q 'Non-interactive' <<<\"\$1\"" _ "$OUT"
+OUT=$( (export NEUROOTDEL_NONINTERACTIVE=1; JARVIS_BOT_TOKEN="$TOKEN_J"; collect_coder_input; printf 'tok=[%s]' "$CODER_BOT_TOKEN") 2>&1; printf 'rc=%s' "$?" )
+check "ask: unattended, no env -> stop (bot required)" grep -q 'rc=1$' <<<"$OUT"
+check "ask: stop names the lesson"        grep -q 'lesson-create-bots.md' <<<"$OUT"
 OUT=$( (export NEUROOTDEL_NONINTERACTIVE=1 NEUROOTDEL_CODER_BOT_TOKEN="$TOKEN_C"; JARVIS_BOT_TOKEN="$TOKEN_J"; RICHARD_BOT_TOKEN="$TOKEN_R"; collect_coder_input; printf 'tok=%s user=%s' "${CODER_BOT_TOKEN:0:9}" "$CODER_BOT_USERNAME") 2>&1 )
 check "ask: env token taken"           grep -q 'tok=777888999 user=my_coder_bot' <<<"$OUT"
 OUT=$( (export NEUROOTDEL_NONINTERACTIVE=1 NEUROOTDEL_CODER_BOT_TOKEN="$TOKEN_J"; JARVIS_BOT_TOKEN="$TOKEN_J"; collect_coder_input) 2>&1; printf 'rc=%s' "$?")
@@ -152,7 +152,7 @@ check "getMe: token via stdin"         grep -q "^url = \"https://api.telegram.or
 CODER_BOT_TOKEN=""; CODER_INSTALLED=0
 OUT=$(install_coder 2>&1); RC=$?
 check "skip: rc 0"                     test "$RC" -eq 0
-check "skip: says how to add later"    grep -q 'answer the Coder token question' <<<"$OUT"
+check "skip: says how to add later"    grep -q 'stage intensive' <<<"$OUT"
 check "skip: no token in the hint"     bash -c "! grep -q 'TOKEN=<' <<<\"\$1\"" _ "$OUT"
 check "skip: no workspace"             test ! -e "${FAKE_HOME}/.claude-lab/coder"
 check "skip: no unit"                  test ! -e "${TDIR}/systemd/channel-coder.service"
@@ -330,7 +330,7 @@ check "final: restart includes coder"   grep -q 'sudo systemctl restart channel-
 check "final: smoke-check coder"        grep -q 'systemctl is-active channel-coder' <<<"$OUT"
 CODER_INSTALLED=0
 OUT=$(final_instructions 2>&1)
-check "final: how to add coder later"   grep -q 'not installed (optional third bot' <<<"$OUT"
+check "final: how to add coder later"   grep -q 'Coder:     not installed: intensive stage' <<<"$OUT"
 check "final: no coder -> plain restart" grep -q 'sudo systemctl restart channel-jarvis claude-richard' <<<"$OUT"
 
 # --- main: Coder right after Jarvis -------------------------------------------------------------------

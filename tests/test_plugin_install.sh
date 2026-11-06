@@ -502,8 +502,13 @@ R3c=$( (EDGELAB_TEST_ANSWER=old NEUROOTDEL_TEST_ANSWER=new prompt_or_env V NEURO
 check "no tty, new name wins over old"  test "$R3c" = "rc=0 v=[new]"
 R3d=$( (unset NEUROOTDEL_NONINTERACTIVE; EDGELAB_NONINTERACTIVE=1 is_noninteractive </dev/null; printf 'rc=%s' "$?") )
 check "old EDGELAB_NONINTERACTIVE honoured" test "$R3d" = "rc=0"
-R4=$( (NEUROOTDEL_NONINTERACTIVE=1 collect_inputs </dev/null >/dev/null 2>&1; printf 'rc=%s' "$?") )
-check "no tty: collect_inputs survives with no tokens" test "$R4" = "rc=0"
+R4=$( (NEUROOTDEL_NONINTERACTIVE=1 collect_inputs </dev/null >/dev/null 2>&1); printf 'rc=%s' "$?" )
+check "no tty: collect_inputs stops without the bot tokens" test "$R4" = "rc=1"
+R4b=$( (tg_get_me() { printf '{"ok":true,"result":{"username":"b"}}'; }
+        export NEUROOTDEL_NONINTERACTIVE=1 NEUROOTDEL_JARVIS_BOT_TOKEN="111111111:JJJabcdefghijklmnopqrstuvwxyz0123456" \
+            NEUROOTDEL_RICHARD_BOT_TOKEN="222222222:RRRabcdefghijklmnopqrstuvwxyz0123456"
+        collect_inputs </dev/null >/dev/null 2>&1; printf 'rc=%s stage=%s' "$?" "$STAGE") )
+check "no tty: both workshop bots given -> ok, workshop" test "$R4b" = "rc=0 stage=workshop"
 
 # --- merge_env_file ---------------------------------------------------------------
 REND="${TDIR}/rend.env"; OLD="${TDIR}/old.env"

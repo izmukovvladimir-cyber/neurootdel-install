@@ -41,6 +41,7 @@ write_as_user() { mkdir -p "$(dirname "$2")"; install -m "${3:-0644}" "$1" "$2";
 as_agent() { "$@"; }
 step() { :; }; log() { :; }; warn() { :; }; err() { :; }
 ok() { printf '%s\n' "$*"; }
+collect_bot_token() { :; }   # bots already on this server; the bot checks: test_mandatory_bots.sh
 collect_inputs >/dev/null
 echo "INPUTS lang=${OPERATOR_LANGUAGE} tz=${OPERATOR_TIMEZONE}"
 resolve_role_settings

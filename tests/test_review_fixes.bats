@@ -48,6 +48,8 @@ _f1_collect_without_env() {   # a re-run: no env, Enter on every question
     export NEUROOTDEL_NONINTERACTIVE=1
     OPERATOR_NAME=""; TG_USER_ID=""; OPERATOR_LANGUAGE=""; OPERATOR_TIMEZONE=""
     eval 'step() { :; }; log() { :; }; warn() { :; }; ok() { :; }'
+    # The bots are already on this server; the bot checks live in test_mandatory_bots.sh.
+    eval 'collect_bot_token() { :; }'
     collect_inputs </dev/null
 }
 

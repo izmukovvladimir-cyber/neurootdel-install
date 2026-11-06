@@ -162,7 +162,10 @@ SUPERVISOR_TG_ID=""; TG_USER_ID="42"
 # --- collect_inputs: env parameter read and validated -------------------------
 # ci <value> -- runs collect_inputs non-interactively, prints the parsed supervisor id.
 ci() {
-    ( export NEUROOTDEL_NONINTERACTIVE=1 NEUROOTDEL_TG_USER_ID=42 NEUROOTDEL_SUPERVISOR_TG_ID="$1"
+    ( export NEUROOTDEL_NONINTERACTIVE=1 NEUROOTDEL_TG_USER_ID=42 NEUROOTDEL_SUPERVISOR_TG_ID="$1" \
+          NEUROOTDEL_JARVIS_BOT_TOKEN="111111111:JJJabcdefghijklmnopqrstuvwxyz0123456" \
+          NEUROOTDEL_RICHARD_BOT_TOKEN="222222222:RRRabcdefghijklmnopqrstuvwxyz0123456"
+      tg_get_me() { printf '{"ok":true,"result":{"username":"b"}}'; }
       collect_inputs >/dev/null 2>&1 || exit 1
       printf '%s' "$SUPERVISOR_TG_ID" )
 }

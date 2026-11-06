@@ -22,6 +22,14 @@
 #   sudo bash /root/neurootdel-install.sh --rollback   # Jarvis back to the old claude-gateway unit
 #   sudo bash /root/neurootdel-install.sh --solo # «Агент за вечер»: asks for the personal key first
 #                                  # (or NEUROOTDEL_AZV_KEY=...), stops without a valid one
+#   sudo bash /root/neurootdel-install.sh --stage workshop    # stage 1: Jarvis + Richard
+#   sudo bash /root/neurootdel-install.sh --stage intensive   # stage 2: adds Coder + Auditor
+#   sudo neurootdel-verify                                    # end-of-stage check, any time
+#
+# Every agent has its OWN Telegram bot, and within a stage every bot is required: the installer asks
+# again until the token passes getMe and is not another agent's bot (no tty: stops instead).
+# Without --stage the installer asks for the stage; without a tty it takes the stage this server is
+# already on (intensive when Coder or Auditor is here or their tokens are given), else workshop.
 #
 # Env overrides (non-interactive). The old EDGELAB_* names are still accepted
 # when the NEUROOTDEL_* one is not set:
@@ -29,9 +37,10 @@
 #   NEUROOTDEL_JARVIS_BOT_USER    Jarvis bot @username (no @)
 #   NEUROOTDEL_RICHARD_BOT_TOKEN  Richard Telegram bot token
 #   NEUROOTDEL_RICHARD_BOT_USER   Richard bot @username (no @)
-#   NEUROOTDEL_CODER_BOT_TOKEN    Optional Coder (technical specialist) bot token; empty = no Coder
+#   NEUROOTDEL_CODER_BOT_TOKEN    Coder (technical specialist) bot token, required at --stage intensive
 #   NEUROOTDEL_CODER_BOT_USER     Coder bot @username (no @)
-#   NEUROOTDEL_AUDITOR_BOT_TOKEN  Optional Auditor (Hermes on GPT) bot token; empty = no Auditor
+#   NEUROOTDEL_AUDITOR_BOT_TOKEN  Auditor (Hermes on GPT) bot token, required at --stage intensive
+#   NEUROOTDEL_STAGE              workshop | intensive (same as --stage)
 #   NEUROOTDEL_AUDITOR_BOT_USER   Auditor bot @username (no @)
 #   NEUROOTDEL_AUDITOR_MODEL      Auditor model on the ChatGPT login (default: AUDITOR_MODEL_DEFAULT)
 #   NEUROOTDEL_TG_USER_ID        Operator Telegram numeric ID
@@ -178,6 +187,8 @@ apply_install_names() {
     SUDOERS_FILE="/etc/sudoers.d/${AGENT_USER}-agents"
     LEGACY_BACKUP_ROOT="/var/backups/${INSTALL_TAG}"
     INSTALL_STATE_ROOT="/var/lib/${INSTALL_TAG}"
+    # End-of-stage check (lib/verify-stage.sh), one name for the student on every server.
+    VERIFY_BIN="/usr/local/bin/neurootdel-verify"
 }
 
 # select_install_names [root] -- one place that decides all names, run at load time.
@@ -1038,7 +1049,7 @@ JARVIS_BOT_TOKEN=""
 JARVIS_BOT_USERNAME=""
 RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
-# Optional Coder bot (third bot). Empty and no token on this server = Coder is not installed.
+# Coder bot (third bot), required at the intensive stage. Empty = kept from this server or not this stage.
 CODER_BOT_TOKEN=""
 CODER_BOT_USERNAME=""
 CODER_INSTALLED=0
@@ -1051,6 +1062,169 @@ SUPERVISOR_TG_ID=""
 OPERATOR_NAME=""
 OPERATOR_LANGUAGE=""
 OPERATOR_TIMEZONE=""
+# Install stage: workshop = Jarvis + Richard, intensive = + Coder + Auditor. Set by resolve_stage.
+STAGE=""
+STAGE_ARG=""
+# Where the bot and stage questions read answers from (tests point it at a file). Opened once
+# (TTY_FD), so a question asked again reads the NEXT answer.
+TTY_IN="/dev/tty"
+TTY_FD=""
+
+# _tty_read <var> <prompt> [-s] -- one answer line from TTY_IN; rc 1 when there is none.
+_tty_read() {
+    local -n _tty_out=$1
+    local prompt=$2 flags=(-r)
+    [[ "${3:-}" == "-s" ]] && flags+=(-s)
+    if [[ -z "$TTY_FD" ]]; then
+        exec {TTY_FD}<"$TTY_IN" || return 1
+    fi
+    _tty_out=""
+    read "${flags[@]}" -u "$TTY_FD" -p "$prompt" _tty_out || return 1
+    [[ "${3:-}" == "-s" ]] && echo ""
+    return 0
+}
+
+# _legacy_gateway_token -- the Jarvis bot token of the old claude-gateway on this server, empty if none.
+_legacy_gateway_token() {
+    local legacy_dir="${AGENT_HOME}/${LEGACY_GATEWAY_DIR_NAME}" t=""
+    [[ -f "${legacy_dir}/config.json" ]] || return 0
+    t=$(jq -r '.agents.jarvis.bot_token // ""' "${legacy_dir}/config.json" 2>/dev/null || true)
+    if [[ -z "$t" && -s "${legacy_dir}/secrets/bot-token" ]]; then
+        t=$(tr -d '[:space:]' < "${legacy_dir}/secrets/bot-token")
+    fi
+    printf '%s' "$t"
+}
+
+# _bot_label <agent> -- the name the student sees.
+_bot_label() {
+    case "$1" in
+        jarvis) echo Jarvis ;; richard) echo Richard ;; coder) echo Coder ;; auditor) echo Auditor ;;
+    esac
+}
+
+# _bot_existing_token <agent> -- the token already written on this server for that agent, empty if none.
+_bot_existing_token() {
+    local t=""
+    case "$1" in
+        jarvis)
+            t=$(_env_token "${JARVIS_ENV_DIR}/channel.env")
+            [[ -n "$t" ]] || t=$(_legacy_gateway_token)
+            ;;
+        richard) t=$(_env_token "${RICHARD_HOME}/.env") ;;
+        coder)   t=$(_env_token "${CODER_ENV_DIR}/channel.env") ;;
+        auditor) t=$(_auditor_env_token) ;;
+    esac
+    printf '%s' "$t"
+}
+
+# _bot_clash <agent> <token> -- true when the token is the bot of ANOTHER agent. Same bot = same id
+# before ':' (a re-issued token keeps it). Compared with this run's answers AND the tokens already
+# written on this server: an empty answer on a re-run is not "no bot". Two pollers on one bot fight (409).
+_bot_clash() {
+    local self=$1 id="${2%%:*}" a var t
+    [[ -n "$id" ]] || return 1
+    for a in jarvis richard coder auditor; do
+        [[ "$a" == "$self" ]] && continue
+        var="${a^^}_BOT_TOKEN"
+        for t in "${!var:-}" "$(_bot_existing_token "$a")"; do
+            [[ -n "$t" && "${t%%:*}" == "$id" ]] && return 0
+        done
+    done
+    return 1
+}
+
+# collect_bot_token <agent> -- the agent's own bot token, required. Sets <AGENT>_BOT_TOKEN and
+# <AGENT>_BOT_USERNAME. A token passes when its format is right, it is not another agent's bot and
+# Telegram getMe answers ok. An empty answer keeps the token already written on this server (re-run),
+# after the same three checks: a revoked or shared bot is not kept silently.
+# With a tty the question repeats until a token passes; a token from env, or a run without a tty,
+# stops the installer instead (nobody is there to answer again). The token is never printed.
+collect_bot_token() {
+    local agent=$1 label up tok resp why from_env=0 have_old=0 kept prompt
+    label=$(_bot_label "$agent")
+    up="${agent^^}"
+    local -n tok_out="${up}_BOT_TOKEN"
+    local -n user_out="${up}_BOT_USERNAME"
+    user_out="$(env_value "${up}_BOT_USER")"
+    tok="$(env_value "${up}_BOT_TOKEN")"
+    [[ -n "$tok" ]] && from_env=1
+    [[ -n "$(_bot_existing_token "$agent")" ]] && have_old=1
+    prompt="Токен бота ${label} из @BotFather (свой бот у каждого агента, формат 1234567890:ABC...)"
+    [[ "$have_old" == "1" ]] && prompt="${prompt}, Enter = оставить уже записанный"
+
+    while :; do
+        if [[ "$from_env" == "0" ]]; then
+            tok=""
+            if ! is_noninteractive; then
+                _tty_read tok "${prompt}: " -s || die "No answer for the ${label} bot token (input closed)."
+            fi
+        fi
+        tok="${tok//[[:space:]]/}"
+        kept=0
+        if [[ -z "$tok" && "$have_old" == "1" ]]; then
+            tok=$(_bot_existing_token "$agent")
+            kept=1
+        fi
+        if [[ -z "$tok" ]]; then
+            why="${label} needs its own bot: create it in @BotFather (docs/lesson-create-bots.md) and give its token (NEUROOTDEL_${up}_BOT_TOKEN without a tty)."
+        elif ! validate_tg_token "$tok"; then
+            why="${label} token format invalid (expected '<digits>:<30+ chars>')."
+        elif _bot_clash "$agent" "$tok"; then
+            why="${label} token must be a SEPARATE bot (not another agent's bot) -- create one in @BotFather."
+        else
+            resp=$(tg_get_me "$tok")
+            if [[ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" == "true" ]]; then
+                if [[ "$kept" == "1" ]]; then
+                    tok_out=""
+                    log "${label}: bot token kept from this server (checked)."
+                    return 0
+                fi
+                tok_out="$tok"
+                [[ -n "$user_out" ]] || user_out=$(jq -r '.result.username // ""' <<<"$resp" 2>/dev/null)
+                ok "${label} bot verified: @${user_out:-?}"
+                return 0
+            fi
+            why="${label} token rejected by Telegram (getMe failed): copy it again from @BotFather, or check the network."
+        fi
+        [[ "$kept" == "1" ]] && why="${label} bot already on this server does not pass: ${why}"
+        if [[ "$from_env" == "1" ]] || is_noninteractive; then
+            die "$why"
+        fi
+        warn "$why Try again."
+    done
+}
+
+# _stage_recorded -- INSTALL_STAGE from this server's guard.conf, empty if none.
+_stage_recorded() {
+    _guard_conf_get "${GUARD_LIB_DIR}/guard.conf" INSTALL_STAGE
+}
+
+# resolve_stage -- STAGE from, in order: --stage, NEUROOTDEL_STAGE, --solo (workshop), this server
+# (intensive when guard.conf says so or Coder/Auditor already have a bot here or their tokens are
+# given), the student's answer (tty), else workshop with a line saying how to add the intensive.
+resolve_stage() {
+    local s="${STAGE_ARG:-$(env_value STAGE)}" ans=""
+    if [[ -n "$s" ]]; then
+        [[ "$s" == workshop || "$s" == intensive ]] || die "Stage must be workshop or intensive (got: ${s})."
+        STAGE="$s"
+    elif [[ "${SOLO:-0}" == "1" ]]; then
+        STAGE=workshop
+    elif [[ "$(_stage_recorded)" == intensive || -n "$(_bot_existing_token coder)" || -n "$(_bot_existing_token auditor)" \
+            || -n "$(env_value CODER_BOT_TOKEN)" || -n "$(env_value AUDITOR_BOT_TOKEN)" ]]; then
+        STAGE=intensive
+    elif ! is_noninteractive; then
+        while [[ "$ans" != 1 && "$ans" != 2 ]]; do
+            _tty_read ans "Этап установки: 1 = мастер-класс (Jarvis и Richard), 2 = интенсив (ещё Coder и Auditor): " \
+                || die "No answer to the stage question: run with --stage workshop or --stage intensive."
+        done
+        STAGE=$([[ "$ans" == 2 ]] && echo intensive || echo workshop)
+    else
+        STAGE=workshop
+        warn "No --stage given: workshop stage (Jarvis + Richard). Coder and Auditor: sudo bash install.sh --stage intensive"
+    fi
+    log "Install stage: ${STAGE} ($([[ "$STAGE" == intensive ]] && echo "Jarvis, Richard, Coder, Auditor" || echo "Jarvis, Richard"); every agent has its own bot)."
+}
+
 # Roles of this install (resolve_role_settings): names, explicit model ids, brief location.
 MAIN_AGENT_NAME="Jarvis"
 DOCTOR_NAME="Richard"
@@ -1109,16 +1283,17 @@ resolve_role_settings() {
 collect_inputs() {
     step 5 "Collecting operator inputs"
 
+    resolve_stage
     # Interactive flow (TTY present): installer asks the student for all values.
-    # Non-interactive flow (NEUROOTDEL_NONINTERACTIVE=1 or no TTY): env overrides
-    # required for tokens; operator profile falls back to safe defaults.
+    # Non-interactive flow (NEUROOTDEL_NONINTERACTIVE=1 or no TTY): bot tokens come from env
+    # (or stay as already written on this server); operator profile falls back to safe defaults.
     if ! is_noninteractive; then
-        cat <<'BRIEF'
+        cat <<BRIEF
 
-The installer will now ask a few questions. You need TWO Telegram bots ready
-(create them in @BotFather beforehand) and your numeric Telegram user ID
-(get it from @userinfobot). Tokens are hidden while typing.
-A THIRD bot for Coder (technical specialist) is optional: press Enter to skip it.
+The installer will now ask a few questions. Every agent needs its OWN Telegram bot:
+$([[ "$STAGE" == intensive ]] && echo "FOUR bots this stage (Jarvis, Richard, Coder, Auditor)" || echo "TWO bots this stage (Jarvis, Richard)"), create them in @BotFather beforehand
+(docs/lesson-create-bots.md), and your numeric Telegram user ID (from @userinfobot).
+Every bot is required: a wrong token is asked again. Tokens are hidden while typing.
 
 BRIEF
     fi
@@ -1142,61 +1317,20 @@ BRIEF
     prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "${saved_lang:-Russian}"
     prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "${saved_tz:-Europe/Moscow}"
 
-    prompt_or_env JARVIS_BOT_TOKEN  NEUROOTDEL_JARVIS_BOT_TOKEN \
-        "Jarvis bot token (from @BotFather, формат 1234567890:ABC...)" \
-        "" --secret
-    prompt_or_env RICHARD_BOT_TOKEN NEUROOTDEL_RICHARD_BOT_TOKEN \
-        "Richard bot token (ДРУГОЙ бот, не совпадает с Jarvis)" \
-        "" --secret
+    collect_bot_token jarvis
+    collect_bot_token richard
     prompt_or_env TG_USER_ID        NEUROOTDEL_TG_USER_ID \
         "Ваш Telegram numeric user ID (from @userinfobot)" \
         "$saved_id"
 
     SUPERVISOR_TG_ID="$(env_value SUPERVISOR_TG_ID)"
-    JARVIS_BOT_USERNAME="${NEUROOTDEL_JARVIS_BOT_USER:-}"
-    RICHARD_BOT_USERNAME="${NEUROOTDEL_RICHARD_BOT_USER:-}"
 
-    # Validate Jarvis token.
-    if [[ -n "$JARVIS_BOT_TOKEN" ]]; then
-        if ! validate_tg_token "$JARVIS_BOT_TOKEN"; then
-            die "Jarvis token format invalid (expected '<digits>:<30+ chars>')."
-        fi
-        local jresp
-        jresp=$(tg_get_me "$JARVIS_BOT_TOKEN")
-        if [[ "$(echo "$jresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
-            [[ -z "$JARVIS_BOT_USERNAME" ]] && \
-                JARVIS_BOT_USERNAME=$(echo "$jresp" | jq -r '.result.username // ""')
-            ok "Jarvis bot verified: @${JARVIS_BOT_USERNAME:-?}"
-        else
-            warn "Telegram getMe for Jarvis failed -- token will be written as-is."
-        fi
+    if [[ "$STAGE" == intensive ]]; then
+        collect_coder_input
+        collect_auditor_input
     else
-        log "Jarvis token empty (interactive skip / non-interactive no-env)."
+        log "Workshop stage: Coder and Auditor are not asked (intensive: sudo bash install.sh --stage intensive)."
     fi
-
-    # Validate Richard token.
-    if [[ -n "$RICHARD_BOT_TOKEN" ]]; then
-        if ! validate_tg_token "$RICHARD_BOT_TOKEN"; then
-            die "Richard token format invalid."
-        fi
-        if [[ "$RICHARD_BOT_TOKEN" == "$JARVIS_BOT_TOKEN" && -n "$JARVIS_BOT_TOKEN" ]]; then
-            die "Richard token must differ from Jarvis token -- create a SEPARATE bot in @BotFather."
-        fi
-        local rresp
-        rresp=$(tg_get_me "$RICHARD_BOT_TOKEN")
-        if [[ "$(echo "$rresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
-            [[ -z "$RICHARD_BOT_USERNAME" ]] && \
-                RICHARD_BOT_USERNAME=$(echo "$rresp" | jq -r '.result.username // ""')
-            ok "Richard bot verified: @${RICHARD_BOT_USERNAME:-?}"
-        else
-            warn "Telegram getMe for Richard failed -- token will be written as-is."
-        fi
-    else
-        log "Richard token empty."
-    fi
-
-    collect_coder_input
-    collect_auditor_input
 
     if [[ -n "$TG_USER_ID" && ! "$TG_USER_ID" =~ ^[0-9]+$ ]]; then
         die "Telegram user ID must be a positive integer (got: ${TG_USER_ID})."
@@ -1205,7 +1339,7 @@ BRIEF
         die "NEUROOTDEL_SUPERVISOR_TG_ID must be a positive integer (got: ${SUPERVISOR_TG_ID})."
     fi
 
-    ok "Inputs collected: name=${OPERATOR_NAME}, tz=${OPERATOR_TIMEZONE}, lang=${OPERATOR_LANGUAGE}"
+    ok "Inputs collected: name=${OPERATOR_NAME}, tz=${OPERATOR_TIMEZONE}, lang=${OPERATOR_LANGUAGE}, stage=${STAGE}"
 }
 
 # _env_token <env_file> -- TELEGRAM_BOT_TOKEN from an env file (root reads it), empty if none.
@@ -1214,89 +1348,24 @@ _env_token() {
     sed -n 's/^[[:space:]]*TELEGRAM_BOT_TOKEN=//p' "$1" | tail -n 1 | tr -d '"'"'"'[:space:]'
 }
 
-# _coder_bot_clash <coder_token> -- true when it is the Jarvis or the Richard bot. Same bot = same id
-# before ':' (a re-issued token keeps it). Compared with this run's answers AND the tokens already
-# written on this server: an empty answer on a re-run is not "no bot".
+# _coder_bot_clash <coder_token> -- true when it is another agent's bot (see _bot_clash).
 _coder_bot_clash() {
-    local other cid="${1%%:*}"
-    [[ -n "$cid" ]] || return 1
-    for other in "$JARVIS_BOT_TOKEN" "$RICHARD_BOT_TOKEN" \
-            "$(_env_token "${JARVIS_ENV_DIR}/channel.env")" "$(_env_token "${RICHARD_HOME}/.env")"; do
-        [[ -n "$other" && "${other%%:*}" == "$cid" ]] && return 0
-    done
-    return 1
+    _bot_clash coder "$1"
 }
 
-# collect_coder_input -- the optional Coder bot token (third bot). Not asked without a TTY
-# unless NEUROOTDEL_CODER_BOT_TOKEN is set, so an unattended run never warns about it.
-# Must differ from the Jarvis and Richard tokens: two pollers on one bot fight (409).
+# collect_coder_input -- the Coder bot token (third bot), required at the intensive stage.
 collect_coder_input() {
-    if is_noninteractive && [[ -z "$(env_value CODER_BOT_TOKEN)" ]]; then
-        CODER_BOT_TOKEN=""
-    else
-        prompt_or_env CODER_BOT_TOKEN NEUROOTDEL_CODER_BOT_TOKEN \
-            "Coder bot token (необязательно, ТРЕТИЙ бот; Enter = без Coder)" \
-            "" --secret
-    fi
-    CODER_BOT_USERNAME="$(env_value CODER_BOT_USER)"
-    if [[ -z "$CODER_BOT_TOKEN" ]]; then
-        log "Coder token empty -- Coder is skipped unless this server already has one."
-        return 0
-    fi
-    validate_tg_token "$CODER_BOT_TOKEN" || die "Coder token format invalid."
-    _coder_bot_clash "$CODER_BOT_TOKEN" \
-        && die "Coder token must be a SEPARATE bot (not the Jarvis or Richard bot) -- create one in @BotFather."
-    local cresp
-    cresp=$(tg_get_me "$CODER_BOT_TOKEN")
-    if [[ "$(echo "$cresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
-        [[ -z "$CODER_BOT_USERNAME" ]] && \
-            CODER_BOT_USERNAME=$(echo "$cresp" | jq -r '.result.username // ""')
-        ok "Coder bot verified: @${CODER_BOT_USERNAME:-?}"
-    else
-        warn "Telegram getMe for Coder failed -- token will be written as-is."
-    fi
+    collect_bot_token coder
 }
 
-# _auditor_bot_clash <auditor_token> -- true when it is the Jarvis, Richard or Coder bot (same id before ':'),
-# compared with this run's answers and the tokens already written on this server.
+# _auditor_bot_clash <auditor_token> -- true when it is another agent's bot (see _bot_clash).
 _auditor_bot_clash() {
-    local other aid="${1%%:*}"
-    [[ -n "$aid" ]] || return 1
-    for other in "$JARVIS_BOT_TOKEN" "$RICHARD_BOT_TOKEN" "$CODER_BOT_TOKEN" \
-            "$(_env_token "${JARVIS_ENV_DIR}/channel.env")" "$(_env_token "${RICHARD_HOME}/.env")" \
-            "$(_env_token "${CODER_ENV_DIR}/channel.env")"; do
-        [[ -n "$other" && "${other%%:*}" == "$aid" ]] && return 0
-    done
-    return 1
+    _bot_clash auditor "$1"
 }
 
-# collect_auditor_input -- the optional Auditor bot token (its own bot). Not asked without a TTY unless
-# NEUROOTDEL_AUDITOR_BOT_TOKEN is set. Must differ from every other agent's bot: two pollers fight (409).
+# collect_auditor_input -- the Auditor bot token (its own bot), required at the intensive stage.
 collect_auditor_input() {
-    if is_noninteractive && [[ -z "$(env_value AUDITOR_BOT_TOKEN)" ]]; then
-        AUDITOR_BOT_TOKEN=""
-    else
-        prompt_or_env AUDITOR_BOT_TOKEN NEUROOTDEL_AUDITOR_BOT_TOKEN \
-            "Auditor bot token (необязательно, отдельный бот Аудитора на Hermes и GPT; Enter = без Аудитора)" \
-            "" --secret
-    fi
-    AUDITOR_BOT_USERNAME="$(env_value AUDITOR_BOT_USER)"
-    if [[ -z "$AUDITOR_BOT_TOKEN" ]]; then
-        log "Auditor token empty -- Auditor is skipped unless this server already has one."
-        return 0
-    fi
-    validate_tg_token "$AUDITOR_BOT_TOKEN" || die "Auditor token format invalid."
-    _auditor_bot_clash "$AUDITOR_BOT_TOKEN" \
-        && die "Auditor token must be a SEPARATE bot (not the Jarvis, Richard or Coder bot) -- create one in @BotFather."
-    local aresp
-    aresp=$(tg_get_me "$AUDITOR_BOT_TOKEN")
-    if [[ "$(echo "$aresp" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
-        [[ -z "$AUDITOR_BOT_USERNAME" ]] && \
-            AUDITOR_BOT_USERNAME=$(echo "$aresp" | jq -r '.result.username // ""')
-        ok "Auditor bot verified: @${AUDITOR_BOT_USERNAME:-?}"
-    else
-        warn "Telegram getMe for Auditor failed -- token will be written as-is."
-    fi
+    collect_bot_token auditor
 }
 
 # =============================================================================
@@ -1479,7 +1548,7 @@ coder_wanted() {
 # CODER_WEBHOOK_PORT) and unit channel-coder. Without a bot token it is skipped cleanly.
 install_coder() {
     if ! coder_wanted; then
-        log "Coder skipped: no bot token (add one later: sudo bash install.sh, answer the Coder token question)."
+        log "Coder skipped: intensive stage, its own bot (sudo bash install.sh --stage intensive)."
         return 0
     fi
     # The token that will really run (this answer or the one kept in the Coder channel.env) must
@@ -1725,7 +1794,7 @@ _auditor_config() {
 # Without a bot token it is skipped cleanly. The ChatGPT login is the owner's step (final notes, lesson).
 install_auditor() {
     if ! auditor_wanted; then
-        log "Auditor skipped: no bot token (add one later: sudo bash install.sh, answer the Auditor token question)."
+        log "Auditor skipped: intensive stage, its own bot (sudo bash install.sh --stage intensive)."
         return 0
     fi
     if _auditor_bot_clash "${AUDITOR_BOT_TOKEN:-$(_auditor_env_token)}"; then
@@ -1815,10 +1884,7 @@ _collect_jarvis_channel_inputs() {
     fi
     if [[ -z "$JARVIS_BOT_TOKEN" ]] && ! _env_has_value "$env_file" TELEGRAM_BOT_TOKEN; then
         local legacy_token
-        legacy_token=$(jq -r '.agents.jarvis.bot_token // ""' "$legacy_cfg" 2>/dev/null || true)
-        if [[ -z "$legacy_token" && -s "${legacy_dir}/secrets/bot-token" ]]; then
-            legacy_token=$(tr -d '[:space:]' < "${legacy_dir}/secrets/bot-token")
-        fi
+        legacy_token=$(_legacy_gateway_token)
         if [[ -n "$legacy_token" ]]; then
             if validate_tg_token "$legacy_token"; then
                 JARVIS_BOT_TOKEN="$legacy_token"
@@ -3147,7 +3213,7 @@ _guard_conf_has() {
 # when this run gave none.
 render_guard_conf() {
     local existing="${1:-}"
-    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle cgroups
+    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle stage cgroups
     agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
     wrules="$(env_value WEIGHT_RULES_KB)"
     [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
@@ -3196,6 +3262,9 @@ render_guard_conf() {
     fenv=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_ENV)
     [[ -z "$fenv" || "$fenv" =~ ^/[A-Za-z0-9._/-]+$ ]] || { warn "FACT_GATE_CHIP_ENV '${fenv}' is not an absolute path -- chip off."; fenv=""; }
     fstyle=$(_gate_conf_pick "$existing" FACT_GATE_STYLE_BANNED)
+    # The stage never goes back: a workshop re-run on an intensive server keeps Coder and Auditor checked.
+    stage="${STAGE:-workshop}"
+    [[ "$(_guard_conf_get "$existing" INSTALL_STAGE)" == intensive ]] && stage=intensive
     # Groups whose owner messages count as corrections: only this explicit list (kept on re-run).
     cgroups=$(_gate_conf_pick "$existing" CORRECTION_GROUP_CHAT_IDS)
     [[ -z "$cgroups" || "$cgroups" =~ ^-[0-9]+([\ ,]+-[0-9]+)*$ ]] || { warn "CORRECTION_GROUP_CHAT_IDS '${cgroups}' is not a list of group ids (-100...) -- no group counts."; cgroups=""; }
@@ -3219,6 +3288,8 @@ render_guard_conf() {
 #                ready-post exception off, the gate makes no network calls);
 #   CHIP_ENV     file with CHIP_API_TOKEN=... readable by the agent (needed with CHIP_URL);
 #   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check).
+# INSTALL_STAGE: workshop (Jarvis + Richard) or intensive (+ Coder + Auditor), what verify-stage.sh checks;
+# SKILLS_EXPECTED: skills the installer gives each channel agent (verify-stage.sh counts them).
 # CORRECTION_GROUP_CHAT_IDS: groups (-100...) where the owner's messages are caught as corrections by
 #   hooks/correction-detector.py; empty = only the owner's private chat. Kept on re-run, an env
 #   NEUROOTDEL_CORRECTION_GROUP_CHAT_IDS wins ("" clears).
@@ -3245,6 +3316,8 @@ FACT_GATE_BOT_IDS="$(_guard_conf_value "$fbots")"
 FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
 FACT_GATE_CHIP_ENV="$(_guard_conf_value "$fenv")"
 FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
+INSTALL_STAGE="${stage}"
+SKILLS_EXPECTED="$(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))"
 CORRECTION_GROUP_CHAT_IDS="$(_guard_conf_value "$cgroups")"
 EOF
 }
@@ -3451,6 +3524,14 @@ CRON
 )"
 }
 
+# install_verify_command -- `neurootdel-verify` (VERIFY_BIN): the end-of-stage check, for the student
+# (sudo) and the agents any time. A link to the root-owned copy in the lib dir.
+install_verify_command() {
+    install -d -m 0755 -o root -g root "$(dirname "$VERIFY_BIN")"
+    ln -sfn "${GUARD_LIB_DIR}/verify-stage.sh" "$VERIFY_BIN" \
+        || warn "Could not link ${VERIFY_BIN}; run the check as: sudo bash ${GUARD_LIB_DIR}/verify-stage.sh"
+}
+
 install_guard() {
     step 12 "Installing agent guard: session reset, memory backup, watchdog (cron ON)"
 
@@ -3511,6 +3592,7 @@ CRON
     install_memory_weight_cron
     install_auth_watch_cron
     install_root_requests_cron
+    install_verify_command
     ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight,auth-watch,root-requests}"
 }
 
@@ -4124,9 +4206,9 @@ Installed on this VPS:
   - Claude:    ${AGENT_HOME}/.local/bin/claude  (per-user, on PATH)
   - Jarvis:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/  (systemd: ${JARVIS_UNIT})
                env: ${JARVIS_ENV_DIR}/channel.env
-  - Coder:     $([[ "$CODER_INSTALLED" == "1" ]] && echo "${AGENT_HOME}/.claude-lab/coder/.claude/  (systemd: ${CODER_UNIT}, env: ${CODER_ENV_DIR}/channel.env, bot: @${CODER_BOT_USERNAME:-<fill-in>})" || echo "not installed (optional third bot: re-run sudo bash install.sh and answer the Coder token question)")
+  - Coder:     $([[ "$CODER_INSTALLED" == "1" ]] && echo "${AGENT_HOME}/.claude-lab/coder/.claude/  (systemd: ${CODER_UNIT}, env: ${CODER_ENV_DIR}/channel.env, bot: @${CODER_BOT_USERNAME:-<fill-in>})" || echo "not installed: intensive stage (its own bot): sudo bash install.sh --stage intensive")
   - Richard:   ${RICHARD_HOME}                       (systemd: claude-richard)
-  - Auditor:   $([[ "$AUDITOR_INSTALLED" == "1" ]] && echo "$(auditor_hermes_home)/  (Hermes on GPT, systemd: ${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT}, bot: @${AUDITOR_BOT_USERNAME:-<fill-in>}, role: $(auditor_hermes_home)/SOUL.md)" || echo "not installed (optional own bot: re-run sudo bash install.sh and answer the Auditor token question)")
+  - Auditor:   $([[ "$AUDITOR_INSTALLED" == "1" ]] && echo "$(auditor_hermes_home)/  (Hermes on GPT, systemd: ${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT}, bot: @${AUDITOR_BOT_USERNAME:-<fill-in>}, role: $(auditor_hermes_home)/SOUL.md)" || echo "not installed: intensive stage (its own bot): sudo bash install.sh --stage intensive")
   - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  ($(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} )) skills)
   - Login watch: hourly, the agent's own bot tells you when Claude login is lost
                  (stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP)
@@ -4187,6 +4269,11 @@ $(_auditor_final_notes)
   $(printf '%b' "$C_YELLOW")5.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
       If Jarvis dies, the student messages Richard:  ${richard_label}
 
+  $(printf '%b' "$C_YELLOW")6.$(printf '%b' "$C_NC") End-of-stage check (stage: ${STAGE:-workshop}), runs below now and any time later,
+      after the logins of steps 1-2 run it again, every line must be ✅:
+
+        sudo neurootdel-verify
+
 EOF
 }
 
@@ -4194,14 +4281,46 @@ EOF
 # MAIN
 # =============================================================================
 
+# parse_args <args...> -- --solo, --stage workshop|intensive (or --stage=...). A wrong stage stops here.
+parse_args() {
+    while (($#)); do
+        case "$1" in
+            --solo) SOLO=1 ;;
+            --stage)
+                [[ $# -ge 2 ]] || die "--stage needs a value: workshop or intensive."
+                STAGE_ARG="$2"; shift ;;
+            --stage=*) STAGE_ARG="${1#--stage=}"; [[ -n "$STAGE_ARG" ]] || die "--stage needs a value: workshop or intensive." ;;
+            *) warn "Unknown argument ignored: $1" ;;
+        esac
+        shift
+    done
+    [[ -z "$STAGE_ARG" || "$STAGE_ARG" == workshop || "$STAGE_ARG" == intensive ]] \
+        || die "--stage must be workshop or intensive (got: ${STAGE_ARG:-<empty>})."
+}
+
+# run_stage_verify -- the end-of-stage check (verify-stage.sh): what was taught and installed, ✅/❌.
+# A ❌ right after install is normal before the logins (services start after them): the final notes
+# say to run `sudo neurootdel-verify` again once they are done. Never fails the install itself.
+run_stage_verify() {
+    step 14 "End-of-stage check (${STAGE}): what is installed and working"
+    local v="${GUARD_LIB_DIR}/verify-stage.sh"
+    if [[ ! -f "$v" ]]; then
+        warn "${v} missing -- the end-of-stage check did not run."
+        return 0
+    fi
+    if bash "$v" --stage "$STAGE"; then
+        ok "End-of-stage check: everything passed."
+    else
+        warn "End-of-stage check has ❌ above. Fix them (hint under each), then run again: sudo neurootdel-verify"
+    fi
+}
+
 main() {
     if [[ "${1:-}" == "--rollback" ]]; then
         rollback_to_gateway
         return 0
     fi
-    if [[ "${1:-}" == "--solo" ]]; then
-        SOLO=1
-    fi
+    parse_args "$@"
 
     banner
     preflight
@@ -4236,6 +4355,7 @@ main() {
     enable_services
     report_claude_plan
     final_instructions
+    run_stage_verify
 }
 
 # Tests source this file with INSTALL_SH_SOURCED_FOR_TESTING=1 to reach helpers.
