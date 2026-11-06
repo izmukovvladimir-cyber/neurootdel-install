@@ -8,6 +8,12 @@ Runs as root from /etc/cron.d/<user>-agents-guard once a minute. One tick:
                      agent never re-sends an answered message).
   2. stall           permission question held >= 3 ticks (alert, never pressed);
                      long turn frozen (>= 20 min, token counter still for 10 ticks) -> restart.
+  2b. stuck input    a message the agent already received lies in the input box and no turn runs
+                     (text pasted, its Enter lost in the delivery race): after INPUT_NUDGE_AFTER the
+                     guard presses Enter, at most INPUT_NUDGE_MAX times per message, each time only
+                     after a fresh colour snapshot (-e) still shows the same text as typed text (a dim
+                     prompt suggestion is not a message) and no permission question. Still stuck
+                     after INPUT_ALERT_AFTER -> alert. Enter is never pressed on a question.
   3. login           "Not logged in / Please run /login" in a failed tool line -> restart
                      (session re-reads ~/.claude/.credentials.json), max 2 per 6 h, then alert
                      "needs /login by a human".
@@ -37,7 +43,7 @@ Alerts never go to the owner's chat by default: ALERT_MODE in guard.conf decides
 Stops: touch STATE/STOP (all), STATE/AUTOREPLY_OFF (only the limit answer),
        STATE/LIMIT_NOTICE_OFF (only the limit notice of part 4a),
        STATE/RESTART_CHECK_OFF (only the restart check of part 5a),
-       STATE/QUEUE_OFF (only the restart queue).
+       STATE/QUEUE_OFF (only the restart queue), STATE/INPUT_NUDGE_OFF (only part 2b).
 Modes: --dry-run (nothing sent, restarted, nudged or written; prints decisions),
        --drain (prints outbox as JSON), --ack ID... (deletes delivered items),
        --test-alert (writes ONE "[ТЕСТ]" alert through the configured route).
@@ -117,6 +123,9 @@ NUDGE_GAP_SEC = 900
 NUDGE_MAX = 2
 AUTO_RESTART_COOLDOWN = 1800
 LOGIN_RESTARTS_PER_6H = 2
+INPUT_NUDGE_AFTER = 120  # s a received message may lie in the input box before Enter is pressed
+INPUT_NUDGE_MAX = 3      # presses per message; more is not a delivery race but a session that takes no input
+INPUT_ALERT_AFTER = 600  # s still in the box after the presses -> alert (restart is the human's call)
 AUDITOR_HEARTBEAT_MAX = 600
 AUDITOR_ANSWER_SEC = 1200
 USAGE_THRESHOLDS = (80, 95)
@@ -138,6 +147,12 @@ _CLOCK = re.compile(r"(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*
                     r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", re.I)
 _USAGE = re.compile(r"used (\d{1,3})% of your (weekly|session) limit", re.I)
 _MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+# part 2b: the input box is the "❯" line down to the lower frame; a menu item ("❯ 1. Yes") is a question
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_PROMPT_LINE = re.compile(r"^❯\s*(.*)$")
+_MENU_ITEM = re.compile(r"^(?:❯\s*)?[1-9]\.\s+\S")
+_FRAME_LINE = re.compile(r"^[─━]{3,}$")
+_ASKS = ("do you want", "would you like")
 
 
 # ---------- helpers ----------
@@ -206,6 +221,17 @@ def capture(agent: str, overrides: dict[str, str]) -> str | None:
     return r.stdout if r.returncode == 0 and r.stdout.strip() else None
 
 
+def capture_colour(agent: str, overrides: dict[str, str]) -> str | None:
+    """Snapshot WITH colour codes (-e): the prompt suggestion differs from a typed message only by SGR 2."""
+    if agent in overrides:
+        return Path(overrides[agent]).read_text(encoding="utf-8")
+    sess = AGENTS[agent]["tmux"]
+    if not sess:
+        return None
+    r = run(["runuser", "-u", USER, "--", "tmux", "-L", sess, "capture-pane", "-t", sess, "-p", "-e"], 15)
+    return r.stdout if r.returncode == 0 and r.stdout.strip() else None
+
+
 def tail_lines(pane: str, n: int) -> list[str]:
     return [ln for ln in pane.splitlines() if ln.strip()][-n:]
 
@@ -233,6 +259,97 @@ def question(pane: str) -> str | None:
     if "Do you want to proceed?" in tail or ("Enter to select" in tail and "Esc to cancel" in tail):
         return hashlib.sha256(tail.encode()).hexdigest()[:16]
     return None
+
+
+def _hint_only(raw: str) -> bool:
+    """True when everything after "❯" on this raw line is dim (SGR 2): a CLI suggestion, not a message.
+
+    SGR is parsed by its grammar: the "2" inside 38;2;R;G;B or 38;5;N is a colour, not dimness. A line
+    without colour codes gives False (unknown counts as a message: the price is one alert, not a lost
+    message of the owner).
+    """
+    dim = seen_arrow = saw_text = False
+    i = 0
+    while i < len(raw):
+        m = _ANSI.match(raw, i)
+        if m:
+            if m.group(0).endswith("m"):
+                params = m.group(0)[2:-1].split(";")
+                j = 0
+                while j < len(params):
+                    part = params[j]
+                    if part in ("38", "48", "58"):
+                        nxt = params[j + 1] if j + 1 < len(params) else ""
+                        j += 3 if nxt == "5" else 5 if nxt == "2" else 2
+                        continue
+                    if part == "2":
+                        dim = True
+                    elif part in ("", "0", "22"):
+                        dim = False
+                    j += 1
+            i = m.end()
+            continue
+        ch = raw[i]
+        if not seen_arrow:
+            seen_arrow = ch == "❯"
+        elif not ch.isspace():
+            if not dim:
+                return False
+            saw_text = True
+        i += 1
+    return saw_text
+
+
+def stuck_input(pane: str | None) -> tuple[str, str] | None:
+    """(signature, text) when the input box holds a message and no turn runs, else None.
+
+    The whole box counts (a long message wraps below the "❯" line), so two messages with the same
+    first row are two events. A running turn, a permission question or a menu is never stuck input.
+    """
+    if not pane or not pane.strip():
+        return None
+    raw_lines = pane.splitlines()
+    lines = [_ANSI.sub("", ln).rstrip() for ln in raw_lines]
+    nonempty = [ln for ln in lines if ln.strip()]
+    if not nonempty or "esc to interrupt" in "\n".join(nonempty[-3:]).lower():
+        return None
+    if question("\n".join(lines)):
+        return None
+    tail = nonempty[-14:]
+    if any(ln.strip().lower().startswith(_ASKS) for ln in tail):
+        return None
+    # the box is bounded by its two frames, however long the message: its first line is the "❯" line.
+    # A frame starts in column 0; the message's own lines are indented, so a "───" typed in it is text.
+    frames = [i for i, ln in enumerate(lines) if _FRAME_LINE.match(ln)]
+    idx = bottom = None
+    if len(frames) >= 2:
+        first = next((i for i in range(frames[-2] + 1, frames[-1]) if lines[i].strip()), None)
+        if first is not None and _PROMPT_LINE.match(lines[first].strip()):
+            idx, bottom = first, frames[-1]
+    if idx is None:  # no framed box: the "❯" line must be near the bottom of the screen
+        in_tail = {ln.strip() for ln in tail}
+        idx = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].strip() and lines[i].strip() in in_tail
+                    and _PROMPT_LINE.match(lines[i].strip())), None)
+    if idx is None:
+        return None
+    head = lines[idx].strip()
+    if _MENU_ITEM.match(head):
+        return None
+    parts = [_PROMPT_LINE.match(head).group(1).strip()]
+    if bottom is not None:  # a framed box: every line up to the lower frame is message text, "❯" lines too
+        parts += [ln.strip() for ln in lines[idx + 1:bottom] if ln.strip()]
+    else:
+        for ln in lines[idx + 1:]:
+            st = ln.strip()
+            if not st:
+                continue
+            if _FRAME_LINE.match(st) or _PROMPT_LINE.match(st):  # a numbered line is message text
+                break
+            parts.append(st)
+    text = " ".join(x for x in parts if x).strip()
+    if not text or _hint_only(raw_lines[idx]):
+        return None
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16], text
 
 
 def parse_clock(text: str, now: datetime) -> tuple[datetime, bool] | None:
@@ -608,6 +725,63 @@ class Guard:
         except (OSError, ValueError):
             return False
 
+    def press_enter(self, agent: str) -> bool:
+        if self.dry:
+            self.say(f"[dry] ENTER {agent}")
+            return True
+        sess = AGENTS[agent]["tmux"]
+        return run(["runuser", "-u", USER, "--", "tmux", "-L", sess, "send-keys", "-t", sess, "Enter"], 15).returncode == 0
+
+    def do_input(self, agent: str, pane: str | None, st: dict) -> None:
+        """Part 2b: press Enter on a received message stuck in the input box (never on a question)."""
+        name = name_of(agent)
+        if pane is None:  # no snapshot is not "the box is empty": keep the count, decide next tick
+            return
+        if (STATE_DIR / "INPUT_NUDGE_OFF").exists() or is_busy(pane) or limit_state(pane, self.now):
+            st.pop("inp", None)
+            return
+        got = stuck_input(pane)
+        if not got:
+            st.pop("inp", None)
+            return
+        now = int(time.time())
+        prev = st.get("inp")
+        if not (isinstance(prev, list) and len(prev) == 4 and prev[0] == got[0]
+                and all(isinstance(x, int) and not isinstance(x, bool) for x in prev[1:])
+                and 0 < prev[1] <= now and 0 <= prev[2] <= INPUT_NUDGE_MAX):
+            prev = [got[0], now, 0, 0]  # new message (or unreadable record): count from now
+        st["inp"] = prev
+        held = now - prev[1]
+        if held < INPUT_NUDGE_AFTER:
+            return
+        # a fresh colour snapshot right before acting: the CLI may have sent the text itself and stopped
+        # on a question meanwhile (Enter would approve an unread command), or the text is a dim suggestion
+        try:
+            fresh = capture_colour(agent, self.ov)
+        except (OSError, subprocess.SubprocessError):
+            fresh = None
+        if fresh is None:
+            self.say(f"INPUT {agent}: снимок перед нажатием не снят, Enter не нажимаю")
+            return
+        plain = _ANSI.sub("", fresh)
+        again = None if is_busy(plain) or limit_state(plain, self.now) else stuck_input(fresh)
+        if not again or again[0] != got[0]:
+            self.say(f"INPUT {agent}: в поле подсказка, ход пошёл или экран изменился, Enter не нажимаю")
+            st.pop("inp", None)
+            return
+        if prev[2] < INPUT_NUDGE_MAX and now - prev[3] >= INPUT_NUDGE_AFTER:
+            prev[3] = now  # a failed press waits out the gap too
+            if self.press_enter(agent):  # a sent key is not a started turn: the alert below still applies
+                prev[2] += 1
+                self.say(f"INPUT {agent}: сообщение в поле ввода {held} с, дожато Enter (попытка {prev[2]})")
+            else:
+                self.say(f"INPUT {agent}: Enter НЕ отправлен, сообщение остаётся в поле")
+        if held >= INPUT_ALERT_AFTER:
+            self.alert(f"stuckinput:{agent}:{got[0]}",
+                       f"{name}: сообщение лежит в поле ввода {held // 60} мин, ход не пошёл, Enter нажат "
+                       f"{prev[2]} раз. Лечится перезапуском: echo {agent} > /tmp/channel-restart-request "
+                       f"(текст из поля при перезапуске потеряется, его надо повторить). «{again[1][:120]}»")
+
     # ---------- tick parts ----------
 
     def do_queue(self, panes: dict[str, str | None]) -> None:
@@ -689,6 +863,7 @@ class Guard:
                 self.alert(f"question:{agent}:{q}", f"{name}: висит на вопросе разрешения {st['qn']} мин, ход стоит. Сторож не нажимает, нужен человек.")
         else:
             st.pop("q", None), st.pop("qn", None)
+            self.do_input(agent, pane, st)
         # frozen long turn
         ts = turn_state(pane) if pane else None
         if ts and ts[2] and ts[0] >= LONG_TURN_MIN:
