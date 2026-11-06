@@ -266,7 +266,8 @@ UNIT="${TDIR}/unit"
 render_template "${REPO}/templates/channel-jarvis.service" "$UNIT" \
     USER edgelab HOME /home/edgelab PLUGIN_DIR /pd ENV_FILE /etc/dashi-plugin/jarvis/channel.env \
     CONFIRM_SCRIPT /usr/local/lib/edgelab/channel-confirm.sh \
-    START_SCRIPT /usr/local/lib/edgelab/channel-start.sh
+    START_SCRIPT /usr/local/lib/edgelab/channel-start.sh MODEL claude-opus-5-5
+check "unit: explicit model id"     grep -q -- ' claude --model claude-opus-5-5 ' "$UNIT"
 check "unit: start via channel-start.sh" grep -q '^ExecStart=/bin/bash /usr/local/lib/edgelab/channel-start.sh channel-jarvis claude ' "$UNIT"
 check "unit: no placeholders left"   hasnt "$UNIT" '\{\{'
 check "unit: user"                   has "$UNIT" "User=edgelab"
