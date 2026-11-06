@@ -1,0 +1,34 @@
+# Auditor (Hermes Agent, model through the owner's ChatGPT login). Installed by neurootdel-install.
+# Stop: sudo systemctl disable --now hermes-auditor
+[Unit]
+Description=Auditor -- Hermes gateway (Telegram, openai-codex)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+ExecStart="{{HERMES_BIN}}" "gateway" "run"
+WorkingDirectory={{HERMES_HOME}}
+Environment="HOME={{HOME}}"
+Environment="USER={{USER}}"
+Environment="LOGNAME={{USER}}"
+Environment="PATH={{HOME}}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="HERMES_HOME={{HERMES_HOME}}"
+Environment="HERMES_SUPERVISED_CHILD=1"
+Restart=always
+RestartSec=5
+RestartForceExitStatus=75
+SuccessExitStatus=75
+RestartPreventExitStatus=78
+KillMode=mixed
+KillSignal=SIGTERM
+ExecReload=/bin/kill -USR1 $MAINPID
+TimeoutStopSec=70
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

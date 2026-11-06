@@ -1,0 +1,6 @@
+name: readonly
+version: 1.0.0
+description: "Auditor is read-only: file-writing tools are refused for the agent and every delegate_task child."
+author: "neurootdel-install"
+provides_hooks:
+  - pre_tool_call

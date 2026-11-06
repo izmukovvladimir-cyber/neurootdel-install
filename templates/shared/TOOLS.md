@@ -10,6 +10,8 @@ Before saying "it is down", check the live state (`systemctl status`, `ss -ltnp`
 | `channel-jarvis` | Jarvis, Telegram channel (tmux + claude) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
 | `channel-coder` | Coder, technical specialist (only when installed with its own bot) | webhook 127.0.0.1 (TELEGRAM_WEBHOOK_PORT) |
 | `claude-richard` | Richard, server doctor (SDK bot) | |
+| `hermes-auditor` | Auditor, Hermes Agent on GPT (only when installed with its own bot) | api_server 127.0.0.1:8642 |
+| `hermes-auditor-bridge` | bridge agents <-> Auditor (folder ~/var/lib/auditor-bus) | |
 
 Restarting another agent's service is Richard's job. Your own service: `echo <agent> > /tmp/channel-restart-request`.
 
@@ -23,6 +25,8 @@ Restarting another agent's service is Richard's job. Your own service: `echo <ag
   near expiry) -> one line to the owner by the agent's own bot. Stop: touch /var/lib/{{USER}}-auth-watch/STOP.
 - `memory-backup.sh` (cron hourly, --auto = 03:30 owner time): ~/backups/memory, 14 days.
 - `include_weight.py`: memory weight per turn. `compact-open-items-reminder.py`: SessionStart after compaction.
+- `auditor-ask.py --from <agent> "task"`: a task to the Auditor; `--status <id>` shows it. The answer comes into
+  the sender's chat. Stop the bridge: touch ~/var/lib/auditor-bus/STOP.
 - `gbrain-call.py`: shared memory client (only when gbrain is installed on this server).
 
 ## Hooks `{{LIB}}/hooks/`

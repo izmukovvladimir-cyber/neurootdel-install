@@ -1,0 +1,8 @@
+name: secretguard
+version: 1.0.0
+description: "Passwords, keys and tokens never leave in the auditor's answers or outbound tool calls."
+author: "neurootdel-install"
+provides_hooks:
+  - pre_tool_call
+  - transform_llm_output
+  - pre_llm_call

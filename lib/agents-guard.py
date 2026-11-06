@@ -103,7 +103,7 @@ RICHARD_UNIT = CONF.richard_unit
 if RICHARD_UNIT and Path(f"/etc/systemd/system/{RICHARD_UNIT}.service").exists():
     AGENTS["richard"] = {"unit": RICHARD_UNIT, "tmux": None, "name": "Richard", "env": None, "owner_dm": False}
 QUEUE_ORDER = [a for a in AGENTS if a != "richard"] + (["richard"] if "richard" in AGENTS else [])  # richard last
-AUDITOR_UNITS = tuple(u for u in ("hermes-auditor", "hermes-auditor-swarm-bridge")
+AUDITOR_UNITS = tuple(u for u in ("hermes-auditor", "hermes-auditor-swarm-bridge", "hermes-auditor-bridge")
                       if Path(f"/etc/systemd/system/{u}.service").exists())
 AUDITOR_STATE = HOME / ".hermes/gateway_state.json"
 AUDITOR_DB = HOME / ".hermes/state.db"

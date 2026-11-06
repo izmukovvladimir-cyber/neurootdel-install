@@ -1,0 +1,10 @@
+name: factcheck
+version: 1.0.0
+description: "Facts in the auditor's outgoing text only after a source was read in the same turn."
+author: "neurootdel-install"
+provides_hooks:
+  - post_tool_call
+  - transform_llm_output
+  - pre_tool_call
+  - pre_llm_call
+  - subagent_start
