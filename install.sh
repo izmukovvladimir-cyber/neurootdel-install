@@ -56,6 +56,9 @@
 #   NEUROOTDEL_BRIEF_DIR          Where the client's brief and call transcripts lie, e.g.
 #                                 ~/knowledge/istochniki/ (empty = "бриф не передан")
 #   NEUROOTDEL_CORRECTION_GROUP_CHAT_IDS  Groups (-100...) where the owner's corrections are caught
+#   NEUROOTDEL_BACKUP_REPO        Owner's PRIVATE GitHub repo for the nightly off-server memory copy,
+#                                 git@github.com:<owner>/<repo>.git (kept on re-run; "" = copy off).
+#                                 Later or instead: sudo neurootdel-offsite-setup <repo>
 
 set -euo pipefail
 
@@ -189,6 +192,8 @@ apply_install_names() {
     INSTALL_STATE_ROOT="/var/lib/${INSTALL_TAG}"
     # End-of-stage check (lib/verify-stage.sh), one name for the student on every server.
     VERIFY_BIN="/usr/local/bin/neurootdel-verify"
+    # Off-server memory copy setup (lib/offsite-setup.sh): deploy key, repo, access check.
+    OFFSITE_SETUP_BIN="/usr/local/bin/neurootdel-offsite-setup"
 }
 
 # select_install_names [root] -- one place that decides all names, run at load time.
@@ -840,7 +845,7 @@ install_apt_deps() {
     apt_install_missing \
         ca-certificates gnupg lsb-release software-properties-common \
         sudo \
-        curl wget git jq rsync \
+        curl wget git jq rsync openssh-client \
         build-essential \
         systemd \
         logrotate \
@@ -3247,7 +3252,7 @@ _guard_conf_has() {
 # when this run gave none.
 render_guard_conf() {
     local existing="${1:-}"
-    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle stage cgroups
+    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle stage cgroups offsite
     agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
     wrules="$(env_value WEIGHT_RULES_KB)"
     [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
@@ -3302,6 +3307,14 @@ render_guard_conf() {
     # Groups whose owner messages count as corrections: only this explicit list (kept on re-run).
     cgroups=$(_gate_conf_pick "$existing" CORRECTION_GROUP_CHAT_IDS)
     [[ -z "$cgroups" || "$cgroups" =~ ^-[0-9]+([\ ,]+-[0-9]+)*$ ]] || { warn "CORRECTION_GROUP_CHAT_IDS '${cgroups}' is not a list of group ids (-100...) -- no group counts."; cgroups=""; }
+    # Off-server memory copy repo (memory-offsite.sh): env (an empty one clears), else kept; https form accepted.
+    offsite=$(_gate_conf_pick "$existing" BACKUP_REPO)
+    _env_is_set BACKUP_REPO || offsite=$(_guard_conf_get "$existing" OFFSITE_REPO)
+    if [[ "$offsite" =~ ^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/?$ ]]; then
+        offsite="git@github.com:${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}.git"
+    fi
+    [[ -z "$offsite" || "$offsite" =~ ^git@github\.com:[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.git$ ]] \
+        || { warn "NEUROOTDEL_BACKUP_REPO '${offsite}' is not git@github.com:<owner>/<repo>.git -- off-server copy off."; offsite=""; }
     cat <<EOF
 # ${INSTALL_TAG} v${INSTALLER_VERSION}: settings of the agent guard scripts. No secrets here.
 # A re-run of the installer rewrites this file and keeps CHANNEL_AGENTS, AGENT_LABELS,
@@ -3327,6 +3340,9 @@ render_guard_conf() {
 # CORRECTION_GROUP_CHAT_IDS: groups (-100...) where the owner's messages are caught as corrections by
 #   hooks/correction-detector.py; empty = only the owner's private chat. Kept on re-run, an env
 #   NEUROOTDEL_CORRECTION_GROUP_CHAT_IDS wins ("" clears).
+# OFFSITE_REPO: the owner's private GitHub repo of the nightly off-server memory copy (memory-offsite.sh),
+#   empty = no copy off the server (the morning watch and neurootdel-verify say so). Set it with
+#   sudo neurootdel-offsite-setup <repo>; kept on re-run, an env NEUROOTDEL_BACKUP_REPO wins ("" clears).
 AGENT_USER="$(_guard_conf_value "$AGENT_USER")"
 AGENT_HOME="$(_guard_conf_value "$AGENT_HOME")"
 LIB_DIR="$(_guard_conf_value "$GUARD_LIB_DIR")"
@@ -3353,6 +3369,7 @@ FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
 INSTALL_STAGE="${stage}"
 SKILLS_EXPECTED="$(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))"
 CORRECTION_GROUP_CHAT_IDS="$(_guard_conf_value "$cgroups")"
+OFFSITE_REPO="${offsite}"
 EOF
 }
 
@@ -3566,6 +3583,29 @@ install_verify_command() {
         || warn "Could not link ${VERIFY_BIN}; run the check as: sudo bash ${GUARD_LIB_DIR}/verify-stage.sh"
 }
 
+# install_memory_offsite -- the nightly off-server copy of the memory to the owner's private GitHub repo
+# (memory-offsite.sh, as the agent user) and its morning watch (memory-offsite-watch.sh, root). The
+# deploy key is made now; the repo comes from NEUROOTDEL_BACKUP_REPO or later from neurootdel-offsite-setup.
+install_memory_offsite() {
+    local st="${AGENT_HOME}/backups/offsite"
+    bash "${GUARD_LIB_DIR}/offsite-setup.sh" --init \
+        || warn "Off-server copy: deploy key not made; run: sudo neurootdel-offsite-setup"
+    install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-offsite-watch"
+    ln -sfn "${GUARD_LIB_DIR}/offsite-setup.sh" "$OFFSITE_SETUP_BIN" \
+        || warn "Could not link ${OFFSITE_SETUP_BIN}; run: sudo bash ${GUARD_LIB_DIR}/offsite-setup.sh"
+    _install_cron_file "${AGENT_USER}-memory-offsite" "$(cat <<CRON
+# ${INSTALL_TAG} v${INSTALLER_VERSION}: nightly OFF-SERVER copy of the agents' memory to the owner's private GitHub
+# repo (OFFSITE_REPO in ${GUARD_LIB_DIR}/guard.conf; set it: sudo $(basename "$OFFSITE_SETUP_BIN") <repo>).
+# Hourly; --auto copies at 03:45 and watches at 09:40 by the owner's clock. No force push, secrets masked.
+# Stops: copy touch ${st}/STOP ; watch touch /var/lib/${AGENT_USER}-offsite-watch/STOP. Log: ${st}/offsite.log
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+45 * * * * ${AGENT_USER} /bin/bash ${GUARD_LIB_DIR}/memory-offsite.sh --auto 2>>${st}/offsite.err
+40 * * * * root /bin/bash ${GUARD_LIB_DIR}/memory-offsite-watch.sh --auto >> /var/log/${AGENT_USER}-offsite-watch.log 2>&1
+CRON
+)"
+}
+
 install_guard() {
     step 12 "Installing agent guard: session reset, memory backup, watchdog (cron ON)"
 
@@ -3590,10 +3630,10 @@ install_guard() {
     # path the agent swapped for a symlink never hands it a root-owned target.
     local shared_state="${AGENT_HOME}/.claude-lab/shared/state"
     as_agent mkdir -p "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
-        "${AGENT_HOME}/backups/memory" \
+        "${AGENT_HOME}/backups/memory" "${AGENT_HOME}/backups/offsite" \
         || die "Could not create guard state dirs as ${AGENT_USER}."
     as_agent chmod 0700 "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
-        "${AGENT_HOME}/backups" "${AGENT_HOME}/backups/memory" || true
+        "${AGENT_HOME}/backups" "${AGENT_HOME}/backups/memory" "${AGENT_HOME}/backups/offsite" || true
 
     systemctl enable --now cron 2>/dev/null \
         || warn "cron service not started -- guard jobs will run after next reboot."
@@ -3621,13 +3661,14 @@ PATH=/usr/local/bin:/usr/bin:/bin
 CRON
 )"
 
+    install_memory_offsite
     install_agents_guard_cron
     install_service_watch_cron "$shared_state"
     install_memory_weight_cron
     install_auth_watch_cron
     install_root_requests_cron
     install_verify_command
-    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,agents-guard,service-watch,memory-weight,auth-watch,root-requests}"
+    ok "Guard installed in ${GUARD_LIB_DIR}; cron: /etc/cron.d/${AGENT_USER}-{agents-reset,memory-backup,memory-offsite,agents-guard,service-watch,memory-weight,auth-watch,root-requests}"
 }
 
 # =============================================================================
@@ -4193,6 +4234,34 @@ report_claude_plan() {
 }
 
 # _auditor_final_notes -- the owner's ChatGPT login step for the Auditor (only when it is installed).
+# _offsite_pubkey -- the public deploy key read AS the agent (a link it planted never makes root print
+# another file), shown only when it has the shape of a key.
+_offsite_pubkey() {
+    local k
+    k=$(as_agent head -n 1 -- "${AGENT_HOME}/.ssh/offsite_ed25519.pub" 2>/dev/null | head -c 2000 || true)
+    if [[ "$k" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*(\ [A-Za-z0-9._@-]*)?$ ]]; then printf '%s' "$k"
+    else printf '<no key yet: sudo %s>' "$(basename "$OFFSITE_SETUP_BIN")"; fi
+}
+
+# _offsite_final_notes -- the off-server memory copy: on, or the key and the three steps to turn it on.
+_offsite_final_notes() {
+    local repo
+    repo=$(_guard_conf_get "${GUARD_LIB_DIR}/guard.conf" OFFSITE_REPO)
+    if [[ -n "$repo" ]]; then
+        printf '  %b2b.%b Off-server memory copy: nightly to %s (check: sudo %s %s)\n' "$C_YELLOW" "$C_NC" "$repo" "$(basename "$OFFSITE_SETUP_BIN")" "$repo"
+        return 0
+    fi
+    cat <<EON
+  $(printf '%b' "$C_YELLOW")2b.$(printf '%b' "$C_NC") Off-server memory copy is OFF (no GitHub repo given). The STUDENT makes a PRIVATE repo on github.com,
+      adds this deploy key there (Settings -> Deploy keys, "Allow write access"):
+
+        $(_offsite_pubkey)
+
+      then: sudo $(basename "$OFFSITE_SETUP_BIN") git@github.com:<owner>/<repo>.git
+
+EON
+}
+
 _auditor_final_notes() {
     [[ "$AUDITOR_INSTALLED" == "1" ]] || return 0
     local state="not logged in yet"
@@ -4279,6 +4348,7 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         sudo bash install.sh --rollback
 
 $(_auditor_final_notes)
+$(_offsite_final_notes)
   $(printf '%b' "$C_YELLOW")3.$(printf '%b' "$C_NC") Smoke-checks:
 
         id ${AGENT_USER}                                      # uid >= 1000

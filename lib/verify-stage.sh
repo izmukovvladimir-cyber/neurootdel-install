@@ -145,6 +145,20 @@ agent_crontab() {
     if [[ $EUID -eq 0 ]]; then crontab -u "$U" -l 2>/dev/null; else crontab -l 2>/dev/null; fi
 }
 
+# offsite_fresh <cron file> <stop> <status> -- the copy is on and its last run is OK, at most 30 h old.
+# No run yet (no status) is not a copy: ❌ until the first one (neurootdel-offsite-setup makes it at once).
+offsite_fresh() {
+    local st t tag rest
+    [[ -f "$1" && ! -e "$2" && -f "$3" ]] || return 1
+    read -r st t tag rest <"$3" || return 1
+    [[ "$st" == OK && "$t" =~ ^[0-9]+$ ]] || return 1
+    # The OK must be of the repo in guard.conf now, not of an earlier one.
+    [[ "$tag" == "$(printf '%s' "${OFFSITE_REPO:-}" | sha256sum | cut -c1-12)" ]] || return 1
+    local now
+    now=$(date +%s)
+    (( t <= now + 600 && now - t < 30 * 3600 ))
+}
+
 listed_in() { [[ " ${2} " == *" ${1} "* ]]; }
 
 auditor_logged_in() {
@@ -222,6 +236,14 @@ section_server() {
     check "Ночной бэкап памяти" \
         "запусти установщик снова; если стоит стоп: rm ${H}/backups/memory/STOP" \
         cron_on "${U}-memory-backup" "${H}/backups/memory/STOP"
+    if [[ -z "${OFFSITE_REPO:-}" ]]; then
+        no_ "Копии памяти вне сервера нет (репозиторий GitHub не подключён)" \
+            "sudo neurootdel-offsite-setup покажет ключ и 3 шага: приватный репозиторий, ключ в Deploy keys с записью, команда с адресом репозитория"
+    else
+        check "Копия памяти вне сервера (GitHub, каждую ночь)" \
+            "последний прогон не OK или его ещё не было: причина в ${H}/backups/offsite/offsite.log; доступ проверит и сразу выгрузит: sudo neurootdel-offsite-setup ${OFFSITE_REPO}; если стоит стоп: rm ${H}/backups/offsite/STOP" \
+            offsite_fresh "${CRON_DIR}/${U}-memory-offsite" "${H}/backups/offsite/STOP" "${H}/backups/offsite/last"
+    fi
     check "Заявки агентов на root (раз в минуту)" \
         "запусти установщик снова; если стоит стоп: sudo rm ${ETC}/${U}-root-requests.STOP" \
         cron_on "${U}-root-requests" "${ETC}/${U}-root-requests.STOP"
