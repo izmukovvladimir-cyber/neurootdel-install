@@ -10,11 +10,16 @@ EVERY turn. The agent cleans them itself; this script only weighs and signals:
     nudge), repeated next night while the file is still heavy; journals: closed items to
     core/archive, promises stay word for word; rules/CLAUDE.md: fold in the same turn,
     no owner rule is dropped;
-  - rules/CLAUDE.md over the cap: one line per day into the guard outbox (outbox-put.py,
-    ALERT_MODE in guard.conf) the same night; journals over the cap ESCALATE_DAYS nights in a
-    row, or a failed delivery: the same. The owner gets nothing from this script.
+  - the WHOLE turn (global CLAUDE.md and rules, CLAUDE.md of the ancestors, nested @-includes,
+    the auto-memory MEMORY.md index; include_weight.turn_weight) over WEIGHT_TURN_KB (default
+    100) is signalled like an over-cap rules file;
+  - rules/CLAUDE.md/whole turn over the cap, or a failed delivery: one line per day into the
+    guard outbox (outbox-put.py, ALERT_MODE in guard.conf) the same night;
+  - morning (MORNING_HOUR of the owner's clock): agents found heavy tonight are weighed again;
+    still heavy = one line per agent per day into the outbox, from the FIRST night on. The
+    owner gets nothing from this script directly.
 
-Cron: /etc/cron.d/<user>-memory-weight, root, nightly after the session reset.
+Cron: /etc/cron.d/<user>-memory-weight, root, hourly; --auto acts at AUTO_HOUR and MORNING_HOUR.
 Stop: touch /var/lib/<user>-memory-weight/STOP
 State: /var/lib/<user>-memory-weight/state.json   Exit 0 when the pass completed, 2 on usage.
 """
@@ -49,8 +54,8 @@ OUTBOX_PUT = LIB / "outbox-put.py"
 AGENTS: dict[str, dict[str, str]] = {
     a: {"env": str(CONF.channel_env(a)), "chat": CONF.owner_tg_id} for a in CONF.channel_agents
 }
-ESCALATE_DAYS = 3
 AUTO_HOUR = 4  # --auto (hourly cron): weigh only in this hour of the owner's clock, after the 04:00 reset
+MORNING_HOUR = 10  # --auto from this hour on: re-weigh tonight's heavy agents until the line is delivered
 
 
 def _kb(raw: dict[str, str], key: str, default: int) -> int:
@@ -67,6 +72,9 @@ STATIC_LIMITS: dict[str, int] = {
     "core/rules.md": _kb(_RAW, "WEIGHT_RULES_KB", 30),
     "CLAUDE.md": _kb(_RAW, "WEIGHT_CLAUDE_KB", 40),
 }
+# The whole turn as Claude Code loads it, not one file: signalled and reported like a static file.
+TURN_KEY = "весь ход"
+TURN_LIMIT = _kb(_RAW, "WEIGHT_TURN_KB", 100)
 try:
     MSK = ZoneInfo(CONF.owner_timezone)  # the "day" of the once-a-day signal is the owner's day
 except (ZoneInfoNotFoundError, ValueError):
@@ -117,6 +125,44 @@ def weigh_rows(agent_dir: Path) -> list:
         raise ValueError("weigh output") from exc
 
 
+# Same isolation for the whole-turn weight: prints [total, own] of include_weight.turn_weight().
+_TURN_CHILD = (
+    "import importlib.util, json, sys\n"
+    "from pathlib import Path\n"
+    "s = importlib.util.spec_from_file_location('iw', sys.argv[1]); m = importlib.util.module_from_spec(s)\n"
+    "sys.modules['iw'] = m; s.loader.exec_module(m)\n"
+    "t = m.turn_weight(Path(sys.argv[2]), None, Path(sys.argv[3]), Path(sys.argv[4]))\n"
+    "print(json.dumps([t.total, t.own]))\n"
+)
+
+
+def weigh_turn(agent_dir: Path) -> tuple[int, int]:
+    """(total, own) bytes of the whole turn. The agents run with the default config dir ~/.claude."""
+    home = CONF.agent_home
+    if os.geteuid() != 0:
+        t = iw.turn_weight(agent_dir, None, home / ".claude", home)
+        return t.total, t.own
+    try:
+        r = subprocess.run(["runuser", "-u", CONF.agent_user, "--", "timeout", "-s", "KILL",
+                            str(WEIGH_TIMEOUT - 10), sys.executable, "-I", "-c", _TURN_CHILD,
+                            str(LIB / "include_weight.py"), str(agent_dir), str(home / ".claude"), str(home)],
+                           capture_output=True, text=True, timeout=WEIGH_TIMEOUT, cwd="/")
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("turn timeout") from exc
+    if r.returncode != 0:
+        raise OSError(f"turn rc={r.returncode}")
+    try:
+        total, own = json.loads(r.stdout)
+        return int(total), int(own)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("turn output") from exc
+
+
+def heavy_turn(agent_dir: Path) -> list[tuple[int, str]]:
+    total, _own = weigh_turn(agent_dir)
+    return [(total, TURN_KEY)] if total > TURN_LIMIT else []
+
+
 def heavy_journals(agent_dir: Path, rows: list | None = None) -> list[tuple[int, str]]:
     """Journal files loaded every turn and over the limit: [(bytes, name)]."""
     rows = weigh_rows(agent_dir) if rows is None else rows
@@ -140,6 +186,8 @@ def heavy_static(agent_dir: Path, rows: list | None = None) -> list[tuple[int, s
 
 
 def limit_for(name: str) -> int:
+    if name == TURN_KEY:
+        return TURN_LIMIT
     return STATIC_LIMITS.get(static_name(name)) or iw.JOURNAL_LIMITS.get(name.split("/")[-1], iw.JOURNAL_LIMIT)
 
 
@@ -163,7 +211,8 @@ def load_state(path: Path) -> dict:
             raise StateError(f"bad entry {key}")
         if any(f in val and not isinstance(val[f], t) for f, t in
                (("days", int), ("last_seen", str), ("notified", (str, type(None))), ("failed", str),
-                ("delivered", (str, type(None))), ("static_reported", (str, type(None))))):
+                ("delivered", (str, type(None))), ("static_reported", (str, type(None))),
+               ("morning", (str, type(None))))):
             raise StateError(f"bad fields {key}")
     return data
 
@@ -196,10 +245,16 @@ def save_state(path: Path, state: dict) -> None:
     os.replace(tmp, path)
 
 
+def _file_line(size: int, name: str) -> str:
+    if name == TURN_KEY:
+        return (f"- весь ход (CLAUDE.md, все @ и вложенные, глобальные файлы, индекс MEMORY.md): "
+                f"{size // 1024} КБ при потолке {TURN_LIMIT // 1024} КБ")
+    return f"- .claude/{name}: {size // 1024} КБ при потолке {limit_for(name) // 1024} КБ"
+
+
 def signal_text(heavy: list[tuple[int, str]], days: int) -> str:
-    files = "\n".join(f"- .claude/{name}: {size // 1024} КБ при потолке {limit_for(name) // 1024} КБ"
-                      for size, name in heavy)
-    static = [name for _size, name in heavy if static_name(name) in STATIC_LIMITS]
+    files = "\n".join(_file_line(size, name) for size, name in heavy)
+    static = [name for _size, name in heavy if name == TURN_KEY or static_name(name) in STATIC_LIMITS]
     fold = ""
     if static:
         fold = (
@@ -266,7 +321,7 @@ def run(agents: list[str], lab: Path, state_path: Path, today: str,
             continue
         try:
             rows = weigh_rows(agent_dir)
-            static = heavy_static(agent_dir, rows)
+            static = heavy_static(agent_dir, rows) + heavy_turn(agent_dir)
             journals = heavy_journals(agent_dir, rows)
             heavy = journals + static
         except (OSError, ValueError) as exc:
@@ -275,7 +330,8 @@ def run(agents: list[str], lab: Path, state_path: Path, today: str,
                 new[agent] = prev  # keep the streak and the delivery marker untouched
             continue
         if not heavy:
-            kept = {k: today for k in ("notified", "delivered", "static_reported") if prev.get(k) == today}
+            kept = {k: today for k in ("notified", "delivered", "static_reported", "morning")
+                    if prev.get(k) == today}
             if kept:
                 new[agent] = kept  # streak ends, the once-a-day markers still hold
             continue
@@ -286,7 +342,8 @@ def run(agents: list[str], lab: Path, state_path: Path, today: str,
         if not journals:  # the escalation streak counts journal nights only
             days = 0
         entry = {"days": days, "last_seen": today, "notified": prev.get("notified"),
-                 "delivered": prev.get("delivered"), "static_reported": prev.get("static_reported")}
+                 "delivered": prev.get("delivered"), "static_reported": prev.get("static_reported"),
+                 "morning": prev.get("morning")}
         if prev.get("failed") == today:
             entry["failed"] = today
         sizes = ", ".join(f"{name.split('/')[-1]} {size // 1024} КБ" for size, name in heavy)
@@ -310,9 +367,6 @@ def run(agents: list[str], lab: Path, state_path: Path, today: str,
                 f"{name} {size // 1024} КБ при пороге {limit_for(name) // 1024} КБ" for size, name in static)
                 + (", агенту ушёл сигнал свернуть" if entry.get("delivered") == today
                    else ", сигнал агенту НЕ ушёл"))
-        if days >= ESCALATE_DAYS:
-            jsizes = ", ".join(f"{name.split('/')[-1]} {size // 1024} КБ" for size, name in journals)
-            report.append(f"- {agent}: не чистит память {days} ночей подряд ({jsizes})")
         new[agent] = entry
     if blocked:
         new["_blocked"] = today
@@ -320,6 +374,58 @@ def run(agents: list[str], lab: Path, state_path: Path, today: str,
     flush_report(report, old, new, today, alert)
     save_state(state_path, new)
     return report
+
+
+def morning(agents: list[str], lab: Path, state_path: Path, today: str,
+            alert: Callable[[str, str], bool]) -> int:
+    """Morning re-check of the agents found heavy tonight. Returns how many are still heavy.
+
+    One line per agent per day into the outbox, from the first night on. The day's mark is saved
+    only after the outbox took the message, so a failed send is retried by the next hourly run
+    (the re-weigh is live: an agent that cleaned up in between is not reported). Returns -1 when
+    the state cannot be trusted; that is said in the outbox once a day.
+    """
+    try:
+        state = load_state(state_path)
+    except StateError as exc:
+        mark = state_path.with_name(f"morning-state-error-{today}")
+        if not mark.exists():
+            try:
+                if alert("memory-weight-morning", f"- состояние сторожа памяти испорчено ({exc}), "
+                                                  "утренний перезамер не выполнен"):
+                    mark.touch()
+            except Exception as err:  # noqa: BLE001
+                log.error("outbox: %s", type(err).__name__)
+        return -1
+    lines: list[str] = []
+    due: list[str] = []
+    for agent in dict.fromkeys(agents):
+        entry = state.get(agent)
+        if not isinstance(entry, dict) or entry.get("last_seen") != today or entry.get("morning") == today:
+            continue
+        agent_dir = lab / agent
+        try:
+            rows = weigh_rows(agent_dir)
+            heavy = heavy_journals(agent_dir, rows) + heavy_static(agent_dir, rows) + heavy_turn(agent_dir)
+            what = ", ".join(f"{name.split('/')[-1]} {size // 1024} КБ" for size, name in heavy)
+        except (OSError, ValueError) as exc:
+            heavy, what = [(0, "")], f"не взвешена ({type(exc).__name__})"
+        due.append(agent)
+        if heavy:
+            nights = entry.get("days") or 1
+            lines.append(f"- {agent}: память не убрана после ночного сигнала, ночь {nights}: {what}")
+    if lines:
+        sent = False
+        try:
+            sent = alert("memory-weight-morning", "Вес памяти агентов (5b), утренний перезамер:\n" + "\n".join(lines))
+        except Exception as exc:  # noqa: BLE001 - the state must stay consistent
+            log.error("outbox: %s", type(exc).__name__)
+        if not sent:
+            return len(lines)
+    for agent in due:
+        state[agent]["morning"] = today
+    save_state(state_path, state)
+    return len(lines)
 
 
 def env_value(env_file: str, key: str) -> str:
@@ -350,15 +456,25 @@ def outbox_alert(key: str, text: str) -> bool:
     return r.returncode == 0
 
 
+def _hour() -> int:
+    return datetime.now(MSK).hour
+
+
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    if argv not in ([], ["--auto"]):
-        print("usage: memory_weight_watch.py [--auto]  (agents are in guard.conf; --auto: only in the "
-              f"{AUTO_HOUR:02d}:xx hour of the owner's clock)", file=sys.stderr)
+    if argv not in ([], ["--auto"], ["--morning"]):
+        print("usage: memory_weight_watch.py [--auto|--morning]  (agents are in guard.conf; --auto: the night "
+              f"pass in the {AUTO_HOUR:02d}:xx hour of the owner's clock, the morning re-check in "
+              f"{MORNING_HOUR:02d}:xx)", file=sys.stderr)
         return 2
-    if argv == ["--auto"] and datetime.now(MSK).hour != AUTO_HOUR:
-        return 0
+    is_morning = argv == ["--morning"]
+    if argv == ["--auto"]:
+        hour = _hour()
+        if hour >= MORNING_HOUR:
+            is_morning = True
+        elif hour != AUTO_HOUR:
+            return 0
     if STOP_FILE.exists():
         log.info("STOP file present, skipping")
         return 0
@@ -369,6 +485,13 @@ def main(argv: list[str]) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             log.info("another pass is running, skipping")
+            return 0
+        if is_morning:
+            left = morning(list(AGENTS), LAB, STATE_FILE, today, outbox_alert)
+            if left < 0:
+                log.error("morning: state file cannot be trusted, re-check skipped")
+                return 1
+            log.info("morning: still heavy %d", left)
             return 0
         lines = run(list(AGENTS), LAB, STATE_FILE, today, webhook_notify, outbox_alert)
     for line in lines:

@@ -30,6 +30,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import stat as stat_module
 import sys
@@ -54,6 +55,7 @@ RATIO_WARN = 3.0
 # съедали четверть недельного расхода. Метка только называет цену, резать правила решает человек.
 TURN_WARN = 100 * 1024
 INCLUDE_RE = re.compile(r"^@(\S+)\s*$")
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 
 
 class Row(NamedTuple):
@@ -192,6 +194,159 @@ def weigh(agent_dir: Path) -> Weight:
         rows.append(Row(size, _short(raw), True, False))
     rows.sort(reverse=True)
     return Weight(turn, turn + loose, rows)
+
+
+
+# Вес хода ЦЕЛИКОМ, как его собирает Claude Code. weigh() выше видит только CLAUDE.md агента
+# и его @ первого уровня. В ход на деле идут ещё: глобальный CLAUDE.md и rules/ из CLAUDE_CONFIG_DIR,
+# CLAUDE.md всех предков рабочего каталога, вложенные @ (до 5 уровней) и начало индекса авто-памяти
+# MEMORY.md. Без них сторож видел около половины настоящего веса.
+# Потолок ПОЛНОГО хода, та же граница, что TURN_WARN (~30 тыс. токенов на ход). Замер парка из 18
+# агентов 07.11.2026: 23-144 КБ; 60 КБ дали бы перевес 16 из 18, 100 КБ ловят тех, у кого своих
+# 80-140 КБ, которые режутся их же правкой.
+TURN_LIMIT = 100 * 1024
+MAX_INCLUDE_DEPTH = 5
+MEMORY_INDEX_LINES = 200
+PLUGIN_WORKDIR = Path(".claude") / "dashi-plugin-claude-code" / "plugin"
+
+
+class Source(NamedTuple):
+    """Один файл полного хода. own: файл агента (его он и режет), а не общий."""
+
+    size: int
+    name: str
+    kind: str  # global | project | include | memory
+    own: bool
+
+
+class TurnWeight(NamedTuple):
+    total: int
+    own: int
+    rows: list[Source]
+
+
+def project_slug(p: Path) -> str:
+    """Имя каталога проекта в CLAUDE_CONFIG_DIR/projects: путь, где всё кроме букв и цифр стало '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(p))
+
+
+def default_workdir(agent_dir: Path) -> Path:
+    plugin = agent_dir / PLUGIN_WORKDIR
+    return plugin if plugin.is_dir() else agent_dir / ".claude"
+
+
+def _git_root(p: Path) -> Path | None:
+    for d in (p, *p.parents):
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def _inside(p: Path, root: Path) -> bool:
+    try:
+        p.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def turn_weight(agent_dir: Path, workdir: Path | None = None,
+                config_dir: Path | None = None, home: Path | None = None) -> TurnWeight:
+    """Всё, что Claude Code кладёт в контекст каждого хода агента. Один файл считается один раз.
+
+    Сверено с живыми ходами 07.11.2026 (11 и 9 файлов у двух агентов). Правила из ~/.claude/rules
+    приходят и при чужом CLAUDE_CONFIG_DIR, а ~/.claude/CLAUDE.md как файл предка не приходит.
+    """
+    home = Path(home) if home else Path.home()
+    workdir = Path(workdir) if workdir else default_workdir(agent_dir)
+    if config_dir is None:
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    agent_key = _norm(agent_dir)
+    seen: set[Path] = set()
+    rows: list[Source] = []
+
+    expanded: dict[Path, int] = {}
+
+    def add(p: Path, kind: str, depth: int) -> None:
+        key = _norm(p)
+        if key not in seen:
+            size = _size_of(key)
+            if size is None:
+                return
+            seen.add(key)
+            rows.append(Source(size, str(p), kind, _inside(key, agent_key)))
+        # A file met again on a SHORTER path may now open children the deeper path could not.
+        if depth >= MAX_INCLUDE_DEPTH or expanded.get(key, MAX_INCLUDE_DEPTH + 1) <= depth:
+            return
+        expanded[key] = depth
+        try:
+            text = key.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        fence = ""
+        for line in text.split("\n"):
+            st = line.strip()
+            fm = FENCE_RE.match(st)
+            if fm:
+                run = fm.group(1)
+                if not fence:
+                    fence = run
+                    continue
+                # CommonMark: closed only by the same char, at least as long, nothing after it
+                if run[0] == fence[0] and len(run) >= len(fence) and not fm.group(2).strip():
+                    fence = ""
+                continue
+            if fence:
+                continue  # Claude Code does not import @paths inside code blocks
+            m = INCLUDE_RE.match(st)
+            if m:
+                add(p.parent / Path(m.group(1)).expanduser(), "include", depth + 1)
+
+    def add_rules(rules: Path) -> None:
+        if not rules.is_dir():
+            return
+        for r in sorted(rules.rglob("*.md")):
+            try:
+                head = r.read_text(encoding="utf-8", errors="replace")[:2000]
+            except OSError:
+                continue
+            # rules with `paths:` frontmatter load only when a matching file is touched, not every turn
+            if head.startswith("---") and re.search(r"^paths\s*:", head.split("\n---", 1)[0], re.M):
+                continue
+            add(r, "global" if not _inside(_norm(r), agent_key) else "project", 0)
+
+    add(config_dir / "CLAUDE.md", "global", 0)
+    for rules in (config_dir / "rules", home / ".claude" / "rules"):
+        add_rules(rules)
+    for d in reversed((workdir, *workdir.parents)):
+        files = [d / "CLAUDE.md", d / "CLAUDE.local.md"]
+        if d != home:
+            files.insert(1, d / ".claude" / "CLAUDE.md")
+        for f in files:
+            add(f, "project", 0)
+        if d != home:
+            add_rules(d / ".claude" / "rules")
+    mem = config_dir / "projects" / project_slug(_git_root(workdir) or workdir) / "memory" / "MEMORY.md"
+    try:
+        with mem.open("rb") as fh:
+            head = b"".join(line for _, line in zip(range(MEMORY_INDEX_LINES), fh))
+    except OSError:
+        head = None
+    if head is not None:
+        rows.append(Source(len(head), str(mem), "memory", True))
+    return TurnWeight(sum(r.size for r in rows), sum(r.size for r in rows if r.own), rows)
+
+
+def turn_problems(tw: TurnWeight) -> list[str]:
+    """Перевес хода словами: журнал над своим потолком и ход над общим. Пусто = всё в норме."""
+    out = []
+    for r in tw.rows:
+        base = r.name.split("/")[-1]
+        if base in JOURNAL_LIMITS and r.size > JOURNAL_LIMITS[base]:
+            out.append(f"{base} {r.size // 1024} КБ (потолок {JOURNAL_LIMITS[base] // 1024} КБ)")
+    if tw.total > TURN_LIMIT:
+        out.append(f"ход {tw.total // 1024} КБ (потолок {TURN_LIMIT // 1024} КБ, своё {tw.own // 1024} КБ)")
+    return out
 
 
 def main(argv: list[str]) -> int:

@@ -3253,7 +3253,7 @@ _guard_conf_has() {
 # when this run gave none.
 render_guard_conf() {
     local existing="${1:-}"
-    local agents labels mode chat wrules wclaude fself fbots furl fenv fstyle stage cgroups offsite
+    local agents labels mode chat wrules wclaude wturn fself fbots furl fenv fstyle stage cgroups offsite
     agents=$(_guard_conf_get "$existing" CHANNEL_AGENTS)
     wrules="$(env_value WEIGHT_RULES_KB)"
     [[ -n "$wrules" ]] || wrules=$(_guard_conf_get "$existing" WEIGHT_RULES_KB)
@@ -3261,6 +3261,9 @@ render_guard_conf() {
     wclaude="$(env_value WEIGHT_CLAUDE_KB)"
     [[ -n "$wclaude" ]] || wclaude=$(_guard_conf_get "$existing" WEIGHT_CLAUDE_KB)
     [[ -z "$wclaude" || "$wclaude" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_CLAUDE_KB '${wclaude}' is not a number -- using 40."; wclaude=""; }
+    wturn="$(env_value WEIGHT_TURN_KB)"
+    [[ -n "$wturn" ]] || wturn=$(_guard_conf_get "$existing" WEIGHT_TURN_KB)
+    [[ -z "$wturn" || "$wturn" =~ ^[1-9][0-9]{0,4}$ ]] || { warn "WEIGHT_TURN_KB '${wturn}' is not a number -- using 100."; wturn=""; }
     labels=$(_guard_conf_get "$existing" AGENT_LABELS)
     # A name given this run (NEUROOTDEL_AGENT_NAME) replaces the main agent's label.
     if [[ -n "$(env_value AGENT_NAME)" ]]; then
@@ -3322,6 +3325,8 @@ render_guard_conf() {
 # ALERT_MODE, ALERT_TG_CHAT_ID and the WEIGHT_* caps unless new values are given.
 # WEIGHT_RULES_KB / WEIGHT_CLAUDE_KB: caps of core/rules.md and CLAUDE.md in the nightly
 #                        memory weight watch (journals handoff/decisions: 15 KB, fixed).
+# WEIGHT_TURN_KB:        cap of the WHOLE turn (CLAUDE.md, every nested @, global files,
+#                        the MEMORY.md index), same watch.
 # ALERT_MODE: outbox   = alerts are JSON files in /var/lib/${AGENT_USER}-guard/outbox
 #                        (read them: python3 ${GUARD_LIB_DIR}/agents-guard.py --drain),
 #                        plus the log /var/log/${AGENT_USER}-guard.log;
@@ -3362,6 +3367,7 @@ ALERT_MODE="${mode}"
 ALERT_TG_CHAT_ID="$(_guard_conf_value "$chat")"
 WEIGHT_RULES_KB="${wrules:-30}"
 WEIGHT_CLAUDE_KB="${wclaude:-40}"
+WEIGHT_TURN_KB="${wturn:-100}"
 FACT_GATE_SELF_IDS="$(_guard_conf_value "$fself")"
 FACT_GATE_BOT_IDS="$(_guard_conf_value "$fbots")"
 FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
@@ -3530,7 +3536,8 @@ install_memory_weight_cron() {
     install -d -m 0700 -o root -g root "/var/lib/${AGENT_USER}-memory-weight"
     _install_cron_file "${AGENT_USER}-memory-weight" "$(cat <<CRON
 # ${INSTALL_TAG} v${INSTALLER_VERSION}: memory weight watch (rule 5b): handoff/decisions > 15 KB,
-# core/rules.md > WEIGHT_RULES_KB, CLAUDE.md > WEIGHT_CLAUDE_KB (guard.conf) -> one signal to the agent a day.
+# core/rules.md > WEIGHT_RULES_KB, CLAUDE.md > WEIGHT_CLAUDE_KB, whole turn > WEIGHT_TURN_KB (guard.conf)
+# -> one signal to the agent a day (04:xx); 10:xx re-check, still heavy -> one outbox line per agent.
 # Stop: touch /var/lib/${AGENT_USER}-memory-weight/STOP ; remove this file to uninstall.
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
