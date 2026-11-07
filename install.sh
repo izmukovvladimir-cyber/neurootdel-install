@@ -3448,7 +3448,8 @@ setup_agent_hooks() {
 # _setup_plugin_hooks <agent> <env_dir> <default_port> -- the per-agent hooks in
 # ~/.claude-lab/<agent>/.claude/dashi-plugin-claude-code/plugin/.claude/settings.json
 # (the service's cwd): correction capture, auto-recall, critical thinking, fact-check gate,
-# fallback reply (webhook port from <env_dir>/channel.env), lessons at start, pre-compaction flush.
+# fallback reply (webhook port from <env_dir>/channel.env), lessons at start, pre-compaction flush;
+# the Coder also gets the Codex commit gate (lib/hooks/codex-commit-guard.py).
 _setup_plugin_hooks() {
     local agent=$1 env_dir=$2 default_port=$3
     local lib="$GUARD_LIB_DIR" hooks="${GUARD_LIB_DIR}/hooks"
@@ -3478,6 +3479,11 @@ _setup_plugin_hooks() {
             "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
         add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1
         add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh ${agent}" 40 || fail=1
+        if [[ "$agent" == coder ]]; then
+            # git commit/push only after a fresh Codex APPROVE (the codex-check script writes the marker);
+            # armed only while Codex is switched on, installed and logged in, and CODEX_COMMIT_GUARD is not 0.
+            add_hook "$plugin_settings" PreToolUse Bash "python3 ${hooks}/codex-commit-guard.py check ${agent}" 10 || fail=1
+        fi
     else
         warn "Plugin dir ${plugin_dir} missing -- ${agent} hooks NOT set."
         fail=1
