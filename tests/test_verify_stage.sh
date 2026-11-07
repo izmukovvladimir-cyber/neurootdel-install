@@ -103,6 +103,7 @@ mkauditor() {
     echo soul >"${hh}/SOUL.md"
     echo '{"credential_pool":{"openai-codex":[{"refresh_token":"SECRET-REFRESH-XYZ"}]}}' >"${hh}/auth.json"
     printf 'hermes-auditor\nhermes-auditor-bridge\n' >>"${TDIR}/active"
+    echo '# reset' >"${CRON}/neurootdel-hermes-reset"
 }
 run() {
     PATH="${BIN}:${PATH}" NEUROOTDEL_GUARD_CONF="${LIB}/guard.conf" VERIFY_CRON_DIR="$CRON" \
@@ -195,6 +196,10 @@ build intensive; mkcoder; mkauditor; echo '{"credential_pool":{}}' >"$H/.hermes/
 check "auditor not logged in: ❌"              fails_with "Auditor: вход ChatGPT сделан"
 build intensive; mkcoder; mkauditor; sed -i '/hermes-auditor-bridge/d' "${TDIR}/active"; run
 check "bridge down: ❌"                        fails_with "Auditor: мост для задач от агентов работает"
+build intensive; mkcoder; mkauditor; rm "${CRON}/neurootdel-hermes-reset"; run
+check "auditor reset cron missing: ❌"         fails_with "Auditor: сброс сессии аудитора по расписанию"
+build intensive; mkcoder; mkauditor; mkdir -p "$H/.claude-lab/shared/state/hermes-auditor-reset"; touch "$H/.claude-lab/shared/state/hermes-auditor-reset/STOP"; run
+check "auditor reset stopped: ❌"              fails_with "Auditor: сброс сессии аудитора по расписанию"
 build intensive; mkcoder; mkauditor; sed -i 's/^CHANNEL_AGENTS=.*/CHANNEL_AGENTS="jarvis"/' "${LIB}/guard.conf"; run
 check "guard not watching Coder: ❌"           fails_with "Coder: сторож следит за агентом"
 
