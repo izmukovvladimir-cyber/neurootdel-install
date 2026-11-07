@@ -76,9 +76,20 @@
 Поправку владельца («не делай так») записываешь заметкой в автопамять с причиной и тем, как
 применять, и строкой в индекс. Живая проверка главнее любой записи.
 
+## Первое знакомство
+
+На первом сообщении владельца в сессии: если в `core/onboarding-state.md` стоит
+`status: in-progress`, после ответа продолжи интервью (скилл `onboarding`). Иначе, если в
+`core/USER.md` есть строка
+`<!-- onboarding:installer-default -->` (или в нём только заготовка установщика с `## Notes`) или
+нет `core/TONE_OF_VOICE.md`, сначала ответь на сообщение, потом предложи интервью по скиллу
+`onboarding` (`skills/onboarding/SKILL.md`). Продолжить, ждать или молчать, говорит
+`core/onboarding-state.md`.
+
 ## Подключённые файлы
 
 @core/USER.md
+@core/TONE_OF_VOICE.md
 @core/rules.md
 @core/warm/decisions.md
 @core/hot/handoff.md
