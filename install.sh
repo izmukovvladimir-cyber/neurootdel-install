@@ -2303,6 +2303,7 @@ _write_agent_workspace() {
     TMPFILES+=("$user_tmp")
     cat > "$user_tmp" <<UEOF
 # USER.md -- Operator profile
+<!-- onboarding:installer-default -->
 
 **Name:** ${OPERATOR_NAME}
 **Timezone:** ${OPERATOR_TIMEZONE}

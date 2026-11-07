@@ -117,7 +117,7 @@ Telegram --> Bot API --> Telegram-плагин (MCP-канал) --> Claude Code 
     datawrapper/               # графики
     excalidraw/                # диаграммы
     youtube-transcript/        # YouTube transcripts
-    onboarding/                # 5-вопросный wizard (stub)
+    onboarding/                # интервью нового агента с владельцем: USER.md, тон, роль
     self-compiler/             # self-tuning (stub)
     quick-reminders/           # cron-based reminders
     present/                   # HTML-презентации
