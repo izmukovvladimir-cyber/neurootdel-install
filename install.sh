@@ -3974,11 +3974,43 @@ _install_learned_practices() {
     return "$fail"
 }
 
+# _install_memory_layout <mem_dir> -- the auto-memory layout of one channel agent:
+#   MEMORY.md + index-*.md and the distilled lessons templates/memory/feedback-*.md, written only when
+#   missing (owner's from then on); the lessons' link lines live in managed blocks refreshed on every
+#   run: templates/memory/lessons-index.md -> "memory-lessons" in MEMORY.md (loads every turn),
+#   lessons-index-tools.md -> "memory-lessons-tools" in index-infra.md (tool/platform lessons, read on
+#   demand). An older file without the markers gets the block appended.
+_install_memory_layout() {
+    local mem=$1 tdir="${TEMPLATES_DIR}" fail=0 f tmp idx tidx
+    # An unreadable or empty lessons index must not wipe the managed blocks with an empty body.
+    idx=$(cat "${tdir}/memory/lessons-index.md") && [[ -n "$idx" ]] \
+        || { warn "lessons-index.md missing or empty -- memory layout skipped."; return 1; }
+    tidx=$(cat "${tdir}/memory/lessons-index-tools.md") && [[ -n "$tidx" ]] \
+        || { warn "lessons-index-tools.md missing or empty -- memory layout skipped."; return 1; }
+    tmp=$(mktemp) || return 1
+    TMPFILES+=("$tmp")
+    render_template "${tdir}/memory/MEMORY.md" "$tmp" TAG "$INSTALL_TAG" \
+        && _agent_write "$tmp" "${mem}/MEMORY.md" 0644 1 || fail=1
+    for f in index-work index-people index-content; do
+        _agent_write "${tdir}/memory/${f}.md" "${mem}/${f}.md" 0644 1 || fail=1
+    done
+    render_template "${tdir}/memory/index-infra.md" "$tmp" TAG "$INSTALL_TAG" \
+        && _agent_write "$tmp" "${mem}/index-infra.md" 0644 1 || fail=1
+    for f in "${tdir}"/memory/feedback-*.md; do
+        [[ -f "$f" ]] || continue
+        _agent_write "$f" "${mem}/${f##*/}" 0644 1 || fail=1
+    done
+    _ensure_marked_block "${mem}/MEMORY.md" memory-lessons "$idx" || fail=1
+    _ensure_marked_block "${mem}/index-infra.md" memory-lessons-tools "$tidx" || fail=1
+    return "$fail"
+}
+
 # install_team_refs -- the shared team references, code style rules and the memory layout.
 #   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
 #                                      between markers in the agent's CLAUDE.md;
 #   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
-#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md,
+#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md
+#     + feedback-*.md lessons (_install_memory_layout; their index block in MEMORY.md is managed),
 #     library/INDEX.md, core/archive/, the learned-practices pack (_install_learned_practices).
 # Every file lands through the agent user (_agent_write), never a root write into its home.
 install_team_refs() {
@@ -4012,9 +4044,7 @@ install_team_refs() {
         _agent_write "${tdir}/rules/${f}.md" "${AGENT_HOME}/.claude/rules/${f}.md" 0644 1 || fail=1
     done
 
-    for f in MEMORY index-work index-people index-content index-infra; do
-        _agent_write "${tdir}/memory/${f}.md" "${mem_dir}/${f}.md" 0644 1 || fail=1
-    done
+    _install_memory_layout "$mem_dir" || fail=1
     _agent_write "${tdir}/memory/library-INDEX.md" "${ws}/library/INDEX.md" 0644 1 || fail=1
 
     _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
@@ -4041,9 +4071,7 @@ install_team_refs() {
         cmem="${AGENT_HOME}/.claude/projects/$(printf '%s' "${cws}/dashi-plugin-claude-code" | sed 's/[^A-Za-z0-9]/-/g')/memory"
         as_agent mkdir -p "$cmem" "${cws}/core/archive" "${cws}/library" \
             || die "Could not create Coder reference dirs as ${AGENT_USER}."
-        for f in MEMORY index-work index-people index-content index-infra; do
-            _agent_write "${tdir}/memory/${f}.md" "${cmem}/${f}.md" 0644 1 || fail=1
-        done
+        _install_memory_layout "$cmem" || fail=1
         _agent_write "${tdir}/memory/library-INDEX.md" "${cws}/library/INDEX.md" 0644 1 || fail=1
         _ensure_marked_block "${cws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
         _ensure_marked_block "${cws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
