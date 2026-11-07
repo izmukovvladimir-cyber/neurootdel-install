@@ -107,6 +107,27 @@ for cmd in 'echo secret-outbound-guard' 'python3 /old/secret-outbound-guard.py';
     check "stale: '$cmd' does not count"  grep -qF "\"python3 ${GUARD}\"" "$STALE"
 done
 
+# --- owner id: the hook carries --owner, an old or other-owner entry is updated in place ---
+setup_global_claude >/dev/null 2>&1
+check "owner: fresh hook has --owner 42"   grep -qF "\"python3 ${GUARD} --owner 42\"" "$SJ"
+OLDO="${TDIR}/old-owner.json"
+printf '{"hooks":{"PreToolUse":[{"matcher":"%s","hooks":[{"type":"command","command":"python3 %s"}]}]}}\n' "$M3" "$GUARD" > "$OLDO"
+ensure_secret_guard_hook "$OLDO" "$GUARD" 42 2>/dev/null
+check "owner: old hook upgraded"           grep -qF "\"python3 ${GUARD} --owner 42\"" "$OLDO"
+check "owner: old hook still once"         test "$(hook_count "$OLDO")" -eq 1
+ensure_secret_guard_hook "$OLDO" "$GUARD" 77 2>/dev/null
+check "owner: new owner replaces old"      grep -qF "\"python3 ${GUARD} --owner 77\"" "$OLDO"
+check "owner: after change still once"     test "$(hook_count "$OLDO")" -eq 1
+GARB="${TDIR}/garbage-owner.json"
+ensure_secret_guard_hook "$GARB" "$GUARD" '1;rm -rf x' 2>/dev/null
+check "owner: garbage id not passed"       grep -qF "\"python3 ${GUARD}\"" "$GARB"
+owner_rc() {
+    printf '{"tool_name":"mcp__dashi-channel__reply","tool_input":{"chat_id":"%s","text":"пароль: Xk9#mm2pQ"}}' "$2" \
+        | python3 "$GUARD" --owner "$1" 2>/dev/null; echo $?
+}
+check "owner: secret to owner chat passes" test "$(owner_rc 42 42)" -eq 0
+check "owner: secret to other chat blocked" test "$(owner_rc 42 43)" -eq 2
+
 # --- guard script: unchanged = no rewrite, changed = backup first ----------------
 setup_global_claude >/dev/null 2>&1
 check "script: same copy, no backup"      test "$(find "${FAKE_HOME}/.claude/hooks" -name '*.bak-*' | wc -l)" -eq 0

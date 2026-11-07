@@ -2553,20 +2553,25 @@ ensure_red_secrets_rule() {
     ok "RED secrets rule appended to ${dst} (backup: ${bak})."
 }
 
-# ensure_secret_guard_hook <settings.json> <guard.py> -- adds the PreToolUse hook
+# ensure_secret_guard_hook <settings.json> <guard.py> [owner_id] -- adds the PreToolUse hook
 # that stops outbound messages carrying passwords/keys/tokens; idempotent by the
-# script name, every other key kept, backup before the first change.
+# script name, every other key kept, backup before the first change. With an owner id the
+# hook runs as `python3 <guard> --owner <id>` (a reply to the owner's personal chat passes);
+# an entry with another or no owner id is updated in place.
 ensure_secret_guard_hook() {
-    local dst=$1 guard=$2 tmp rc=0 mode=644
+    local dst=$1 guard=$2 owner=${3:-} tmp rc=0 mode=644
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
-    python3 - "$dst" "$guard" "$tmp" <<'PY' || rc=$?
+    python3 - "$dst" "$guard" "$tmp" "$owner" <<'PY' || rc=$?
 import json
+import re
 import sys
 from pathlib import Path
 
-path, guard, out = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+path, guard, out, owner = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), sys.argv[4]
 MATCHER = "mcp__dashi-channel__reply|mcp__dashi-channel__edit_message|mcp__gbrain-swarm__notify"
+base = f"python3 {guard}"
+cmd = base + (f" --owner {owner}" if re.fullmatch(r"[1-9][0-9]{0,19}", owner) else "")
 data: dict = {}
 if path.exists():
     try:
@@ -2579,18 +2584,22 @@ hooks = data.setdefault("hooks", {})
 pre = hooks.setdefault("PreToolUse", []) if isinstance(hooks, dict) else None
 if not isinstance(pre, list):
     sys.exit(f"{path}: hooks.PreToolUse is not an array; left untouched")
-def wired(entry: object) -> bool:
-    """An entry that runs the guard on every outbound tool."""
+def guard_hooks(entry: object) -> list[dict]:
+    """This guard's command hooks in an entry that covers every outbound tool."""
     if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
-        return False
-    tools = set(str(entry.get("matcher", "")).split("|"))
-    runs = any(isinstance(h, dict) and h.get("type") == "command"
-               and str(h.get("command", "")).strip() == f"python3 {guard}" for h in entry["hooks"])
-    return runs and set(MATCHER.split("|")) <= tools
-if any(wired(e) for e in pre):
-    sys.exit(3)  # already wired
-pre.append({"matcher": MATCHER,
-            "hooks": [{"type": "command", "command": f"python3 {guard}", "timeout": 10}]})
+        return []
+    if not set(MATCHER.split("|")) <= set(str(entry.get("matcher", "")).split("|")):
+        return []
+    return [h for h in entry["hooks"] if isinstance(h, dict) and h.get("type") == "command"
+            and (str(h.get("command", "")).strip() == base
+                 or str(h.get("command", "")).strip().startswith(f"{base} --owner "))]
+mine = [h for e in pre for h in guard_hooks(e)]
+if any(str(h.get("command", "")).strip() == cmd for h in mine):
+    sys.exit(3)  # already wired with this owner
+if mine:
+    mine[0]["command"] = cmd
+else:
+    pre.append({"matcher": MATCHER, "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
 out.write_text(json.dumps(data, indent=2) + "\n")
 PY
     [[ $rc -eq 3 ]] && return 0
@@ -2692,7 +2701,7 @@ SJEOF
         fi
         write_as_user "${TEMPLATES_DIR}/secret-outbound-guard.py" "$guard" 0755
     fi
-    ensure_secret_guard_hook "$settings_json" "$guard" \
+    ensure_secret_guard_hook "$settings_json" "$guard" "${TG_USER_ID:-}" \
         || die "Cannot add the secret guard hook to ${settings_json}."
 
     # Hard numbers gate: a number the agent did not check in this turn never reaches the owner.
