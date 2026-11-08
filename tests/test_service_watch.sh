@@ -155,6 +155,10 @@ jq -cn --arg c 'printf \" ; tool --password "esc aped" x' --arg w "$WSJ" '{tool_
 jq -cn --arg c $'tool --password  spaced123 --token\ttabbed123 --auth= eqspace123' --arg w "$WSJ" '{tool_input:{command:$c},cwd:$w}' | bash "${LIB}/hooks/log-commands.sh"
 jq -cn --arg c 'echo "unpaired quote secretword' --arg w "$WSJ" '{tool_input:{command:$c},cwd:$w}' | bash "${LIB}/hooks/log-commands.sh"
 check "cmdlog: secrets masked"               bash -c '! grep -qE "abcdefghijklmnop|hunter22|pw123456|tok12345678|quoted secret|heredoc-secret|first|second|a b c|s3cr3t|secretword|esc|aped|spaced123|tabbed123|eqspace123" "$0"' "$CL"
+jq -cn --arg c 'curl -H Authorization: token unquotedhdr123 -H Authorization:OAuth oauthval123 https://api.telegram.org/bot12345678:abcdefghijklmnopqrstuvwxyz0123456789/getMe' --arg w "$WSJ" '{tool_input:{command:$c},cwd:$w}' | bash "${LIB}/hooks/log-commands.sh"
+jq -cn --arg c 'gh auth login --with-token github_pat_patsecret12345 && export SERVICE_KEY=keysecret123 && curl https://x/?token=qsecret123&a=1' --arg w "$WSJ" '{tool_input:{command:$c},cwd:$w}' | bash "${LIB}/hooks/log-commands.sh"
+check "cmdlog: more secret forms masked"     bash -c '! grep -qE "unquotedhdr|oauthval|abcdefghijklmnopqrstuvwxyz|patsecret|keysecret|qsecret" "$0"' "$CL"
+check "cmdlog: query tail kept"              grep -qE 'token=\*\*\*&a=1$' "$CL"
 check "cmdlog: masked line kept"             grep -qE '  jarvis  curl -H ‹…› \[\+3 lines not logged\]$' "$CL"
 check "cmdlog: log is 0600"                  test "$(stat -c %a "$CL")" = 600
 check "cmdlog: never blocks (rc 0 on junk)"  bash -c 'echo nope | bash "$0"' "${LIB}/hooks/log-commands.sh"
