@@ -58,9 +58,12 @@ check "lessons: == template"                 cmp -s "$LS" "${REPO}/templates/sha
 check "lessons: in team-rules references"    grep -qF 'LESSONS-STARTER.md' "${SH}/team-rules.md"
 check "lessons: generic (no ids/IPs/@/\$)"   bash -c '! grep -qE "[0-9]{6,}|([0-9]{1,3}\.){3}[0-9]{1,3}|@|\\\$|/home/|t\.me/" "$0"' "${REPO}/templates/shared/LESSONS-STARTER.md"
 check "refs: owner name in team rules"        grep -q 'Owner = Анна' "${SH}/team-rules.md"
+check "refs: gbrain read rule in team rules" grep -qF 'recall(query, limit=5)' "${SH}/team-rules.md"
+check "refs: gbrain write rule in team rules" grep -qF 'create_decision_note' "${SH}/team-rules.md"
 check "refs: lib path in team rules"          grep -q '/usr/local/lib/neurootdel/include_weight.py' "${SH}/team-rules.md"
 for f in bash python typescript; do
-    check "refs: code rule ${f}.md"           test -s "${H}/.claude/rules/${f}.md"
+    check "refs: no code rule ${f}.md in ~"   test ! -e "${H}/.claude/rules/${f}.md"
+    check "refs: no code rule ${f}.md jarvis" test ! -e "${WS}/dashi-plugin-claude-code/plugin/.claude/rules/${f}.md"
 done
 for f in MEMORY index-work index-people index-content index-infra; do
     check "refs: memory ${f}.md"              test -s "${MEM}/${f}.md"
@@ -76,7 +79,7 @@ check "refs: no names of ours in templates"   bash -c '! grep -rliE "svetlan|с�
 echo '- my own staff line' >>"${SH}/STAFF.md"
 echo '## 21. my own lesson' >>"${SH}/LESSONS-STARTER.md"
 echo '- [my rule](feedback-x.md)' >>"${MEM}/MEMORY.md"
-echo 'my rule' >>"${H}/.claude/rules/bash.md"
+mkdir -p "${H}/.claude/rules"; echo 'my rule' >>"${H}/.claude/rules/bash.md"
 echo 'after the block' >>"${WS}/CLAUDE.md"
 sha_before=$(sha256sum "${SH}/LESSONS-STARTER.md" "${SH}/STAFF.md" "${MEM}/MEMORY.md" "${H}/.claude/rules/bash.md" | sha256sum)
 echo 'stale managed text' >>"${SH}/team-rules.md"
@@ -99,6 +102,34 @@ PY
 install_team_refs
 check "block: old body replaced"              bash -c '! grep -q "old/path" "$0"' "${WS}/CLAUDE.md"
 check "block: file equals the clean state"    cmp -s "${WS}/CLAUDE.md" "${TDIR}/c1"
+
+# Code style rules: the Coder's plugin only; an old ~/.claude/rules copy equal to the template is
+# moved to ~/.claude/rules.off-<tag>/, an owner-edited copy stays.
+CP="${H}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin"
+OFF="${H}/.claude/rules.off-${INSTALL_TAG}"
+mkdir -p "${H}/.claude/rules" "${H}/.claude-lab/coder/.claude"
+printf '# Coder\n' >"${H}/.claude-lab/coder/.claude/CLAUDE.md"
+cp "${REPO}/templates/rules/python.md" "${H}/.claude/rules/python.md"
+cp "${REPO}/templates/rules/typescript.md" "${H}/.claude/rules/typescript.md"
+mkdir -p "$OFF"; echo 'taken' >"${OFF}/typescript.md"
+CODER_INSTALLED=1
+install_team_refs; rc=$?
+CODER_INSTALLED=0
+check "code: rc 0 with coder"                 test "$rc" -eq 0
+for f in bash python typescript; do
+    check "code: coder has ${f}.md"           cmp -s "${CP}/.claude/rules/${f}.md" "${REPO}/templates/rules/${f}.md"
+    check "code: jarvis has no ${f}.md"       test ! -e "${WS}/dashi-plugin-claude-code/plugin/.claude/rules/${f}.md"
+done
+check "code: template copy retired from ~"    test ! -e "${H}/.claude/rules/python.md"
+check "code: retired copy kept in off dir"    cmp -s "${OFF}/python.md" "${REPO}/templates/rules/python.md"
+check "code: owner-edited copy stays"         grep -qx 'my rule' "${H}/.claude/rules/bash.md"
+check "code: taken off name -> stays in ~"    cmp -s "${H}/.claude/rules/typescript.md" "${REPO}/templates/rules/typescript.md"
+check "code: taken off file untouched"        test "$(cat "${OFF}/typescript.md")" = taken
+echo 'coder own line' >>"${CP}/.claude/rules/bash.md"
+CODER_INSTALLED=1
+install_team_refs
+CODER_INSTALLED=0
+check "code: coder edits survive re-run"      grep -qx 'coder own line' "${CP}/.claude/rules/bash.md"
 
 # BEGIN without END: left alone, nonzero.
 printf 'x\n<!-- BEGIN %s: team-rules -->\nowner\n' "$INSTALL_TAG" >"${TDIR}/broken.md"

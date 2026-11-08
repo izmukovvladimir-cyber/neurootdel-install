@@ -44,6 +44,9 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 - Team-wide lesson (a shared tool, hand-offs between agents): also ~/.claude-lab/shared/LEARNINGS.md.
 - Starter lessons every agent shares (rule, why, how): ~/.claude-lab/shared/LESSONS-STARTER.md.
   Read it once when you start and again before similar work.
+- Shared memory gbrain (when this server has it: tools `mcp__gbrain-recall__*`, or `gbrain-call.py`): before
+  non-trivial work `recall(query, limit=5)`; after it, a decision or procedure the team will need goes in via
+  gbrain-memory `create_decision_note` / `create_runbook_note` (no keys, no personal data).
 
 ## Models and subagents
 - Main turn stays on the main model. Review = a second model; bulk reading = the light model.

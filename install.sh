@@ -2145,6 +2145,11 @@ PY
 # _accept_trust_dialog <claude_json> <project_dir>... -- sets
 # projects[<dir>].hasTrustDialogAccepted=true for each dir and takes
 # dashi-channel off its disabledMcpjsonServers; keeps every other key.
+# Also approves external CLAUDE.md imports (hasClaudeMdExternalIncludesApproved
+# + ...WarningShown): the agent CLAUDE.md sits above the git root and its
+# @core/*.md and @~/.claude-lab/shared/*.md are "external"; the approval
+# dialog is answered by channel-confirm's Enter = "No", and then every @import
+# is silently skipped for the life of the install.
 _accept_trust_dialog() {
     as_agent python3 - "$@" <<'PY'
 import json
@@ -2177,6 +2182,8 @@ for project in projects_to_trust:
     if not isinstance(entry, dict):
         sys.exit(f"{path}: projects[{project}] is not an object; left untouched")
     entry["hasTrustDialogAccepted"] = True
+    entry["hasClaudeMdExternalIncludesApproved"] = True
+    entry["hasClaudeMdExternalIncludesWarningShown"] = True
     disabled = entry.get("disabledMcpjsonServers")
     if isinstance(disabled, list) and "dashi-channel" in disabled:
         entry["disabledMcpjsonServers"] = [s for s in disabled if s != "dashi-channel"]
@@ -3982,6 +3989,44 @@ _install_learned_practices() {
     return "$fail"
 }
 
+# _install_code_rules <plugin_dir> -- code style rules (bash/python/typescript.md) as project rules
+# of ONE agent: <plugin_dir>/.claude/rules/, loaded on every turn by the claude that runs in plugin/.
+# Only the Coder gets them: in ~/.claude/rules they loaded into every agent of the user (Jarvis,
+# Richard) and cost each non-coder turn ~2.6 KB of rules it never applies. Written only when missing.
+_install_code_rules() {
+    local base="${1}/.claude/rules" f fail=0
+    as_agent mkdir -p "$base" || { warn "Could not create ${base} as ${AGENT_USER}."; return 1; }
+    for f in bash python typescript; do
+        _agent_write "${TEMPLATES_DIR}/rules/${f}.md" "${base}/${f}.md" 0644 1 || fail=1
+    done
+    return "$fail"
+}
+
+# _retire_home_code_rules -- an older install wrote the code style rules into ~/.claude/rules, which
+# every agent of the user loads. A copy still equal to the template is moved to
+# ~/.claude/rules.off-<tag>/ (kept, not deleted; the Coder has its own copy, _install_code_rules).
+# A copy the owner edited, a symlink or a name already taken in the off dir stays where it is
+# (warning, no failure): the installer never drops an owner's text.
+_retire_home_code_rules() {
+    local dir="${AGENT_HOME}/.claude/rules" off="${AGENT_HOME}/.claude/rules.off-${INSTALL_TAG}" f src
+    for f in bash python typescript; do
+        src="${dir}/${f}.md"
+        [[ -e "$src" || -L "$src" ]] || continue
+        if [[ -L "$src" ]] || ! cmp -s "$src" "${TEMPLATES_DIR}/rules/${f}.md"; then
+            warn "${src} differs from the template (owner's) -- left in place; it loads into every agent."
+            continue
+        fi
+        if [[ -e "${off}/${f}.md" || -L "${off}/${f}.md" ]]; then
+            warn "${off}/${f}.md already exists -- ${src} left in place."
+            continue
+        fi
+        if ! as_agent mkdir -p "$off" || ! as_agent mv -n -- "$src" "${off}/${f}.md" || [[ -e "$src" ]]; then
+            warn "Could not move ${src} to ${off}/ -- it still loads into every agent."
+        fi
+    done
+    return 0
+}
+
 # _install_memory_layout <mem_dir> -- the auto-memory layout of one channel agent:
 #   MEMORY.md + index-*.md and the distilled lessons templates/memory/feedback-*.md, written only when
 #   missing (owner's from then on); the lessons' link lines live in managed blocks refreshed on every
@@ -4017,9 +4062,10 @@ _install_memory_layout() {
 #   managed (rewritten on every run):  ~/.claude-lab/shared/team-rules.md and the @-line to it
 #                                      between markers in the agent's CLAUDE.md;
 #   written only when missing (owner's from then on): shared/{STAFF,AGENTS,TOOLS,
-#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md, ~/.claude/rules/*.md, auto-memory MEMORY.md + index-*.md
+#     PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md, auto-memory MEMORY.md + index-*.md
 #     + feedback-*.md lessons (_install_memory_layout; their index block in MEMORY.md is managed),
-#     library/INDEX.md, core/archive/, the learned-practices pack (_install_learned_practices).
+#     library/INDEX.md, core/archive/, the learned-practices pack (_install_learned_practices),
+#     code style rules for the Coder only (_install_code_rules; ~/.claude/rules copy retired).
 # Every file lands through the agent user (_agent_write), never a root write into its home.
 install_team_refs() {
     step 12 "Installing team rules, references, code style rules, memory layout"
@@ -4032,7 +4078,7 @@ install_team_refs() {
     mem_dir="${AGENT_HOME}/.claude/projects/$(printf '%s' "${ws}/dashi-plugin-claude-code" | sed 's/[^A-Za-z0-9]/-/g')/memory"
     local fail=0 f tmp
 
-    as_agent mkdir -p "$shared" "${AGENT_HOME}/.claude/rules" "$mem_dir" \
+    as_agent mkdir -p "$shared" "$mem_dir" \
         "${ws}/core/archive" "${ws}/library" || die "Could not create reference dirs as ${AGENT_USER}."
 
     for f in team-rules STAFF AGENTS TOOLS PARALLEL-AGENTS LEARNINGS LESSONS-STARTER ROLE-ACCEPTANCE; do
@@ -4048,9 +4094,8 @@ install_team_refs() {
         fi
     done
 
-    for f in bash python typescript; do
-        _agent_write "${tdir}/rules/${f}.md" "${AGENT_HOME}/.claude/rules/${f}.md" 0644 1 || fail=1
-    done
+    # Code style rules are the Coder's only (_install_code_rules below); an old copy for all agents goes off.
+    _retire_home_code_rules
 
     _install_memory_layout "$mem_dir" || fail=1
     _agent_write "${tdir}/memory/library-INDEX.md" "${ws}/library/INDEX.md" 0644 1 || fail=1
@@ -4088,6 +4133,7 @@ install_team_refs() {
     _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
     if [[ "$CODER_INSTALLED" == "1" ]]; then
         _install_learned_practices "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1
+        _install_code_rules "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1
     fi
 
     if [[ "$fail" -ne 0 ]]; then
