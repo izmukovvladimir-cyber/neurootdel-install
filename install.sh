@@ -2541,18 +2541,68 @@ ensure_starter_rules() {
 # the owner's decision. Its own block, so installs made before it get it too.
 readonly RED_SECRETS_BEGIN='<!-- red-secrets-rule:begin -->'
 
+# sha256 of the begin..end block of every earlier edition of templates/RED-SECRETS-RULE.md. The
+# edition before the current one answered "уточню" even to the trusted (starter rules «Секреты»):
+# a block still byte-identical to one of these is replaced by the current one; an edited one stays.
+readonly RED_SECRETS_OLD_SHA256="942dd670dde3e00deec4328918e2f712833d0b27b1e3a7ead630de2ff2f21d34
+56db8e4056bfbe7171b187bb695ba8a226d4e2cd2013b88b8dbe63c49c6433c8
+c3f803a595808025a3be06853f4d5c4ec86d752a7857ec43b4920dfb10ea8548
+4d3b60dd8802d160d025af787dcca2cd7db7604f34da7380f55ba1d114f12a8f"
+
+# _red_secrets_upgrade <file> <template> <out> -- writes <file> with its block swapped for the
+# template's block into <out>; rc 0 = written, 1 = nothing to upgrade (edited, ambiguous, current).
+_red_secrets_upgrade() {
+    RED_OLD="$RED_SECRETS_OLD_SHA256" python3 - "$@" <<'PY2'
+import hashlib
+import os
+import sys
+
+BEGIN, END = b"<!-- red-secrets-rule:begin -->", b"<!-- red-secrets-rule:end -->"
+
+
+def span(data: bytes) -> tuple[int, int] | None:
+    if data.count(BEGIN) != 1 or data.count(END) != 1:
+        return None
+    i, j = data.find(BEGIN), data.find(END)
+    return (i, j + len(END)) if i < j else None
+
+
+with open(sys.argv[1], "rb") as fh:
+    cur = fh.read()
+with open(sys.argv[2], "rb") as fh:
+    tpl = fh.read()
+cs, ts = span(cur), span(tpl)
+if cs is None or ts is None:
+    sys.exit(1)
+old = set(os.environ["RED_OLD"].split())
+if hashlib.sha256(cur[cs[0]:cs[1]]).hexdigest() not in old:
+    sys.exit(1)
+with open(sys.argv[3], "wb") as fh:
+    fh.write(cur[:cs[0]] + tpl[ts[0]:ts[1]] + cur[cs[1]:])
+PY2
+}
+
 # ensure_red_secrets_rule <CLAUDE.md> -- appends templates/RED-SECRETS-RULE.md
-# once (backup first); a file that already has the marker is left alone.
+# once (backup first). A file that already has the marker keeps its block, unless the block is an
+# untouched earlier edition (RED_SECRETS_OLD_SHA256): then it is swapped for the current one.
 ensure_red_secrets_rule() {
     local dst src="${TEMPLATES_DIR}/RED-SECRETS-RULE.md"
     [[ -f "$src" ]] || die "Template not found: $src"
     dst=$(readlink -f -- "$1") || return 0
     [[ -f "$dst" ]] || return 0
-    grep -qF -- "$RED_SECRETS_BEGIN" "$dst" && return 0
 
     local tmp bak mode
     tmp=$(mktemp)
     TMPFILES+=("$tmp")
+    if grep -qF -- "$RED_SECRETS_BEGIN" "$dst"; then
+        _red_secrets_upgrade "$dst" "$src" "$tmp" || return 0
+        bak="${dst}.bak-$(date +%Y%m%d-%H%M%S)-red-secrets"
+        cp -p -- "$dst" "$bak" || die "Cannot back up ${dst}; RED secrets rule not updated."
+        mode=$(stat -c '%a' -- "$dst")
+        write_as_user "$tmp" "$dst" "$mode"
+        ok "RED secrets rule updated to the current edition in ${dst} (backup: ${bak})."
+        return 0
+    fi
     cat -- "$dst" > "$tmp"
     if [[ -s "$tmp" && -n "$(tail -c1 "$tmp")" ]]; then
         printf '\n' >> "$tmp"
