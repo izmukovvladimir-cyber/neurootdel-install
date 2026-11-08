@@ -31,8 +31,9 @@ masked=$(printf '%s' "$first" | sed -E \
     -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+/***/g' \
     -e 's/((proxy-)?authorization)[[:space:]]*:[[:space:]]*([A-Za-z]+[[:space:]]+)?[^[:space:]]+/\1: ***/gI' \
     -e 's/([Bb]earer|[Bb]asic|OAuth)[[:space:]]+[^[:space:]]+/\1 ***/g' \
-    -e 's#(://[^/:@[:space:]]+):[^@/[:space:]]+@#\1:***@#g' \
-    -e 's/(^|[[:space:]])(-u|--user)([[:space:]]+|=)?[^[:space:]:]+:[^[:space:]]+/\1\2 ***/g' \
+    -e 's#(://[^/:@[:space:]]*):[^@/[:space:]]+@#\1:***@#g' \
+    -e 's#(://[^/:@[:space:]]*):[0-9]*[^0-9@/[:space:]][^@/[:space:]]*‹…›#\1:***‹…›#g' \
+    -e 's/(^|[[:space:]])(-u|--user)([[:space:]]+|=)?[^[:space:]:]*:[^[:space:]]+/\1\2 ***/g' \
     -e 's/((api[_-]?key|apikey|api_hash|secret|password|passwd|pwd|token|session_string|cookie|auth|key)[A-Za-z0-9_-]*[[:space:]]*[:=][[:space:]]*)[^[:space:]&]+/\1***/gI' \
     -e 's/(--?(password|passwd|token|secret|api-key|apikey|auth))([[:space:]]+|=[[:space:]]*)[^[:space:]]+/\1\3***/gI')
 short="${masked:0:500}"

@@ -161,6 +161,13 @@ check "cmdlog: more secret forms masked"     bash -c '! grep -qE "unquotedhdr|oa
 check "cmdlog: query tail kept"              grep -qE 'token=\*\*\*&a=1$' "$CL"
 check "cmdlog: masked line kept"             grep -qE '  jarvis  curl -H ‹…› \[\+3 lines not logged\]$' "$CL"
 check "cmdlog: log is 0600"                  test "$(stat -c %a "$CL")" = 600
+# Codex r4: empty username in -u/--user and a URL password cut by the quote marker
+for c in 'curl -u :emptyuser1 https://e/' 'curl --user=:emptyuser2 https://e/' 'curl -u:emptyuser3 https://e/' 'curl https://al:urlcut123"x"@h/'; do
+  jq -cn --arg c "$c" --arg w "$WSJ" '{tool_input:{command:$c},cwd:$w}' | bash "${LIB}/hooks/log-commands.sh"
+done
+check "cmdlog: empty user and cut URL masked"  bash -c '! grep -qE "emptyuser|urlcut" "$0"' "$CL"
+jq -cn --arg c 'curl http://h:8080""' --arg w "$WSJ" '{tool_input:{command:$c},cwd:$w}' | bash "${LIB}/hooks/log-commands.sh"
+check "cmdlog: port before cut kept"        grep -qF "curl http://h:8080‹…›" "$CL"
 check "cmdlog: never blocks (rc 0 on junk)"  bash -c 'echo nope | bash "$0"' "${LIB}/hooks/log-commands.sh"
 out_all=""
 for i in $(seq 1 11); do out_all+=$(echo '{"session_id":"abc-1"}' | bash "${LIB}/hooks/review-reminder.sh"); out_all+=$'\n'; done
