@@ -3971,6 +3971,69 @@ _ensure_marked_block() {
     esac
 }
 
+# _dedup_red_secrets_rule <project CLAUDE.md> -- the RED block belongs to ~/.claude/CLAUDE.md, which
+# every session loads (ensure_red_secrets_rule). A copy of it in an agent's CLAUDE.md loads it twice per
+# turn. Removed only when that copy is byte-identical to the global block (one begin/end pair in each
+# file, a backup <file>.bak-<date>-red-dedup first); a copy that differs is the owner's role wording
+# and stays. A missing file, a symlink or no global block: nothing to do.
+_dedup_red_secrets_rule() {
+    local dst=$1 global="${AGENT_HOME}/.claude/CLAUDE.md" rc=0
+    [[ -f "$dst" && ! -L "$dst" && -f "$global" ]] || return 0
+    as_agent python3 - "$dst" "$global" "$(date +%Y%m%d-%H%M%S)" <<'PY2' || rc=$?
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+BEGIN, END = b"<!-- red-secrets-rule:begin -->", b"<!-- red-secrets-rule:end -->"
+
+
+def span(data: bytes) -> tuple[int, int] | None:
+    if data.count(BEGIN) != 1 or data.count(END) != 1:
+        return None
+    i, j = data.find(BEGIN), data.find(END)
+    return (i, j + len(END)) if i < j else None
+
+
+def read_nofollow(path: Path) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+
+def write_new(path: Path, data: bytes, mode: int) -> None:
+    """Exclusive create (never through a symlink or over an existing name)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+dst, glob = Path(sys.argv[1]), Path(sys.argv[2])
+local, ref = read_nofollow(dst), glob.read_bytes()   # bytes: CRLF vs LF is a difference, not a match
+ls, gs = span(local), span(ref)
+if ls is None or gs is None or local[ls[0]:ls[1]] != ref[gs[0]:gs[1]]:
+    sys.exit(0)
+i, j = ls
+if local[j:j + 1] == b"\n":
+    j += 1
+if local[i - 2:i] == b"\n\n":
+    i -= 1          # the blank line the block was appended after
+mode = os.stat(dst, follow_symlinks=False).st_mode & 0o7777
+write_new(dst.with_name(f"{dst.name}.bak-{sys.argv[3]}-red-dedup"), local, mode)
+fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=f".{dst.name}.red-dedup.")
+try:
+    os.fchmod(fd, mode)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(local[:i] + local[j:])
+    os.replace(tmp, dst)
+except BaseException:
+    os.unlink(tmp)
+    raise
+print(f"RED block copy removed from {dst} (same as the global one).")
+PY2
+    (( rc == 0 )) || { warn "${dst}: RED block copy not checked."; return 1; }
+}
+
 # _install_learned_practices <plugin_dir> -- the learned-practices pack for one channel agent.
 #   <plugin_dir>/.claude/rules/learned-practices.md: project rule, claude (cwd plugin/) loads it
 #     on every turn;
@@ -4101,6 +4164,7 @@ install_team_refs() {
     _agent_write "${tdir}/memory/library-INDEX.md" "${ws}/library/INDEX.md" 0644 1 || fail=1
 
     _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+    _dedup_red_secrets_rule "${ws}/CLAUDE.md" || fail=1
 
     # Root request carrier memo (managed): how to ask for a privileged action, @ in each channel agent.
     tmp=$(mktemp)
@@ -4127,6 +4191,7 @@ install_team_refs() {
         _install_memory_layout "$cmem" || fail=1
         _agent_write "${tdir}/memory/library-INDEX.md" "${cws}/library/INDEX.md" 0644 1 || fail=1
         _ensure_marked_block "${cws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+        _dedup_red_secrets_rule "${cws}/CLAUDE.md" || fail=1
         _ensure_marked_block "${cws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
     fi
 
