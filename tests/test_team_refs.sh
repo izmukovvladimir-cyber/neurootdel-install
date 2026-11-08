@@ -131,6 +131,48 @@ install_team_refs
 CODER_INSTALLED=0
 check "code: coder edits survive re-run"      grep -qx 'coder own line' "${CP}/.claude/rules/bash.md"
 
+# RED block: lives in ~/.claude/CLAUDE.md; an identical copy in a project CLAUDE.md is removed (backup),
+# a differing copy (role wording) stays; nothing is ever written into a project CLAUDE.md.
+RED="${REPO}/templates/RED-SECRETS-RULE.md"
+mkdir -p "${H}/.claude"
+{ printf '# global\n'; cat "$RED"; } >"${H}/.claude/CLAUDE.md"
+cp "${WS}/CLAUDE.md" "${TDIR}/ws-before-red"
+{ cat "${TDIR}/ws-before-red"; cat "$RED"; printf 'tail line\n'; } >"${WS}/CLAUDE.md"
+{ printf '# Coder\n'; sed 's/уточню у владельца/уточню у владельца (роль)/' "$RED"; } >"${H}/.claude-lab/coder/.claude/CLAUDE.md"
+cp "${H}/.claude-lab/coder/.claude/CLAUDE.md" "${TDIR}/coder-red"
+CODER_INSTALLED=1
+install_team_refs; rc=$?
+CODER_INSTALLED=0
+check "red: rc 0"                             test "$rc" -eq 0
+check "red: identical copy removed"           bash -c '! grep -qF "red-secrets-rule:begin" "$0"' "${WS}/CLAUDE.md"
+check "red: text around kept"                 bash -c 'diff <(cat "$1"; printf "tail line\n") "$0" >/dev/null' "${WS}/CLAUDE.md" "${TDIR}/ws-before-red"
+check "red: backup written"                   bash -c 'ls "$0".bak-*-red-dedup >/dev/null 2>&1' "${WS}/CLAUDE.md"
+check "red: differing copy kept"              grep -qF '(роль)' "${H}/.claude-lab/coder/.claude/CLAUDE.md"
+check "red: global block kept"                grep -qF 'red-secrets-rule:begin' "${H}/.claude/CLAUDE.md"
+cp "${WS}/CLAUDE.md" "${TDIR}/ws-after-red"
+install_team_refs
+check "red: re-run changes nothing"           cmp -s "${WS}/CLAUDE.md" "${TDIR}/ws-after-red"
+check "red: installer never writes it there"  bash -c '! grep -n "ensure_red_secrets_rule \"\${ws}\|ensure_red_secrets_rule \"\${cws}" "$0"' "${REPO}/install.sh"
+# CRLF copy of an LF global block is not byte-identical: left as it is.
+{ printf 'owner\r\n'; sed 's/$/\r/' "$RED"; printf 'tail\r\n'; } >"${TDIR}/crlf-red.md"
+cp "${TDIR}/crlf-red.md" "${TDIR}/crlf-red.orig"
+_dedup_red_secrets_rule "${TDIR}/crlf-red.md"
+check "red: CRLF copy untouched"              cmp -s "${TDIR}/crlf-red.md" "${TDIR}/crlf-red.orig"
+# A symlinked project CLAUDE.md is never followed or replaced.
+{ printf 'other\n'; cat "$RED"; } >"${TDIR}/red-target.md"; cp "${TDIR}/red-target.md" "${TDIR}/red-target.orig"
+ln -s "${TDIR}/red-target.md" "${TDIR}/red-link.md"
+_dedup_red_secrets_rule "${TDIR}/red-link.md"
+check "red: symlink target untouched"         cmp -s "${TDIR}/red-target.md" "${TDIR}/red-target.orig"
+check "red: symlink stays a symlink"          test -L "${TDIR}/red-link.md"
+# A pre-planted symlink at the temp name cannot redirect the write (mkstemp name is random).
+{ printf 'keep\n'; cat "$RED"; } >"${TDIR}/red-plain.md"
+echo victim >"${TDIR}/victim"; ln -s "${TDIR}/victim" "${TDIR}/.red-plain.md.red-dedup.tmp"
+_dedup_red_secrets_rule "${TDIR}/red-plain.md"
+check "red: planted temp symlink harmless"    test "$(cat "${TDIR}/victim")" = victim
+check "red: plain copy removed"               bash -c '! grep -qF "red-secrets-rule" "$0" && grep -qx keep "$0"' "${TDIR}/red-plain.md"
+check "red: plain file not a symlink"         test ! -L "${TDIR}/red-plain.md"
+rm -f "${H}/.claude/CLAUDE.md"
+
 # BEGIN without END: left alone, nonzero.
 printf 'x\n<!-- BEGIN %s: team-rules -->\nowner\n' "$INSTALL_TAG" >"${TDIR}/broken.md"
 cp "${TDIR}/broken.md" "${TDIR}/broken.orig"
