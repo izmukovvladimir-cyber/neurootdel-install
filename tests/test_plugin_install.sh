@@ -166,6 +166,8 @@ chmod 600 "$CJ"
 _accept_trust_dialog "$CJ" "/p/plugin"
 check "trust: set for plugin dir" \
     python3 -c "import json,sys; d=json.load(open('$CJ')); sys.exit(0 if d['projects']['/p/plugin']['hasTrustDialogAccepted'] is True else 1)"
+check "trust: external CLAUDE.md imports approved" \
+    python3 -c "import json,sys; e=json.load(open('$CJ'))['projects']['/p/plugin']; sys.exit(0 if e['hasClaudeMdExternalIncludesApproved'] is True and e['hasClaudeMdExternalIncludesWarningShown'] is True else 1)"
 check "trust: other keys kept" \
     python3 -c "import json,sys; d=json.load(open('$CJ')); sys.exit(0 if d['oauthAccount']=={'x':1} and d['projects']['/other']=={'a':1} else 1)"
 check "trust: explicit onboarding value kept" \
@@ -191,8 +193,14 @@ check "trust: broken json untouched"   test "$(cat "$CJ3")" = "{not json"
 CJ4="${TDIR}/multi.json"
 printf '{"projects":{"/r":{"disabledMcpjsonServers":["dashi-channel","x"],"k":1}}}\n' >"$CJ4"
 _accept_trust_dialog "$CJ4" /r /r/plugin
+# Live case: the import dialog was answered "No" (approved false, warning shown) -> approved.
+CJ5="${TDIR}/declined.json"
+printf '{"projects":{"/r":{"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":true,"z":2}}}\n' >"$CJ5"
+_accept_trust_dialog "$CJ5" /r /r/plugin
 check "trust multi: root trusted" \
     python3 -c "import json,sys; d=json.load(open('$CJ4'))['projects']; sys.exit(0 if d['/r']['hasTrustDialogAccepted'] and d['/r/plugin']['hasTrustDialogAccepted'] else 1)"
+check "trust multi: declined imports flipped to approved" \
+    python3 -c "import json,sys; d=json.load(open('$CJ5'))['projects']; sys.exit(0 if all(d[k]['hasClaudeMdExternalIncludesApproved'] is True and d[k]['hasClaudeMdExternalIncludesWarningShown'] is True for k in ('/r','/r/plugin')) and d['/r']['z']==2 else 1)"
 check "trust multi: channel un-disabled, rest kept" \
     python3 -c "import json,sys; e=json.load(open('$CJ4'))['projects']['/r']; sys.exit(0 if e['disabledMcpjsonServers']==['x'] and e['k']==1 else 1)"
 

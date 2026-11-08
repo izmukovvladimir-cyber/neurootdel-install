@@ -186,6 +186,7 @@ check "coder: unit cwd = coder plugin" has "$U" "WorkingDirectory=${PR}/plugin"
 check "coder: unit no placeholder"     hasnt "$U" '\{\{'
 check "coder: channel approved"        jqtrue "${PR}/.claude/settings.local.json" '.enabledMcpjsonServers | index("dashi-channel")'
 check "coder: plugin trusted"          jqtrue "${FAKE_HOME}/.claude.json" ".projects[\"${PR}/plugin\"].hasTrustDialogAccepted == true"
+check "coder: imports approved (root)" jqtrue "${FAKE_HOME}/.claude.json" ".projects[\"${PR}\"].hasClaudeMdExternalIncludesApproved == true and .projects[\"${PR}\"].hasClaudeMdExternalIncludesWarningShown == true"
 check "coder: jarvis env untouched"    test ! -e "${JARVIS_ENV_DIR}/channel.env"
 # re-run without an answer: the token already on the server keeps Coder installed
 CODER_BOT_TOKEN=""; CODER_INSTALLED=0
