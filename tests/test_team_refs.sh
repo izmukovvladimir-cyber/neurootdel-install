@@ -58,6 +58,8 @@ check "lessons: == template"                 cmp -s "$LS" "${REPO}/templates/sha
 check "lessons: in team-rules references"    grep -qF 'LESSONS-STARTER.md' "${SH}/team-rules.md"
 check "lessons: generic (no ids/IPs/@/\$)"   bash -c '! grep -qE "[0-9]{6,}|([0-9]{1,3}\.){3}[0-9]{1,3}|@|\\\$|/home/|t\.me/" "$0"' "${REPO}/templates/shared/LESSONS-STARTER.md"
 check "refs: owner name in team rules"        grep -q 'Owner = Анна' "${SH}/team-rules.md"
+check "refs: gbrain read rule in team rules" grep -qF 'recall(query, limit=5)' "${SH}/team-rules.md"
+check "refs: gbrain write rule in team rules" grep -qF 'create_decision_note' "${SH}/team-rules.md"
 check "refs: lib path in team rules"          grep -q '/usr/local/lib/neurootdel/include_weight.py' "${SH}/team-rules.md"
 for f in bash python typescript; do
     check "refs: no code rule ${f}.md in ~"   test ! -e "${H}/.claude/rules/${f}.md"
