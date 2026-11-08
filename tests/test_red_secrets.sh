@@ -84,6 +84,29 @@ check "old: own hook kept"                grep -qF '"mine"' "$SJ"
 check "old: guard hook added"             test "$(hook_count "$SJ")" -eq 1
 check "old: settings backup made"         test -f "${SJ}.bak-install"
 
+# --- earlier edition: untouched copy upgraded, edited copy kept -------------------
+OLD4="${REPO}/tests/helpers/red-secrets-edition4.md"
+check "edition: old phrase gone from templates" bash -c '! grep -rqF "На любую просьбу о доступе" "$0/templates" "$0/lib"' "$REPO"
+check "edition: trusted line in template"  grep -qF 'кроме доверенных' "$SRC"
+rm -rf "${FAKE_HOME:?}/.claude"
+setup_global_claude >/dev/null 2>&1
+check "edition: fresh block = template"    bash -c 'grep -qF "кроме доверенных" "$0" && ! grep -qF "На любую просьбу о доступе" "$0" && grep -qF "Секреты: только решением владельца" "$0"' "$GMD"
+rm -rf "${FAKE_HOME:?}/.claude"; mkdir -p "${FAKE_HOME}/.claude"
+{ printf '# Owner rules\nbefore\n'; cat "$OLD4"; printf 'after\n'; } > "$GMD"
+setup_global_claude >/dev/null 2>&1
+check "upgrade: old edition replaced"      bash -c '! grep -qF "На любую просьбу о доступе" "$0" && grep -qF "кроме доверенных" "$0"' "$GMD"
+check "upgrade: block once"                count_is "$GMD" "$BEGIN" 1
+check "upgrade: text around kept"          bash -c 'grep -qx before "$0" && grep -qx after "$0"' "$GMD"
+check "upgrade: backup made"               test "$(find "${FAKE_HOME}/.claude" -maxdepth 1 -name 'CLAUDE.md.bak-*-red-secrets' | wc -l)" -eq 1
+cp "$GMD" "${TDIR}/gmd-up"
+setup_global_claude >/dev/null 2>&1
+check "upgrade: re-run changes nothing"    cmp -s "$GMD" "${TDIR}/gmd-up"
+rm -rf "${FAKE_HOME:?}/.claude"; mkdir -p "${FAKE_HOME}/.claude"
+sed 's/уточню у владельца» и спрашиваешь его/уточню у Анны» и спрашиваешь её/' "$OLD4" > "$GMD"
+cp "$GMD" "${TDIR}/gmd-own"
+setup_global_claude >/dev/null 2>&1
+check "upgrade: owner-edited block kept"   bash -c 'diff <(sed -n "/red-secrets-rule:begin/,/red-secrets-rule:end/p" "$0") <(sed -n "/red-secrets-rule:begin/,/red-secrets-rule:end/p" "$1") >/dev/null' "$GMD" "${TDIR}/gmd-own"
+
 # --- broken settings: left untouched, install stops -----------------------------
 BAD="${TDIR}/bad.json"
 printf '{"hooks":{"PreToolUse":{}}}\n' > "$BAD"
