@@ -123,19 +123,90 @@ def not_included_handoff_is_ignored():
 
 
 @case
-def escalates_to_outbox_on_third_night_once_per_day():
+def night_pass_does_not_escalate_journals_the_morning_does():
     lab, st = env()
     make_agent(lab, "a", handoff=BIG)
     n, a = Rec(), Rec()
     assert go(lab, st, D1, n, a) == []
     assert go(lab, st, D2, n, a) == []
-    out = go(lab, st, D3, n, a)
-    assert len(out) == 1 and "3 ночей подряд" in out[0] and "handoff.md 16 КБ" in out[0], out
-    assert len(a.calls) == 1 and "3 ночей подряд" in a.calls[0][1]
-    go(lab, st, D3, n, a)
-    go(lab, st, D3, n, a)
-    assert len(a.calls) == 1, a.calls  # outbox not repeated the same day, however many runs
+    assert go(lab, st, D3, n, a) == [] and a.calls == []
     assert len(n.calls) == 3
+    m = Rec()
+    assert mww.morning(["a"], lab, st, D3, m) == 1
+    assert len(m.calls) == 1 and "- a:" in m.calls[0][1] and "ночь 3" in m.calls[0][1], m.calls
+    assert "handoff.md 16 КБ" in m.calls[0][1], m.calls
+
+
+@case
+def morning_line_from_the_first_night_once_a_day():
+    lab, st = env()
+    make_agent(lab, "a", handoff=BIG)
+    make_agent(lab, "b")
+    go(lab, st, D1, Rec(), Rec(), agents=("a", "b"))
+    m = Rec()
+    assert mww.morning(["a", "b"], lab, st, D1, m) == 1
+    assert mww.morning(["a", "b"], lab, st, D1, m) == 0
+    assert len(m.calls) == 1 and "ночь 1" in m.calls[0][1] and "- b" not in m.calls[0][1], m.calls
+
+
+@case
+def morning_is_silent_when_cleaned_and_kept_until_delivered():
+    lab, st = env()
+    make_agent(lab, "a", handoff=BIG)
+    go(lab, st, D1, Rec(), Rec())
+    bad, good = Rec(ok=False), Rec()
+    assert mww.morning(["a"], lab, st, D1, bad) == 1
+    assert mww.morning(["a"], lab, st, D1, good) == 1 and len(good.calls) == 1
+    lab2, st2 = env()
+    make_agent(lab2, "a", handoff=BIG)
+    go(lab2, st2, D1, Rec(), Rec())
+    make_agent(lab2, "a")
+    q = Rec()
+    assert mww.morning(["a"], lab2, st2, D1, q) == 0 and q.calls == []
+    lab3, st3 = env()
+    make_agent(lab3, "a", handoff=BIG)
+    go(lab3, st3, D1, Rec(), Rec())
+    assert mww.morning(["a"], lab3, st3, D2, q) == 0 and q.calls == []  # no night pass today
+
+
+@case
+def morning_on_broken_state_says_so_once_a_day():
+    lab, st = env()
+    st.parent.mkdir(parents=True, exist_ok=True)
+    st.write_text("{broken")
+    a = Rec()
+    assert mww.morning(["a"], lab, st, D1, a) == -1
+    assert mww.morning(["a"], lab, st, D1, a) == -1
+    assert len(a.calls) == 1 and "испорчено" in a.calls[0][1], a.calls
+
+
+@case
+def whole_turn_over_the_cap_signals_and_reports():
+    lab, st = env()
+    make_agent(lab, "a")
+    core = lab / "a" / ".claude" / "core"
+    (core / "rules.md").write_text("x\n@extra.md\n")
+    (core / "extra.md").write_text("x" * (mww.TURN_LIMIT + 1))  # nested @: invisible to the old weigh
+    n, a = Rec(), Rec()
+    out = go(lab, st, D1, n, a)
+    assert len(n.calls) == 1 and "весь ход" in n.calls[0][1], n.calls
+    assert len(out) == 1 and "весь ход" in out[0], out
+    go(lab, st, D1, n, a)
+    assert len(n.calls) == 1 and len(a.calls) == 1, (n.calls, a.calls)
+
+
+@case
+def turn_counts_the_global_claude_md():
+    lab, st = env()
+    make_agent(lab, "a")
+    home = mww.CONF.agent_home
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / "CLAUDE.md").write_text("g" * 777)
+    try:
+        total, own = mww.weigh_turn(lab / "a")
+    finally:
+        (home / ".claude" / "CLAUDE.md").unlink()
+    assert total - own >= 777, (total, own)
 
 
 @case
@@ -373,6 +444,30 @@ def outbox_exception_still_saves_state():
     go(lab, st, D1, Rec(ok=False), boom)
     saved = json.loads(st.read_text())
     assert saved["a"]["days"] == 1 and len(saved["_pending"]) == 1
+
+
+@case
+def main_morning_hour_runs_the_morning_pass():
+    tmp = Path(tempfile.mkdtemp())
+    orig = mww.STATE_DIR, mww.LOCK_FILE, mww.STOP_FILE, mww.run, mww.morning, mww._hour
+    mww.STATE_DIR, mww.LOCK_FILE, mww.STOP_FILE = tmp, tmp / ".lock", tmp / "STOP"
+    called = []
+    mww.run = lambda *a, **k: called.append("night") or []
+    mww.morning = lambda *a, **k: called.append("morning") or 0
+    try:
+        mww._hour = lambda: mww.MORNING_HOUR
+        assert mww.main(["--auto"]) == 0 and called == ["morning"]
+        mww._hour = lambda: mww.AUTO_HOUR
+        assert mww.main(["--auto"]) == 0 and called == ["morning", "night"]
+        mww._hour = lambda: 13  # later hours retry the morning pass until delivered
+        assert mww.main(["--auto"]) == 0 and called == ["morning", "night", "morning"]
+        mww._hour = lambda: 7
+        assert mww.main(["--auto"]) == 0 and called == ["morning", "night", "morning"]
+        assert mww.main(["--morning"]) == 0 and called == ["morning", "night", "morning", "morning"]
+        mww.morning = lambda *a, **k: -1
+        assert mww.main(["--morning"]) == 1
+    finally:
+        mww.STATE_DIR, mww.LOCK_FILE, mww.STOP_FILE, mww.run, mww.morning, mww._hour = orig
 
 
 @case
@@ -632,7 +727,8 @@ def rules_growth_does_not_repeat_journal_escalation():
     n_before = sum("ночей подряд" in c[1] for c in a.calls)
     make_agent(lab, "a", handoff=BIG, rules=RULES_BIG + "x" * 2048)
     go(lab, st, D3, Rec(), a)
-    assert sum("ночей подряд" in c[1] for c in a.calls) == n_before == 1, a.calls
+    # journal escalation moved to the morning re-check: the night pass sends none at all
+    assert sum("ночей подряд" in c[1] for c in a.calls) == n_before == 0, a.calls
 
 
 @case
@@ -657,6 +753,9 @@ def as_root_weighing_runs_as_agent_user_with_timeout():
     assert seen and seen[0][0][:7] == ["runuser", "-u", "agentuser", "--", "timeout", "-s", "KILL"], seen
     assert seen[0][1].get("timeout") == mww.WEIGH_TIMEOUT
     assert len(n.calls) == 1 and "rules.md: 31 КБ" in n.calls[0][1], n.calls
+    # the whole-turn weigher runs the same way: as the agent user, never as root
+    assert any(mww._TURN_CHILD in c for c, _kw in seen), seen
+    assert all(c[:4] == ["runuser", "-u", "agentuser", "--"] for c, _kw in seen), seen
 
 
 @case
