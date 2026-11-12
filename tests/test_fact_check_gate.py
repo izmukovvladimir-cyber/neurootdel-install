@@ -146,6 +146,15 @@ POST_OUT = ("Мария, оформил:\n\n**VPN и исчезающие соо
             "стали использовать VPN и исчезающие сообщения как довод, чтобы арестовать человека, ага.\n\n"
             "Продолжаем плотно держать вас в курсе")
 
+STD_BODY = ("Весной многие начинают вести блог заново и бросают через две недели. Причина почти всегда одна: нет "
+            "плана на месяц вперёд. Возьмите лист и запишите десять тем, о которых вас чаще всего спрашивают клиенты. "
+            "Каждая тема даёт пост, короткое видео и ответ в сторис. Так за вечер у вас появляется контент на месяц, "
+            "а писать становится проще, потому что тема уже выбрана.")
+STD_PIECE = "Текст поста:\n\n" + STD_BODY
+STD_LIST = ("Что сделал за день:\n\n1. Проверил расписание публикаций на неделю и поправил две даты.\n2. Собрал темы "
+            "для следующей недели в общий файл.\n3. Ответил на вопросы в группе и передал задачу по боту дальше.\n"
+            "4. Сверил отчёт по рассылке, цифры совпадают с кабинетом, расхождений нет.\n5. Завтра продолжаю.")
+
 
 def ts(sec: int) -> str:
     return f"2026-10-29T01:{sec // 60:02d}:{sec % 60:02d}.000Z"
@@ -355,6 +364,26 @@ def run() -> int:
         t = Transcript(d)
         build(t)
         return g.decide(payload(NEWS, GROUP, t.save()), 0, d / "state")
+
+    def std_case(build, text: str | None = None) -> str | None:
+        d = fresh()
+        t = Transcript(d)
+        build(t)
+        return g.decide(payload(STD_PIECE if text is None else text, OWNER, t.save()), 0, d / "state")
+
+    def std_timed(build) -> str | None:
+        d = fresh()
+        t = Timed(d)
+        build(t)
+        return g.decide(payload(STD_PIECE, OWNER, t.save()), at(t.last + 5), d / "state")
+
+    def std_off_case() -> str | None:
+        saved = g.TEXT_STD_ON
+        g.TEXT_STD_ON = False
+        try:
+            return std_case(lambda t: t.prompt_msg("p1"))
+        finally:
+            g.TEXT_STD_ON = saved
 
     def style(text: str) -> list[str]:
         with style_on():
@@ -808,6 +837,39 @@ def run() -> int:
         ("post: short human phrase (< 20 chars) does not exempt",
          with_chip(MEMBERS, {250: (MARIA, "Ок, сделаю.")}, lambda d: (lambda r: r is not None and g.STYLE_MARK in r)(
              tdecide(d, "Ок, сделаю.", lambda t: t.incoming("p1", 0, watch(MARIA, "Мария Иванова", "Ок, сделаю.")))))),
+        # --- text standard: a finished text for people needs checklists/text-standard.md read in the turn ---
+        ("std: a handed-over piece without the standard read is denied",
+         (lambda r: r is not None and g.TEXT_STD_MARK in r)(std_case(lambda t: t.prompt_msg("p1")))),
+        ("std: the same piece after Read of the standard has no std deny",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1").call(
+             "Read", {"file_path": "/home/u/.claude-lab/shared/checklists/text-standard.md"})))),
+        ("std: a Read of the standard in an EARLIER turn does not count",
+         (lambda r: r is not None and g.TEXT_STD_MARK in r)(std_case(lambda t: t.prompt_msg("p0").call(
+             "Read", {"file_path": "/home/u/.claude-lab/shared/checklists/text-standard.md"}).prompt_msg("p1")))),
+        ("std: a failed Read of the standard does not count",
+         (lambda r: r is not None and g.TEXT_STD_MARK in r)(std_case(lambda t: t.prompt_msg("p1").call(
+             "Read", {"file_path": "/x/checklists/text-standard.md"}, "No such file", True)))),
+        ("std: a service list after a colon is not a piece",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"), STD_LIST))),
+        ("std: a short reply is not a piece",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"), "Готово, передал."))),
+        ("std: no transcript never denies on the standard",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(g.decide(payload(STD_PIECE, OWNER), 0, fresh() / "state"))),
+        ("std: FACT_GATE_TEXT_STANDARD=0 turns it off",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_off_case())),
+        ("std: a Read of the standard one minute ago in the PREVIOUS turn does not count",
+         (lambda r: r is not None and g.TEXT_STD_MARK in r)(std_timed(lambda t: t.incoming("p0", 0).call(
+             10, "Read", {"file_path": "/x/checklists/text-standard.md"}).incoming("p1", 70)))),
+        ("std: a Read of the standard in this timed turn passes",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_timed(lambda t: t.incoming("p0", 0).incoming(
+             "p1", 70).call(80, "Read", {"file_path": "/x/checklists/text-standard.md"})))),
+        ("std: intros ABOUT a text (status, question, report, edits) are not a piece",
+         all((lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"), i + "\n\n" + STD_BODY))
+             for i in ("Статус работы над текстом:", "Вопрос по посту:", "Отчёт по рассылке:", "Правки в тексте:",
+                       "Анализ текста:", "Краткое резюме текста:", "Разбор поста:", "Оценка версии:"))),
+        ("std: a numbered list after a matching intro is not a piece",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"),
+                                                                    "Варианты заголовка:" + STD_LIST[STD_LIST.index("\n\n"):]))),
     ]
     cases += conf_cases()
     for name, ok in cases:

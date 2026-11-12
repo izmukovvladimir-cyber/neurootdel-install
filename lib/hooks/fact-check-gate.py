@@ -25,6 +25,13 @@ accounts), FACT_GATE_CHIP_URL + FACT_GATE_CHIP_ENV (optional Telegram user-accou
    b. a ready post a HUMAN wrote in this GROUP (author and text verified in Telegram via the chip, a listed member
       who is not a bot) is not style-checked when sent near-verbatim. Facts are checked on the whole text.
    Without a chip both are off and the gate makes no network calls at all.
+4. Text standard (FACT_GATE_TEXT_STANDARD, on unless "0"), every chat: a finished text for people is denied until
+   checklists/text-standard.md was opened with Read in this turn (the same turn window as the fact check). A text for
+   people is recognised by a formal mark only: a short intro paragraph that hands over a piece and ends with «:»
+   («Текст поста:», «Вот версия письма:», «черновик ...») followed by >= LONG_FACT_CHARS of text that is not a
+   numbered or bulleted list. A service reply (ack, status, question, report, plan, list) has no such mark and is never
+   touched. No transcript: no deny (the gate never wedges a reply). Known limit: a piece sent bare, without an intro,
+   is not seen.
 
 An edit (chat_id, message_id, text) is checked exactly like a reply, and a deny of a reply or of an edit with the
 same chat+text is the same deny (the hash ignores the tool).
@@ -96,6 +103,7 @@ BOT_IDS = SELF_IDS | _id_set(_RAW.get("FACT_GATE_BOT_IDS", ""))  # never a «hum
 CHIP_URL = _chip_url(_RAW.get("FACT_GATE_CHIP_URL", ""))
 CHIP_ENV = _chip_env(_RAW.get("FACT_GATE_CHIP_ENV", ""))
 STYLE_RE = build_style_re(_RAW.get("FACT_GATE_STYLE_BANNED", ""))
+TEXT_STD_ON = _RAW.get("FACT_GATE_TEXT_STANDARD", "1").strip() != "0"
 LOG_TZ = _CONF.owner_timezone
 
 FALLBACK_SEC = 1800
@@ -792,6 +800,76 @@ def fact_decide(payload: dict, now: float, state_dir: Path,
     return FACT_REASON, "fact:deny-new"
 
 
+# --- 4. text standard: a finished text for people needs the standard read in this turn -------------------------
+TEXT_STD_MARK = "[стандарт-гейт]"
+TEXT_STD_FILE = "checklists/text-standard.md"
+TEXT_STD_FILE_RE = re.compile(r"(?:^|/)checklists/text-standard\.md$")
+TEXT_STD_REASON = (TEXT_STD_MARK + " Это готовый текст для людей, а стандарт текста в этом ходе не прочитан. "
+                   "Сначала Read: " + TEXT_STD_FILE + " (в общей папке агентов), пройди текст по нему, потом отправляй.")
+PEOPLE_INTRO_MAX = 200
+PEOPLE_FENCE = re.compile(r"```.*?```", re.S)
+PEOPLE_NOUN = (r"(?<![\w-])(?:текст\w*|пост\w{0,2}|новост\w*|письм\w*|рассылк\w*|верси[яюи]|вариант\w*|подпис\w*|"
+               r"сценари\w*|анонс\w*)")
+PEOPLE_INTRO_RE = re.compile(PEOPLE_NOUN + r"(?:\s+[\w«»\"-]+){0,3}\s*:\s*$|(?<![\w-])черновик\w*", re.IGNORECASE)
+PEOPLE_LIST_RE = re.compile(r"^\s*(?:\*\*)?\s*(?:\d{1,2}[.)]|[-•*—–])\s")
+# An intro that talks ABOUT a text (status, report, question, edits) hands nothing over.
+PEOPLE_SERVICE_RE = re.compile(r"(?<![\w-])(?:статус\w*|отч[её]т\w*|вопрос\w*|план\w*|сделал\w*|сделан\w*|"
+                               r"проблем\w*|ошибк\w*|замечани\w*|правк\w*|задач\w*|анализ\w*|разбор\w*|резюме|оценк\w*|"
+                               r"комментари\w*|сравнени\w*|выжимк\w*|итог\w*|вывод\w*)(?![\w-])|"
+                               r"(?<![\w-])(?:над|по|про|о|об)\s+" + PEOPLE_NOUN, re.IGNORECASE)
+
+
+def people_intro(text: str) -> str | None:
+    """The intro paragraph that hands over a ready piece («Текст поста:»), or None."""
+    paras = [x for x in re.split(r"\n\s*\n", PEOPLE_FENCE.sub("", text).strip()) if x.strip()]
+    if len(paras) < 2:
+        return None
+    first, body = paras[0].strip(), "\n\n".join(paras[1:]).strip()
+    if (len(first) <= PEOPLE_INTRO_MAX and first.endswith(":") and PEOPLE_INTRO_RE.search(first)
+            and not PEOPLE_SERVICE_RE.search(first)
+            and len(body) >= LONG_FACT_CHARS and not PEOPLE_LIST_RE.match(body)):
+        return first
+    return None
+
+
+def standard_read(entries: list[dict], now: float) -> bool:
+    """A successful Read of checklists/text-standard.md in the current turn: its promptId; the WINDOW_SEC time
+    window only when the transcript has no promptId at all (a read from an earlier turn never counts)."""
+    prompt_id = None
+    for d in reversed(entries):
+        if d.get("type") == "user" and d.get("promptId"):
+            prompt_id = d["promptId"]
+            break
+    uses: dict[str, str] = {}
+    for d in entries:
+        content = (d.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        t = _ts(d)
+        in_scope = (d.get("promptId") == prompt_id) if prompt_id is not None else (
+            t is not None and now - WINDOW_SEC <= t <= now)
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and b.get("name") == "Read":
+                uses[str(b.get("id"))] = str((b.get("input") or {}).get("file_path", ""))
+            elif b.get("type") == "tool_result" and in_scope and not b.get("is_error"):
+                path = uses.get(str(b.get("tool_use_id")))
+                if path and TEXT_STD_FILE_RE.search(path):
+                    return True
+    return False
+
+
+def standard_decide(text: str, now: float, entries: list[dict] | None) -> tuple[str | None, str]:
+    if not TEXT_STD_ON or not people_intro(text):
+        return None, ""
+    if entries is None:
+        return None, "std:no-transcript"
+    if standard_read(entries, now):
+        return None, "std:ok"
+    return TEXT_STD_REASON, "std-deny"
+
+
 def decide(payload: dict, now: float, state_dir: Path) -> str | None:
     """Return a deny reason, or None to let the call through."""
     reason, _ = decide_verbose(payload, now, state_dir)
@@ -849,6 +927,9 @@ def decide_verbose(payload: dict, now: float, state_dir: Path) -> tuple[str | No
             tag_problems = []
             notes.append("extras-error")
     fact, verdict = fact_decide(payload, now, state_dir, entries)  # facts: the WHOLE text
+    std, std_verdict = standard_decide(text, now, entries)
+    if std_verdict:
+        verdict = std_verdict + ";" + verdict
     for n in notes:
         verdict = n + ";" + verdict
     if tag_problems:
@@ -861,6 +942,8 @@ def decide_verbose(payload: dict, now: float, state_dir: Path) -> tuple[str | No
                                                                     enumerate(problems, 1)) + ".")
     if tag_problems:
         parts.append(MENTION_MARK + " " + "; ".join(tag_problems) + ".")
+    if std:
+        parts.append(std)
     if fact:
         parts.append(fact)
     return (" ".join(parts) if parts else None), verdict
