@@ -20,13 +20,15 @@ job="${dir}/${id}.json"
 logf="${dir}/wake.log"
 tries="${QR_WAKE_TRIES:-3}"
 pause="${QR_WAKE_RETRY_SEC:-60}"
+# shellcheck source=crontab-edit.sh
+source "$(dirname "${BASH_SOURCE[0]}")/crontab-edit.sh"
 say() { printf '%s %s %s\n' "$(date '+%F %T')" "$id" "$1" >> "$logf" 2>/dev/null || true; }
 
 drop_cron_line() {
     # Same lock as create.sh: a parallel add or removal cannot overwrite this one.
     (
         flock -w 30 9 || { say "crontab lock busy, line left"; exit 0; }
-        crontab -l 2>/dev/null | grep -vF "qr:ID=${id} wake" | crontab - || say "crontab rewrite failed"
+        qr_crontab_drop "qr:ID=${id} wake" || say "crontab not read or not rewritten, line left"
     ) 9>"${dir}/.crontab.lock"
 }
 [[ -f "$job" ]] || { say "no job file"; drop_cron_line; exit 1; }
