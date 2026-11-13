@@ -173,6 +173,12 @@ JARVIS_BOT_TOKEN="7000555666:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" render_guard_c
 check "conf: owner ids in guard.conf beat the token" grep -qx 'FACT_GATE_SELF_IDS="11 22"' "${GC}.f5"
 NEUROOTDEL_FACT_GATE_STYLE_BANNED="" NEUROOTDEL_FACT_GATE_CHIP_URL="" render_guard_conf "${GC}.f2" >"${GC}.f6"
 check "conf: empty env clears style and chip" bash -c 'grep -qx "FACT_GATE_STYLE_BANNED=\"\"" "$0" && grep -qx "FACT_GATE_CHIP_URL=\"\"" "$0" && grep -qx "FACT_GATE_CHIP_ENV=\"/srv/chip/.env\"" "$0"' "${GC}.f6"
+check "conf: text standard on by default"   grep -qx 'FACT_GATE_TEXT_STANDARD="1"' "${GC}.f1"
+NEUROOTDEL_FACT_GATE_TEXT_STANDARD="0" render_guard_conf "${GC}.f1" >"${GC}.f9"
+render_guard_conf "${GC}.f9" >"${GC}.f10"
+NEUROOTDEL_FACT_GATE_TEXT_STANDARD="x" render_guard_conf "${GC}.f9" >"${GC}.f11" 2>/dev/null
+check "conf: text standard off from env, kept on re-run" bash -c 'grep -qx "FACT_GATE_TEXT_STANDARD=\"0\"" "$0" && grep -qx "FACT_GATE_TEXT_STANDARD=\"0\"" "$1"' "${GC}.f9" "${GC}.f10"
+check "conf: bad text standard value -> on"  grep -qx 'FACT_GATE_TEXT_STANDARD="1"' "${GC}.f11"
 sed -i 's/^FACT_GATE_SELF_IDS=.*/FACT_GATE_SELF_IDS=""/' "${GC}.f5"
 JARVIS_BOT_TOKEN="7000555666:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" render_guard_conf "${GC}.f5" >"${GC}.f7"
 check "conf: owner-cleared self id stays empty" grep -qx 'FACT_GATE_SELF_IDS=""' "${GC}.f7"

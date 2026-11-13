@@ -3362,6 +3362,8 @@ render_guard_conf() {
     fenv=$(_gate_conf_pick "$existing" FACT_GATE_CHIP_ENV)
     [[ -z "$fenv" || "$fenv" =~ ^/[A-Za-z0-9._/-]+$ ]] || { warn "FACT_GATE_CHIP_ENV '${fenv}' is not an absolute path -- chip off."; fenv=""; }
     fstyle=$(_gate_conf_pick "$existing" FACT_GATE_STYLE_BANNED)
+    ftstd=$(_gate_conf_pick "$existing" FACT_GATE_TEXT_STANDARD)
+    [[ -z "$ftstd" || "$ftstd" =~ ^[01]$ ]] || { warn "FACT_GATE_TEXT_STANDARD '${ftstd}' is not 0 or 1 -- left on."; ftstd=""; }
     # The stage never goes back: a workshop re-run on an intensive server keeps Coder and Auditor checked.
     stage="${STAGE:-workshop}"
     [[ "$(_guard_conf_get "$existing" INSTALL_STAGE)" == intensive ]] && stage=intensive
@@ -3397,7 +3399,9 @@ render_guard_conf() {
 #   CHIP_URL     optional Telegram user-account chip, http://host:port (empty = tag check and
 #                ready-post exception off, the gate makes no network calls);
 #   CHIP_ENV     file with CHIP_API_TOKEN=... readable by the agent (needed with CHIP_URL);
-#   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check).
+#   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check);
+#   TEXT_STANDARD 1 (default) = a finished text for people («Текст поста:» + the piece) is denied until
+#                checklists/text-standard.md was Read in the turn; 0 = off.
 # INSTALL_STAGE: workshop (Jarvis + Richard) or intensive (+ Coder + Auditor), what verify-stage.sh checks;
 # SKILLS_EXPECTED: skills the installer gives each channel agent (verify-stage.sh counts them).
 # CORRECTION_GROUP_CHAT_IDS: groups (-100...) where the owner's messages are caught as corrections by
@@ -3430,6 +3434,7 @@ FACT_GATE_BOT_IDS="$(_guard_conf_value "$fbots")"
 FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
 FACT_GATE_CHIP_ENV="$(_guard_conf_value "$fenv")"
 FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
+FACT_GATE_TEXT_STANDARD="${ftstd:-1}"
 INSTALL_STAGE="${stage}"
 SKILLS_EXPECTED="$(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))"
 CORRECTION_GROUP_CHAT_IDS="$(_guard_conf_value "$cgroups")"
