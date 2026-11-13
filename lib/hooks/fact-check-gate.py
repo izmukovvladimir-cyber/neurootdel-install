@@ -819,16 +819,27 @@ PEOPLE_SERVICE_RE = re.compile(r"(?<![\w-])(?:статус\w*|отч[её]т\w*|
                                r"(?<![\w-])(?:над|по|про|о|об)\s+" + PEOPLE_NOUN, re.IGNORECASE)
 
 
+PEOPLE_MD_RE = re.compile(r"[*_`]+")
+
+
 def people_intro(text: str) -> str | None:
-    """The intro paragraph that hands over a ready piece («Текст поста:»), or None."""
-    paras = [x for x in re.split(r"\n\s*\n", PEOPLE_FENCE.sub("", text).strip()) if x.strip()]
-    if len(paras) < 2:
-        return None
-    first, body = paras[0].strip(), "\n\n".join(paras[1:]).strip()
-    if (len(first) <= PEOPLE_INTRO_MAX and first.endswith(":") and PEOPLE_INTRO_RE.search(first)
-            and not PEOPLE_SERVICE_RE.search(first)
-            and len(body) >= LONG_FACT_CHARS and not PEOPLE_LIST_RE.match(body)):
-        return first
+    """The intro that hands over a ready piece («Текст поста:», «**Текст поста:**»), or None. The intro is the
+    first paragraph or, when the body follows after a single line break, the first line."""
+    clean = PEOPLE_FENCE.sub("", text).strip()
+    paras = [x for x in re.split(r"\n\s*\n", clean) if x.strip()]
+    candidates = []
+    if len(paras) >= 2:
+        candidates.append((paras[0], "\n\n".join(paras[1:])))
+    head, sep, rest = clean.partition("\n")
+    if sep:
+        candidates.append((head, rest))
+    for raw_first, raw_body in candidates:
+        first = PEOPLE_MD_RE.sub("", raw_first).strip()
+        body = raw_body.strip()
+        if (len(first) <= PEOPLE_INTRO_MAX and first.endswith(":") and PEOPLE_INTRO_RE.search(first)
+                and not PEOPLE_SERVICE_RE.search(first)
+                and len(body) >= LONG_FACT_CHARS and not PEOPLE_LIST_RE.match(body)):
+            return first
     return None
 
 

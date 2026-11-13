@@ -867,6 +867,15 @@ def run() -> int:
          all((lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"), i + "\n\n" + STD_BODY))
              for i in ("Статус работы над текстом:", "Вопрос по посту:", "Отчёт по рассылке:", "Правки в тексте:",
                        "Анализ текста:", "Краткое резюме текста:", "Разбор поста:", "Оценка версии:"))),
+        ("std: the intro on its own line (single line break) is a piece",
+         (lambda r: r is not None and g.TEXT_STD_MARK in r)(std_case(lambda t: t.prompt_msg("p1"),
+                                                                    "Текст поста:\n" + STD_BODY))),
+        ("std: a bold intro «**Текст поста:**» is a piece",
+         all((lambda r: r is not None and g.TEXT_STD_MARK in r)(std_case(lambda t: t.prompt_msg("p1"), i + STD_BODY))
+             for i in ("**Текст поста:**\n\n", "**Текст поста:**\n", "__Текст поста:__\n\n"))),
+        ("std: a service intro on its own line is still not a piece",
+         (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"),
+                                                                    "**Статус работы над текстом:**\n" + STD_BODY))),
         ("std: a numbered list after a matching intro is not a piece",
          (lambda r: r is None or g.TEXT_STD_MARK not in r)(std_case(lambda t: t.prompt_msg("p1"),
                                                                     "Варианты заголовка:" + STD_LIST[STD_LIST.index("\n\n"):]))),
