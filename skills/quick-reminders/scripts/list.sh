@@ -17,5 +17,6 @@ crontab -l 2>/dev/null | awk '
     if (match(line, /text="[^"]*"/)) {
         msg = substr(line, RSTART + 6, RLENGTH - 7)
     }
+    if (msg == "" && line ~ / wake$/) msg = "(будильник агента)"
     printf "%s\t%s\t%s\n", id, sched, msg
 }' || echo "(no reminders)"

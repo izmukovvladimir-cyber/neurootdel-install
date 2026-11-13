@@ -75,7 +75,8 @@ EOF
     printf 'TELEGRAM_BOT_TOKEN=%s\nALLOWED_USERS=%s\n' "$TOKEN_R" "$OWNER" >"${R}/opt/richard/.env"
     printf '# global\n<!-- agent-rules-starter:begin -->\nrules\n<!-- red-secrets-rule:begin -->\n@~/.claude-lab/shared/team-rules.md\n' >"$H/.claude/CLAUDE.md"
     printf '{"hooks":"block-dangerous.py protect-files.sh compact-open-items-reminder.py"}\n' >"$H/.claude/settings.json"
-    mkdir -p "$H/.claude-lab/shared"; echo team >"$H/.claude-lab/shared/team-rules.md"
+    mkdir -p "$H/.claude-lab/shared/checklists/samples"; echo team >"$H/.claude-lab/shared/team-rules.md"
+    echo readme >"$H/.claude-lab/shared/checklists/samples/README.md"; echo 'Мой пост.' >"$H/.claude-lab/shared/checklists/samples/post.md"
     mkws jarvis
     for f in agents-reset agents-guard auth-watch memory-backup memory-offsite root-requests; do echo "* * * * * x" >"${CRON}/neurootdel-${f}"; done
     mkdir -p "$H/backups/offsite"; printf 'OK %s %s выгружено\n' "$(date +%s)" "$OTAG" >"$H/backups/offsite/last"
@@ -214,6 +215,18 @@ build intensive; mkcoder; mkauditor; run
 check "intensive green: exit 0"                test "$RC" -eq 0
 check "intensive green: no ❌"                 not grep -q "^❌" "${TDIR}/out"
 check "intensive green: Auditor bridge"        out_has "✅ Auditor: мост для задач от агентов работает"
+SMP="$H/.claude-lab/shared/checklists/samples"
+check "samples: one genre on intensive ✅"     out_has "✅ Образцы текстов: 1 из 5 жанров"
+build intensive; mkcoder; mkauditor; rm "${SMP}/post.md"; run
+check "samples: zero on intensive ❌ with hint" hint_has "Образцы текстов: 0 из 5 жанров" "разложи как образцы"
+build intensive; mkcoder; mkauditor; printf '  \n' >"${SMP}/post.md"; echo x >"${SMP}/letter.txt"; run
+check "samples: blank file not counted"        out_has "✅ Образцы текстов: 1 из 5 жанров"
+build; rm "${SMP}/post.md"; run
+check "samples: zero on workshop ⏸, not ❌"   out_has "⏸ Образцы текстов: 0 из 5 жанров"
+check "samples: zero on workshop keeps exit 0" test "$RC" -eq 0
+build; for g in a b c d e f g; do echo t >"${SMP}/${g}.md"; done; run
+check "samples: capped at 5"                   out_has "✅ Образцы текстов: 5 из 5 жанров"
+build intensive; mkcoder; mkauditor; run
 check "intensive green: Coder hooks"           out_has "✅ Coder: хуки включены"
 check "intensive: login secret never printed"  not grep -q 'SECRET-REFRESH' "${TDIR}/out"
 check "intensive: tokens never in argv"        not grep -qE 'CCHabc|AUDabc' "${TDIR}/curl.argv"

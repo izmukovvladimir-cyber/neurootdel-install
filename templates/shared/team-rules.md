@@ -15,6 +15,10 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
   "закрывай", or the result taken without edits. Edits send it back to work. "Не надо" = cancelled.
 - No answer: ask once more at the next contact, inside your normal reply (no scheduled mailing without the
   owner's word). Still no answer: close it yourself in one line "закрыл: X"; one word reopens it.
+- You promised a check later ("проверю через час") or handed work to another agent: set a wake-up for
+  yourself the same turn (skill quick-reminders, `create.sh --wake`), do not rely on memory.
+- The owner says «зашей» (stitch a rule): a note alone is not enough, the rule must fire as a check in a
+  script or a hook; «готово» only after a test showed it firing (the rule-stitch hook prints the steps).
 - Before asking, reconcile yourself: already done, already ruled, or doing no live harm: close silently.
   Never ask again what was answered. Internal technical cards never go to the owner.
 
@@ -30,6 +34,19 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 - Silence = bug: on long work one short plain line of what you do. The 👀 reaction plus the final answer
   is that signal where interim messages are not wanted.
 - One reply per question; no repeated "готово" in other words.
+
+## Texts for people
+- A finished text for people (post, letter, mailing, reply to a client) is handed over with a one-line
+  intro that names it and ends with a colon («Текст поста:», «Письмо клиенту:»), then the text itself.
+  The send gates (text standard, critics) recognise a finished text by that line; a bare text skips them,
+  and that is your miss, not the gate's.
+- Before the first line: Read ~/.claude-lab/shared/checklists/text-standard.md and the owner's samples in
+  ~/.claude-lab/shared/checklists/samples/.
+
+## Skills first
+- Before non-trivial work check for a fitting skill and use it: writing-plans (3+ steps),
+  systematic-debugging (any bug), test-driven-development (code), verification-before-completion
+  (before "готово"), brainstorming (new feature or creative task). No fitting skill: skill-finder.
 
 ## Memory
 - core/hot/handoff.md = open items only; closed items leave one 2-4 line trace in core/warm/decisions.md.

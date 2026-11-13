@@ -7,7 +7,7 @@
 # guard.conf. An agent installed outside the stage (a bot already on this server) is checked too.
 # Per agent: service active, own bot answers getMe, owner in the allowlist, workspace, CLAUDE.md and
 # rules present, @-paths of CLAUDE.md resolve, hooks on, skills. Server: starter rules, memory rotation,
-# guard, login watch, backup, root requests. Auditor: Hermes service, ChatGPT login, bridge.
+# guard, login watch, backup, the owner's sample texts, root requests. Auditor: Hermes service, ChatGPT login, bridge.
 # Editorial loop: «выключено» while EDITORIAL_ENABLED=0 (not a failure).
 #
 # Tokens: read from the env files, sent to curl through stdin (-K -), never argv, never printed.
@@ -244,9 +244,37 @@ section_server() {
             "последний прогон не OK или его ещё не было: причина в ${H}/backups/offsite/offsite.log; доступ проверит и сразу выгрузит: sudo neurootdel-offsite-setup ${OFFSITE_REPO}; если стоит стоп: rm ${H}/backups/offsite/STOP" \
             offsite_fresh "${CRON_DIR}/${U}-memory-offsite" "${H}/backups/offsite/STOP" "${H}/backups/offsite/last"
     fi
+    samples_line
     check "Заявки агентов на root (раз в минуту)" \
         "запусти установщик снова; если стоит стоп: sudo rm ${ETC}/${U}-root-requests.STOP" \
         cron_on "${U}-root-requests" "${ETC}/${U}-root-requests.STOP"
+}
+
+# samples_count <dir> -- sample files of the owner's texts: non-empty .md/.txt other than README.md, at most 5.
+samples_count() {
+    local d=$1 f n=0
+    [[ -d "$d" ]] || { echo 0; return; }
+    for f in "$d"/*.md "$d"/*.txt; do
+        [[ -f "$f" && -s "$f" && "$(basename "$f")" != README.md ]] || continue
+        grep -q '[^[:space:]]' "$f" || continue
+        n=$((n + 1))
+    done
+    ((n > 5)) && n=5
+    echo "$n"
+}
+
+# samples_line -- «Образцы текстов: N из 5 жанров»: ✅ from one, ❌ at zero on the intensive, ⏸ on the workshop.
+samples_line() {
+    local d="${H}/.claude-lab/shared/checklists/samples" n
+    n=$(samples_count "$d")
+    if ((n > 0)); then
+        yes_ "Образцы текстов: ${n} из 5 жанров"
+    elif [[ "$STAGE" == intensive ]]; then
+        no_ "Образцы текстов: 0 из 5 жанров" \
+            "перешли агенту 5 своих лучших текстов разных жанров и скажи «разложи как образцы по жанрам»; как устроено: ${d}/README.md"
+    else
+        printf '⏸ Образцы текстов: 0 из 5 жанров (заполняешь в День 3, раздел про образцы)\n'
+    fi
 }
 
 check_richard() {

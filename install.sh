@@ -3484,8 +3484,9 @@ _re_escape() {
 #         cwd is the home dir): compact reminder, dangerous-command and protected-file stops,
 #         command log, review reminder;
 #   main agent: <plugin>/plugin/.claude/settings.json (claude runs with cwd plugin/):
-#         correction capture, auto-recall, critical thinking, fact-check gate, fallback reply,
-#         lessons at start, pre-compaction flush.
+#         correction capture and its closer, «зашей» gate, auto-recall, critical thinking, fact-check gate,
+#         fallback reply, lessons at start, pre-compaction flush; Jarvis also the paragraph gate and the
+#         text critics gate.
 # A file under <workspace>/.claude/settings.json would never load: claude does not run there.
 setup_agent_hooks() {
     step 12 "Switching the agent hooks on (user + plugin settings.json)"
@@ -3548,10 +3549,31 @@ _setup_plugin_hooks() {
             "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
         add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1
         add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh ${agent}" 40 || fail=1
+        # The owner's correction is recorded before the turn ends (correction-detector leaves the marker).
+        add_hook "$plugin_settings" PostToolUse Bash "python3 ${hooks}/correction-closed.py clear ${ws}" 10 || fail=1
+        add_hook "$plugin_settings" Stop "" "python3 ${hooks}/correction-closed.py stop ${ws}" 10 || fail=1
+        # «Зашей»: the rule ends in a check that fires; «готово» only after the test.
+        local reply_m='mcp__dashi-channel__reply|mcp__dashi-channel__edit_message'
+        add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/rule-stitch-gate.py prompt ${ws}" 10 || fail=1
+        add_hook "$plugin_settings" PreToolUse "$reply_m" "python3 ${hooks}/rule-stitch-gate.py guard ${ws}" 10 || fail=1
+        add_hook "$plugin_settings" PostToolUse 'Bash|mcp__gbrain-swarm__notify' "python3 ${hooks}/rule-stitch-gate.py clear ${ws}" 10 || fail=1
+        add_hook "$plugin_settings" Stop "" "python3 ${hooks}/rule-stitch-gate.py stop ${ws}" 10 || fail=1
+        if [[ "$agent" == jarvis ]]; then
+            # The agent that writes to people: no wall of text (guard.conf PARAGRAPH_GATE), and a text the
+            # critics rejected does not go out as is (armed only while the editorial loop is on).
+            as_agent mkdir -p "${AGENT_HOME}/.claude-lab/shared/state/${agent}/paragraph-gate" \
+                "${AGENT_HOME}/.claude-lab/shared/state/critics" || fail=1
+            add_hook "$plugin_settings" PreToolUse "$reply_m" "python3 ${hooks}/paragraph-gate.py ${AGENT_HOME}/.claude-lab/shared/state/${agent}/paragraph-gate" 10 || fail=1
+            add_hook "$plugin_settings" PreToolUse "$reply_m" "python3 ${hooks}/text-critics-gate.py ${AGENT_HOME}/.claude-lab/shared/state/critics" 20 || fail=1
+        fi
         if [[ "$agent" == coder ]]; then
             # git commit/push only after a fresh Codex APPROVE (the codex-check script writes the marker);
             # armed only while Codex is switched on, installed and logged in, and CODEX_COMMIT_GUARD is not 0.
             add_hook "$plugin_settings" PreToolUse Bash "python3 ${hooks}/codex-commit-guard.py check ${agent}" 10 || fail=1
+            # A «Зашить правило» task from jarvis ends in a report back to jarvis.
+            add_hook "$plugin_settings" UserPromptSubmit "" "python3 ${hooks}/rule-stitch-gate.py cprompt ${ws}" 10 || fail=1
+            add_hook "$plugin_settings" PostToolUse mcp__gbrain-swarm__notify "python3 ${hooks}/rule-stitch-gate.py cclear ${ws}" 10 || fail=1
+            add_hook "$plugin_settings" Stop "" "python3 ${hooks}/rule-stitch-gate.py cstop ${ws}" 10 || fail=1
         fi
     else
         warn "Plugin dir ${plugin_dir} missing -- ${agent} hooks NOT set."
@@ -4237,6 +4259,9 @@ install_team_refs() {
     render_template "${tdir}/editorial.conf" "$tmp" USER "$AGENT_USER"
     _agent_write "$tmp" "${shared}/editorial.conf" 0644 1 || fail=1
     _agent_write "${tdir}/checklists/text-standard.md" "${shared}/checklists/text-standard.md" 0644 1 || fail=1
+    # The owner's sample texts by genre (text standard step 0, critics' samples): the folder and how to fill it.
+    as_agent mkdir -p "${shared}/checklists/samples" || fail=1
+    _agent_write "${tdir}/checklists/samples-README.md" "${shared}/checklists/samples/README.md" 0644 1 || fail=1
 
     # Coder: the same team rules, auto-memory layout and archive/library dirs in its own workspace.
     if [[ "$CODER_INSTALLED" == "1" ]]; then

@@ -143,6 +143,10 @@ check "quote-author rule reaches critics" bash -c 'grep -l "У цитаты вс
 export FAKE_PROOF=$'VERDICT: REQUEST_CHANGES\n1. Запятая.'
 set +e; bash "$TC" "${TDIR}/draft.md" >/dev/null 2>&1; RC=$?; set -e
 check "one REQUEST_CHANGES -> exit 1"     test "$RC" -eq 1
+LEDGER="${H}/.claude-lab/shared/state/critics/ledger.jsonl"
+check "ledger: both runs recorded"        test "$(wc -l <"$LEDGER")" -eq 2
+check "ledger: approve then reject"       bash -c 'head -1 "$0" | grep -q "\"v1\": \"APPROVE\", \"v2\": \"APPROVE\"" && tail -1 "$0" | grep -q "\"v2\": \"REQUEST_CHANGES\""' "$LEDGER"
+check "ledger: no draft text in it"       bash -c '! grep -q "Утром" "$0"' "$LEDGER"
 export FAKE_PROOF=$'VERDICT: APPROVE'
 cat >"${TDIR}/liar.sh" <<'F'
 #!/usr/bin/env bash

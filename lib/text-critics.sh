@@ -202,6 +202,14 @@ for k in "${!snap_files[@]}"; do
 done
 echo "  $complete"
 echo "  жанр: ${genre:-не передан}"
+# Ledger for the send gate (hooks/text-critics-gate.py): this exact text and both verdicts. A failure here never
+# changes the verdict of this run.
+gate="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/hooks/text-critics-gate.py"
+if [[ -f "$gate" ]]; then
+    python3 "$gate" record --state "${CRITICS_STATE:-$HOME/.claude-lab/shared/state/critics}" --path "$draft" \
+        --file "$snap" --v1 "${v1:-EMPTY}" --v2 "${v2:-EMPTY}" >/dev/null 2>&1 \
+        || echo "  журнал критиков не записан (гейт отправки этот прогон не увидит)"
+fi
 if [[ "$(sha256sum "$draft" | cut -d' ' -f1)" != "$sha" ]]; then
     echo "НЕ ПРОВЕРЕНО: $draft изменился во время сверки, вердикт относится к sha256=$sha"
     exit 1

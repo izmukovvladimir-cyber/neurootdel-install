@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Usage: create.sh TIMESPEC MESSAGE
+# Usage: create.sh [--wake] TIMESPEC MESSAGE
 # TIMESPEC: anything `date -d` understands, e.g. "in 10 minutes", "tomorrow 9am", "2026-05-01 14:30".
+# --wake: MESSAGE goes to the agent itself (its channel webhook, scripts/wake.sh), not to the owner's Telegram:
+#         the agent wakes up and does what it promised ("проверю через час", "взял ли исполнитель").
 
+WAKE=0
+if [[ "${1:-}" == "--wake" ]]; then
+    WAKE=1
+    shift
+fi
 if [[ $# -lt 2 ]]; then
-    echo "usage: $0 TIMESPEC MESSAGE" >&2
+    echo "usage: $0 [--wake] TIMESPEC MESSAGE" >&2
     exit 2
 fi
 
@@ -32,6 +39,31 @@ MON=$(date -d "@${TARGET_EPOCH}" +%m)
 
 # One-shot: run at specific minute/hour/day/month, then remove its own cron line.
 NONCE=$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')
+
+if [[ "$WAKE" == 1 ]]; then
+    # The agent whose skill this is: ~/.claude-lab/<agent>/.claude/skills/quick-reminders/scripts.
+    SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    AGENT=$(sed -n 's#.*/\.claude-lab/\([a-z0-9-]*\)/\.claude/skills/quick-reminders/scripts$#\1#p' <<<"$SCRIPTS")
+    AGENT="${AGENT:-jarvis}"
+    ENV_FILE="${NEUROOTDEL_CHANNEL_ENV:-/etc/vladimir-plugin/${AGENT}/channel.env}"
+    [[ -e "$ENV_FILE" ]] || ENV_FILE="/etc/dashi-plugin/${AGENT}/channel.env"
+    [[ -r "$ENV_FILE" ]] || { echo "error: ${ENV_FILE} not readable: no webhook to wake ${AGENT}" >&2; exit 1; }
+    grep -qE '^TELEGRAM_WEBHOOK_PORT=[0-9]+' "$ENV_FILE" \
+        || { echo "error: no TELEGRAM_WEBHOOK_PORT in ${ENV_FILE}" >&2; exit 1; }
+    CHAT="${TG_ID:-${TELEGRAM_CHAT_ID:-}}"
+    [[ -n "$CHAT" ]] || CHAT=$(sed -n 's/^TELEGRAM_ALLOWED_USER_IDS=//p' "$ENV_FILE" | head -n1 | cut -d, -f1 | tr -d '[:space:]"')
+    [[ "$CHAT" =~ ^-?[0-9]+$ ]] || { echo "error: no owner chat id (TELEGRAM_ALLOWED_USER_IDS in ${ENV_FILE})" >&2; exit 1; }
+    WAKE_DIR="${QR_WAKE_DIR:-$HOME/.claude-lab/shared/state/reminders}"
+    [[ "$SCRIPTS" != *"'"* && "$WAKE_DIR" != *"'"* ]] || { echo "error: a path contains a quote" >&2; exit 1; }
+    mkdir -p "$WAKE_DIR"
+    jq -n --arg m "[будильник] ${MESSAGE}" --arg c "$CHAT" --arg e "$ENV_FILE" \
+        '{message: $m, chat: $c, env: $e}' > "${WAKE_DIR}/${NONCE}.json"
+    CRON_LINE="${MIN} ${HOUR} ${DAY} ${MON} * QR_WAKE_DIR='${WAKE_DIR}' /bin/bash '${SCRIPTS}/wake.sh' ${NONCE} >/dev/null 2>&1; (crontab -l 2>/dev/null | grep -vF 'qr:ID=${NONCE}') | crontab - # qr:ID=${NONCE} wake"
+    ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
+    echo "scheduled: id=${NONCE} at=$(date -d "@${TARGET_EPOCH}" '+%Y-%m-%d %H:%M') wake=${AGENT}"
+    echo "message: ${MESSAGE}"
+    exit 0
+fi
 # Token source and owner id: see tg-target.sh (channel.env from the installer,
 # then the old gateway path). The token is read by the cron line at run time.
 # shellcheck source=tg-target.sh
