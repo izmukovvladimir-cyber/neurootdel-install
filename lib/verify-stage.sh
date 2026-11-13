@@ -6,7 +6,7 @@
 # Stages: workshop = Jarvis + Richard, intensive = + Coder + Auditor. Default: INSTALL_STAGE from
 # guard.conf. An agent installed outside the stage (a bot already on this server) is checked too.
 # Per agent: service active, own bot answers getMe, owner in the allowlist, workspace, CLAUDE.md and
-# rules present, @-paths of CLAUDE.md resolve, hooks on, skills. Server: starter rules, memory rotation,
+# rules present, @-paths of CLAUDE.md resolve, the team-rules @-line is there, hooks on, skills. Server: starter rules, memory rotation,
 # guard, login watch, backup, root requests. Auditor: Hermes service, ChatGPT login, bridge.
 # Editorial loop: «выключено» while EDITORIAL_ENABLED=0 (not a failure).
 #
@@ -121,6 +121,39 @@ at_paths_ok() {
     return 0
 }
 
+# team_rules_linked <CLAUDE.md> -- a line of its own "@~/.claude-lab/shared/team-rules.md" (or the same
+# path written from the agent's home), outside fenced code blocks (an @ there is an example, not loaded). A CLAUDE.md "upgraded" by hand to an old template loses this line,
+# and with it rule zero, task closing and paid items; at_paths_ok cannot see a line that is gone.
+team_rules_linked() {
+    local f=$1 p
+    [[ -f "$f" ]] || return 1
+    while IFS= read -r p; do
+        p="${p#@}"
+        p="${p%"${p##*[![:space:]]}"}"
+        [[ "$p" == "~/.claude-lab/shared/team-rules.md" || "$p" == "${H}/.claude-lab/shared/team-rules.md" ]] && return 0
+    done < <(awk '
+        # a fence opens with 3+ ` or ~ (up to 3 spaces in) and closes only with the same char, at least as long,
+        # nothing but spaces after it (CommonMark); a line inside a fence is never an @-include
+        function run(line, c,    n) { n = 0; while (substr(line, n + 1, 1) == c) n++; return n }
+        {
+            line = $0; sub(/\r$/, "", line); ind = line; sub(/^ {0,3}/, "", ind)
+            ch = substr(ind, 1, 1)
+            if (ch == "`" || ch == "~") {
+                n = run(ind, ch)
+                if (n >= 3) {
+                    rest = substr(ind, n + 1)
+                    if (!open) {
+                        # a ``` line with another ` after it is inline code, not a fence
+                        if (!(ch == "`" && index(rest, "`") > 0)) { open = 1; fch = ch; flen = n; next }
+                    }
+                    if (ch == fch && n >= flen && rest ~ /^[ \t]*$/) { open = 0; next }
+                }
+            }
+            if (!open && line ~ /^@[^[:space:]]+[[:space:]]*$/) print line
+        }' "$f")
+    return 1
+}
+
 # has_all <file> <needle...> -- every needle is in the file.
 has_all() {
     local f=$1 n; shift
@@ -189,6 +222,9 @@ check_channel_agent() {
     check "${label}: файлы по ссылкам @ из CLAUDE.md существуют (загружаются)" \
         "открой ${ws}/CLAUDE.md, найди строку с @ на несуществующий файл: верни файл или убери строку" \
         at_paths_ok "${ws}/CLAUDE.md"
+    check "${label}: правила команды подключены (@team-rules.md в CLAUDE.md)" \
+        "запусти установщик снова: он вернёт в ${ws}/CLAUDE.md строку @~/.claude-lab/shared/team-rules.md" \
+        team_rules_linked "${ws}/CLAUDE.md"
     check "${label}: практики learned-practices подключены" \
         "запусти установщик снова: он положит ${plugin}/.claude/rules/learned-practices.md" \
         test -f "${plugin}/.claude/rules/learned-practices.md"
