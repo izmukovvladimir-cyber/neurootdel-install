@@ -61,6 +61,9 @@ check "refs: owner name in team rules"        grep -q 'Owner = Анна' "${SH}/
 check "refs: gbrain read rule in team rules" grep -qF 'recall(query, limit=5)' "${SH}/team-rules.md"
 check "refs: gbrain write rule in team rules" grep -qF 'create_decision_note' "${SH}/team-rules.md"
 check "refs: lib path in team rules"          grep -q '/usr/local/lib/neurootdel/include_weight.py' "${SH}/team-rules.md"
+check "refs: long task ack in team rules"   grep -qF '«принял, делаю»' "${SH}/team-rules.md"
+check "refs: ack named as the one exception" grep -qF 'the one allowed interim message' "${SH}/team-rules.md"
+check "rules: no-interim rule names the ack" grep -qF 'исключение: «принял, делаю»' "${REPO}/install.sh"
 for f in bash python typescript; do
     check "refs: no code rule ${f}.md in ~"   test ! -e "${H}/.claude/rules/${f}.md"
     check "refs: no code rule ${f}.md jarvis" test ! -e "${WS}/dashi-plugin-claude-code/plugin/.claude/rules/${f}.md"
