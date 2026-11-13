@@ -245,5 +245,31 @@ desc = next(ln for ln in head.splitlines() if ln.startswith("description: "))
 import json as _json
 check("yaml: description is a quoted string", _json.loads(desc[len("description: "):]) == '# В ответах: сначала вывод, "цитаты" в кавычках', desc)
 
+# --- a second correction in the same area asks for a check, the first one does not --------------------
+M6 = Path(tempfile.mkdtemp()) / "memory"
+M6.mkdir()
+shutil.copy(TEMPLATE_INDEX, M6 / "MEMORY.md")
+HINT = "not the first correction in the area"
+p = run(M6, "--name", "first-in-area", "--rule", "Подпись к посту без эмодзи", "--area", "Посты для канала",
+        "--source", "владелец, личка")
+check("area: first note, no hint", p.returncode == 0 and HINT not in p.stdout, p.stdout + p.stderr)
+p = run(M6, "--name", "second-in-area", "--rule", "Ссылку в пост ставить в конце", "--area", "посты для канала.",
+        "--source", "владелец, личка")
+check("area: second note in the same area (case, dot folded): hint", p.returncode == 0 and HINT in p.stdout
+      and "feedback-first-in-area" in p.stdout and "feedback-back-critical-rule-with-a-check" in p.stdout,
+      p.stdout + p.stderr)
+check("area: second note still written", (M6 / "feedback-second-in-area.md").is_file())
+p = run(M6, "--name", "narrower-area", "--rule", "Хэштеги в конце поста", "--area", "посты для канала про AI",
+        "--source", "владелец")
+check("area: an area containing the old one: hint", HINT in p.stdout, p.stdout)
+p = run(M6, "--name", "other-area", "--rule", "Письмо клиенту на вы", "--area", "письма клиентам",
+        "--source", "владелец")
+check("area: another area: no hint", p.returncode == 0 and HINT not in p.stdout, p.stdout)
+p = run(M6, "--name", "replaces-first", "--rule", "Подпись к посту с одним эмодзи", "--area", "письма",
+        "--source", "владелец", "--cancels", "first-in-area")
+check("area: «письма» is a word of «письма клиентам»: hint", HINT in p.stdout, p.stdout)
+p = run(M6, "--name", "part-word", "--rule", "x правило", "--area", "пост", "--source", "владелец")
+check("area: a part of a word is not the same area", HINT not in p.stdout, p.stdout)
+
 print(f"FAILS: {len(FAILS)}")
 sys.exit(1 if FAILS else 0)

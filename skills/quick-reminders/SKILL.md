@@ -16,9 +16,14 @@ the agent writes cron entries directly via `crontab -l | crontab -`.
 
 ## How it works
 
-Three helper scripts live in `$HOME/.claude-lab/{AGENT}/.claude/skills/quick-reminders/scripts/`:
+Four helper scripts live in `$HOME/.claude-lab/{AGENT}/.claude/skills/quick-reminders/scripts/`:
 
 - `create.sh TIMESPEC MESSAGE` -- append a one-shot cron entry.
+- `create.sh --wake TIMESPEC MESSAGE` -- a wake-up for the agent itself: at that time MESSAGE arrives in
+  the agent's own session (its channel webhook, `wake.sh`); when it wakes, only the agent gets it. Use it the same turn
+  you promise a later check ("проверю через час") or hand work to another agent ("взял ли исполнитель").
+  Three tries a minute apart; if the agent still does not answer, the owner gets the text from the bot.
+- `wake.sh ID` -- run by the `--wake` cron line, not by hand.
 - `list.sh` -- print pending reminders.
 - `delete.sh ID` -- remove one by numeric ID.
 

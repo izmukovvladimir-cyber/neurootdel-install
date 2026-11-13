@@ -12,6 +12,8 @@ Where: the owner's private chat (chat_id = the owner's id, or no chat_id), or a 
 listed in guard.conf CORRECTION_GROUP_CHAT_IDS (empty = no group counts). A group is switched on only
 by that list, never by words in the message.
 Not installed for Richard: his SDK prompts carry no sender id.
+On a match it also leaves a pending marker for correction-closed.py (Stop hook): the turn may not end until
+the correction is recorded with feedback-note.py, or the agent says it was not a correction.
 Stop: delete the UserPromptSubmit entry pointing here from the agent's settings.json.
 """
 import json
@@ -105,6 +107,19 @@ def record(workspace: Path, trigger: str, text: str) -> Path | None:
         return None
 
 
+def mark_pending(workspace: str, session: str, trigger: str) -> None:
+    """Pending marker for correction-closed.py; any failure leaves the detector working as before."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("correction_closed", Path(__file__).resolve().parent
+                                                      / "correction-closed.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.mark(workspace, session, trigger)
+    except Exception:  # noqa: BLE001 - the capture must survive a missing or broken closer
+        pass
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         return 0
@@ -126,6 +141,7 @@ def main() -> int:
     if not trigger:
         return 0
     where = record(Path(sys.argv[1]), trigger, text)
+    mark_pending(sys.argv[1], str(payload.get("session_id") or ""), trigger)
     saved = f" Raw capture saved to {where}." if where else ""
     print(f"[correction-detector] The owner's message looks like a correction (trigger «{trigger}»).{saved}\n"
           "[correction-detector] Fix the issue first. Then, if the owner was correcting how you work or a text, "

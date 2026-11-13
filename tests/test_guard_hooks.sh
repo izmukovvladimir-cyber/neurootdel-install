@@ -152,7 +152,13 @@ for ev in UserPromptSubmit PreToolUse Stop SessionStart PreCompact; do
     check "hooks: plugin ${ev}"              jqtrue "$PS" ".hooks.${ev} | length >= 1"
 done
 FCM='mcp__dashi-channel__reply|mcp__dashi-channel__edit_message'
-check "hooks: fact-check main agent only"    jqtrue "$PS" "[.hooks.PreToolUse[] | select(.matcher == \"${FCM}\")] | length == 1"
+check "hooks: fact-check main agent only"    jqtrue "$PS" "[.hooks.PreToolUse[] | select(.matcher == \"${FCM}\") | .hooks[].command | select(test(\"fact-check-gate\"))] | length == 1"
+check "hooks: correction closer (clear + stop)" jqtrue "$PS" '([.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[].command] | any(test("correction-closed.py clear "))) and ([.hooks.Stop[].hooks[].command] | any(test("correction-closed.py stop ")))'
+check "hooks: rule-stitch four modes"        jqtrue "$PS" '[.. | .command? // empty | select(test("rule-stitch-gate.py (prompt|guard|clear|stop) "))] | length == 4'
+check "hooks: rule-stitch guard on reply+edit" jqtrue "$PS" "[.hooks.PreToolUse[] | select(.matcher == \"${FCM}\") | .hooks[].command] | any(test(\"rule-stitch-gate.py guard\"))"
+check "hooks: paragraph gate on jarvis"      jqtrue "$PS" "[.hooks.PreToolUse[] | select(.matcher == \"${FCM}\") | .hooks[].command] | any(test(\"paragraph-gate.py .*/state/jarvis/paragraph-gate$\"))"
+check "hooks: critics gate on jarvis"        jqtrue "$PS" "[.hooks.PreToolUse[] | select(.matcher == \"${FCM}\") | .hooks[].command] | any(test(\"text-critics-gate.py .*/state/critics$\"))"
+check "hooks: new gates not in user settings" jqtrue "$US" '[.. | .command? // empty] | any(test("rule-stitch|paragraph-gate|text-critics-gate|correction-closed")) | not'
 check "hooks: fact-check not in user settings" jqtrue "$US" '[.hooks.PreToolUse[].hooks[].command] | any(test("fact-check-gate")) | not'
 check "hooks: fact-check matcher covers reply and edit" jqtrue "$PS" '[.hooks.PreToolUse[] | select(.hooks[].command | test("fact-check-gate")) | .matcher] | (length == 1) and (.[0] as $m | ["mcp__dashi-channel__reply", "mcp__dashi-channel__edit_message"] | all(test("^(" + $m + ")$"))) and (.[0] as $m | "mcp__dashi-channel__react" | test("^(" + $m + ")$") | not)'
 check "hooks: fallback reply on our port"    jqtrue "$PS" '[.hooks.Stop[].hooks[].command] | any(test("127.0.0.1:8095/hooks/fallback-reply"))'
@@ -192,6 +198,9 @@ CPS="${CWS}/dashi-plugin-claude-code/plugin/.claude/settings.json"
 check "codex gate: coder PreToolUse Bash check" jqtrue "$CPS" '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] | any(test("codex-commit-guard.py check coder$"))'
 check "codex gate: no PostToolUse hook needed" jqtrue "$CPS" '[.hooks.PostToolUse[]?.hooks[]?.command] | any(test("codex-commit-guard")) | not'
 check "codex gate: not on jarvis"            jqtrue "$PS" '[.. | .command? // empty] | any(test("codex-commit-guard")) | not'
+check "rule-stitch: coder side on coder"     jqtrue "$CPS" '[.. | .command? // empty | select(test("rule-stitch-gate.py c(prompt|clear|stop) "))] | length == 3'
+check "rule-stitch: coder side not on jarvis" jqtrue "$PS" '[.. | .command? // empty] | any(test("rule-stitch-gate.py c(prompt|clear|stop)")) | not'
+check "paragraph/critics gates not on coder" jqtrue "$CPS" '[.. | .command? // empty] | any(test("paragraph-gate|text-critics-gate")) | not'
 check "codex gate: not in user settings"     jqtrue "$US" '[.. | .command? // empty] | any(test("codex-commit-guard")) | not'
 cp "$CPS" "${TDIR}/cps1"
 CODER_INSTALLED=1 setup_agent_hooks

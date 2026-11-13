@@ -241,7 +241,7 @@ check "hooks: coder precompact flush"   jqtrue "$CS" '[.hooks.PreCompact[].hooks
 check "hooks: jarvis still jarvis"      jqtrue "$JS" '[.hooks.UserPromptSubmit[].hooks[].command] | any(endswith("auto-recall.py jarvis"))'
 check "hooks: jarvis fallback port 8089" jqtrue "$JS" '[.hooks.Stop[].hooks[].command] | any(contains("127.0.0.1:8089/hooks/fallback-reply"))'
 setup_agent_hooks >/dev/null 2>&1
-check "hooks: re-run no duplicates"     jqtrue "$CS" '[.hooks.UserPromptSubmit[].hooks[].command] | length == 3'
+check "hooks: re-run no duplicates"     jqtrue "$CS" '[.hooks.UserPromptSubmit[].hooks[].command] | (length == 5 and (unique | length) == 5)'
 rm -rf "${PR}/plugin.moved"; mv "${PR}/plugin" "${PR}/plugin.moved"
 OUT=$(setup_agent_hooks 2>&1); RC=$?
 check "hooks: coder plugin missing -> fail" test "$RC" -ne 0

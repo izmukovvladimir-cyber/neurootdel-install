@@ -17,6 +17,9 @@ Installed by neurootdel-install. The agent runs it itself after fixing what the 
                 the path, so a later --cancels also deletes that line from F.
 
 Nothing else is a carrier of a correction: not core/rules.md, not CLAUDE.md, not a lessons file.
+A second note in an area that already has one (same «Область» after case and punctuation are folded,
+or one area contained in the other) prints a hint: one note was not enough, propose a check in the script
+or a hook to the owner (lesson feedback-back-critical-rule-with-a-check). The note is written either way.
 Exit 0 = written; 2 = bad arguments or a refused change; 1 = a write failed (nothing written:
 every file is put back); 3 = a write failed and the undo too (the message names the backups). Shared voice files are locked while they are changed.
 """
@@ -195,6 +198,36 @@ def index_with(index: str, slug: str, rule: str, area: str, cancels: str | None)
     return "\n".join(keep) + "\n"
 
 
+AREA_FIELD = "Область: "
+
+
+def fold_area(area: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", area.lower().replace("ё", "е")).split())
+
+
+def same_area_notes(mem: Path, area: str, skip: set[str]) -> list[str]:
+    """Slugs of existing feedback notes whose «Область» is the same area (folded equal or one inside the other)."""
+    want = fold_area(area)
+    if not want:
+        return []
+    found: list[str] = []
+    for note in sorted(mem.glob("feedback-*.md")):
+        slug = note.stem[len("feedback-"):]
+        if slug in skip:
+            continue
+        try:
+            lines = note.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in lines:
+            if line.startswith(AREA_FIELD):
+                have = fold_area(line[len(AREA_FIELD):])
+                if have and (have == want or f" {have} " in f" {want} " or f" {want} " in f" {have} "):
+                    found.append(slug)
+                break
+    return found
+
+
 def add(args: argparse.Namespace) -> int:
     mem = Path(args.memory_dir)
     index_path = mem / "MEMORY.md"
@@ -231,7 +264,13 @@ def add(args: argparse.Namespace) -> int:
     # Shared voice files may be written by other agents: lock them (sorted order, no deadlock).
     locks = [lock_file(path) for path in sorted({x for x in (pravki, old_pravki) if x is not None and x.is_file()})]
     try:
-        return write_all(mem, index_path, note, old, slug, rule, area, source, why, cancels, day, pravki, old_pravki)
+        earlier = same_area_notes(mem, area, {slug, cancels or ""})
+        rc = write_all(mem, index_path, note, old, slug, rule, area, source, why, cancels, day, pravki, old_pravki)
+        if rc == 0 and earlier:
+            print(f"feedback-note: this is not the first correction in the area «{area}» (already: "
+                  + ", ".join(f"feedback-{x}" for x in earlier) + "). One note was not enough: propose to the owner "
+                  "a check in the script that does this work, or a hook (lesson feedback-back-critical-rule-with-a-check).")
+        return rc
     finally:
         for fd in locks:
             os.close(fd)
