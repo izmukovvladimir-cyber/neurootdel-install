@@ -57,6 +57,7 @@ grep -vF '{{SUPERVISOR_TG_ID}}' "$SRC" | sed 's/{{OWNER_TG_ID}}/42/' >"$EXP"
 # --- source file: nothing private leaks into the public installer ---------------
 check "source: exists"                    test -s "$SRC"
 check "source: has rule 4 retell"         count_is "$SRC" "Понял так" 1
+check "source: rule 0 human path"        count_is "$SRC" "проверяется тем же путём" 1
 check "source: no private paths/ids"      bash -c "! grep -qE '/home/|edgelab|[0-9]{6,}|t\\.me/|@[A-Za-z_]{4,}' '$SRC'"
 check "source: facts about self rule"     grep -qF "## 5. Факты о себе только после проверки" "$SRC"
 check "source: sums in words rule"        grep -qF "«20 долларов», «500 рублей»" "$SRC"
@@ -73,6 +74,7 @@ check "source: one supervisor placeholder" count_is "$SRC" "{{SUPERVISOR_TG_ID}}
 setup_global_claude >/dev/null 2>&1
 check "fresh: file written"               test -s "$GMD"
 check "fresh: grep -c 'Понял так' >= 1"   test "$(grep -c "Понял так" "$GMD")" -ge 1
+check "fresh: grep -c 'тем же путём' = 1" count_is "$GMD" "проверяется тем же путём" 1
 check "fresh: one begin marker"           count_is "$GMD" "$BEGIN" 1
 check "fresh: one end marker"             count_is "$GMD" "$END" 1
 check "fresh: block == source file"       diff -q <(block_of "$GMD") "$EXP"
