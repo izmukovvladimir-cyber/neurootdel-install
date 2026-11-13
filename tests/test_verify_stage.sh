@@ -127,6 +127,7 @@ check "workshop green: stage from guard.conf"  out_has "Проверка эта�
 check "workshop green: Jarvis service"         out_has "✅ Jarvis: сервис channel-jarvis работает"
 check "workshop green: Richard bot getMe"      out_has "✅ Richard: свой бот отвечает Telegram (getMe)"
 check "workshop green: memory rotation"        out_has "✅ Ротация памяти по расписанию"
+check "workshop green: team-rules linked"      out_has "✅ Jarvis: правила команды подключены (@team-rules.md в CLAUDE.md)"
 check "workshop green: Coder not checked"      not out_has "Coder:"
 check "workshop green: Auditor not checked"    not out_has "Auditor:"
 check "editorial off: «выключено», not ❌"     out_has "⏸ Редакционный контур: выключено"
@@ -177,6 +178,33 @@ check "offsite cron missing: ❌"               fails_with "Копия памя�
 build; rm "$H/.claude-lab/shared/team-rules.md"; run
 check "@ path missing: Jarvis ❌"              fails_with "Jarvis: файлы по ссылкам @ из CLAUDE.md существуют (загружаются)"
 check "@ path missing: Richard ❌"             fails_with "Richard: общий CLAUDE.md на месте, файлы по ссылкам @ существуют"
+build; sed -i '/team-rules.md/d' "$H/.claude-lab/jarvis/.claude/CLAUDE.md"; run
+check "team-rules @-line dropped: Jarvis ❌"   fails_with "Jarvis: правила команды подключены (@team-rules.md в CLAUDE.md)"
+check "team-rules @-line dropped: other @ still ✅" out_has "✅ Jarvis: файлы по ссылкам @ из CLAUDE.md существуют (загружаются)"
+check "team-rules @-line dropped: exit 1"       test "$RC" -eq 1
+build; sed -i 's|^@~/.claude-lab/shared/team-rules.md$|# @~/.claude-lab/shared/team-rules.md|' "$H/.claude-lab/jarvis/.claude/CLAUDE.md"; run
+check "team-rules @-line commented out: ❌"     fails_with "Jarvis: правила команды подключены"
+build; sed -i "s|^@~/.claude-lab/shared/team-rules.md\$|@${H}/.claude-lab/shared/team-rules.md|" "$H/.claude-lab/jarvis/.claude/CLAUDE.md"; run
+check "team-rules @-line by full path: ✅"      out_has "✅ Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$H/.claude-lab/jarvis/.claude/CLAUDE.md"; printf '```markdown\n@~/.claude-lab/shared/team-rules.md\n```\n' >>"$H/.claude-lab/jarvis/.claude/CLAUDE.md"; run
+check "team-rules @-line only in a code block: ❌" fails_with "Jarvis: правила команды подключены"
+J_MD="$H/.claude-lab/jarvis/.claude/CLAUDE.md"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '```\nexample\n```\n@~/.claude-lab/shared/team-rules.md\n' >>"$J_MD"; run
+check "team-rules @-line after a closed code block: ✅" out_has "✅ Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '````md\n```\n@~/.claude-lab/shared/team-rules.md\n````\n' >>"$J_MD"; run
+check "team-rules @-line inside a 4-backtick block after a 3-backtick line: ❌" fails_with "Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '```\n~~~\n@~/.claude-lab/shared/team-rules.md\n```\n' >>"$J_MD"; run
+check "team-rules @-line inside a backtick block after a ~~~ line: ❌" fails_with "Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '```\n``` not a close\n@~/.claude-lab/shared/team-rules.md\n```\n' >>"$J_MD"; run
+check "team-rules @-line after a fence with text (no close): ❌" fails_with "Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '```example```\n@~/.claude-lab/shared/team-rules.md\n' >>"$J_MD"; run
+check "team-rules @-line after an inline triple-backtick line: ✅" out_has "✅ Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '~~~ a`b\n@~/.claude-lab/shared/team-rules.md\n~~~\n' >>"$J_MD"; run
+check "team-rules @-line inside a tilde fence with a backtick in info: ❌" fails_with "Jarvis: правила команды подключены"
+build; sed -i '/team-rules.md/d' "$J_MD"; printf '~~~~\nx\n~~~~~\n@~/.claude-lab/shared/team-rules.md\r\n' >>"$J_MD"; run
+check "team-rules @-line after a longer ~ close, CRLF: ✅" out_has "✅ Jarvis: правила команды подключены"
+build intensive; mkcoder; sed -i '/team-rules.md/d' "$H/.claude-lab/coder/.claude/CLAUDE.md"; run
+check "team-rules @-line dropped: Coder ❌"     fails_with "Coder: правила команды подключены"
 build; rm "$H/.claude-lab/jarvis/.claude/core/rules.md"; run
 check "rules missing: ❌"                      fails_with "Jarvis: рабочая папка, CLAUDE.md и правила на месте"
 build; rm "$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/rules/learned-practices.md"; run
