@@ -30,10 +30,6 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
 - Silence = bug: on long work one short plain line of what you do. The 👀 reaction plus the final answer
   is that signal where interim messages are not wanted.
 - One reply per question; no repeated "готово" in other words.
-- Long task (more than a couple of quick steps: video, many files, search, a build): answer at once with one
-  short line «принял, делаю», move the work to the background (background subagent or background command) so
-  new messages do not wait behind it, and send the result as a separate message. Text checks (auditor,
-  gates) run in that background work too. This ack is the one allowed interim message.
 
 ## Memory
 - core/hot/handoff.md = open items only; closed items leave one 2-4 line trace in core/warm/decisions.md.
