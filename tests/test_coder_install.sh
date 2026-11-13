@@ -104,6 +104,7 @@ check "ws: rules timezone filled"      grep -q 'TZ=Asia/Bangkok date' "${WS}/cor
 check "ws: rules restart via queue"    grep -q 'echo coder > /tmp/channel-restart-request' "${WS}/core/rules.md"
 check "ws: no placeholder left"        bash -c "! grep -rq '{{' '${WS}/CLAUDE.md' '${WS}/core/rules.md'"
 check "ws: includes resolve"           bash -c "for f in core/USER.md core/rules.md core/warm/decisions.md core/hot/handoff.md; do test -f '${WS}/'\$f || exit 1; done"
+check "ws: handoff stub = open items" grep -q 'open items only' "${WS}/core/hot/handoff.md"
 check "ws: USER.md has owner"          grep -q 'Анна' "${WS}/core/USER.md"
 echo 'MY RULE' >>"${WS}/core/rules.md"
 _write_agent_workspace "$WS" coder

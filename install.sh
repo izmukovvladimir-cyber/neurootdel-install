@@ -2199,9 +2199,12 @@ os.replace(tmp, path)
 PY
 }
 
-# _approve_channel_mcp <settings.local.json>... -- in each file: dashi-channel
-# into enabledMcpjsonServers, out of disabledMcpjsonServers (repairs a first
-# start that rejected it); every other key kept. Mirrors the live agents.
+# _approve_channel_mcp <settings.local.json>... -- in each file: dashi-channel and
+# the four gbrain-* servers into enabledMcpjsonServers, out of
+# disabledMcpjsonServers (repairs a first start that rejected them); every other
+# key kept. Mirrors the live agents. gbrain-* land in the workspace .mcp.json on
+# intensive day 3; until then a listed name without a server is ignored by claude,
+# and without it the Enter from channel-confirm rejects them on the first restart.
 _approve_channel_mcp() {
     as_agent python3 - "$@" <<'PY'
 import json
@@ -2210,7 +2213,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-SERVER = "dashi-channel"
+SERVERS = ["dashi-channel", "gbrain-memory", "gbrain-recall", "gbrain-swarm", "gbrain-tasks"]
 for arg in sys.argv[1:]:
     path = Path(arg)
     data: dict = {}
@@ -2227,11 +2230,10 @@ for arg in sys.argv[1:]:
     disabled = data.get("disabledMcpjsonServers", [])
     if not isinstance(enabled, list) or not isinstance(disabled, list):
         sys.exit(f"{path}: MCP server lists are not arrays; left untouched")
-    if SERVER not in enabled:
-        enabled.append(SERVER)
+    enabled.extend(s for s in SERVERS if s not in enabled)
     data["enabledMcpjsonServers"] = enabled
-    if SERVER in disabled:
-        data["disabledMcpjsonServers"] = [s for s in disabled if s != SERVER]
+    if any(s in SERVERS for s in disabled):
+        data["disabledMcpjsonServers"] = [s for s in disabled if s not in SERVERS]
     path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".settings.local.")
     with os.fdopen(fd, "w") as fh:
@@ -2362,7 +2364,7 @@ REOF
     printf '# recent.md -- full journal (NOT in @include)\n' > "$stub_tmp"
     _write_if_absent "$stub_tmp" "${ws}/core/hot/recent.md" 0644
 
-    printf '# handoff.md -- last 10 entries (@include)\n' > "$stub_tmp"
+    printf '# handoff.md -- open items only (@include)\n\nClosed items leave one line in core/warm/decisions.md; "Last 15 actions" go to core/archive/last-actions.md.\n' > "$stub_tmp"
     _write_if_absent "$stub_tmp" "${ws}/core/hot/handoff.md" 0644
 
     printf '# decisions.md -- last 14 days of decisions (@include)\n' > "$stub_tmp"
