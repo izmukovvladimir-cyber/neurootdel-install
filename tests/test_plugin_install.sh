@@ -207,15 +207,15 @@ check "trust multi: channel un-disabled, rest kept" \
 # --- MCP pre-approval (settings.local.json) -------------------------------------
 SL1="${TDIR}/repo/.claude/settings.local.json"; SL2="${TDIR}/repo/plugin/.claude/settings.local.json"
 _approve_channel_mcp "$SL1" "$SL2"
-check "mcp: root file created"   python3 -c "import json,sys; sys.exit(0 if json.load(open('$SL1'))['enabledMcpjsonServers']==['dashi-channel'] else 1)"
-check "mcp: plugin file created" python3 -c "import json,sys; sys.exit(0 if json.load(open('$SL2'))['enabledMcpjsonServers']==['dashi-channel'] else 1)"
+check "mcp: root file created"   python3 -c "import json,sys; sys.exit(0 if json.load(open('$SL1'))['enabledMcpjsonServers']==['dashi-channel','gbrain-memory','gbrain-recall','gbrain-swarm','gbrain-tasks'] else 1)"
+check "mcp: plugin file created" python3 -c "import json,sys; sys.exit(0 if json.load(open('$SL2'))['enabledMcpjsonServers']==['dashi-channel','gbrain-memory','gbrain-recall','gbrain-swarm','gbrain-tasks'] else 1)"
 check "mcp: new file is 0600"  test "$(stat -c %a "$SL2")" = "600"
-printf '{"disabledMcpjsonServers":["dashi-channel","other"],"enabledMcpjsonServers":["gbrain"],"permissions":{"allow":["x"]}}\n' >"$SL1"
+printf '{"disabledMcpjsonServers":["dashi-channel","other","gbrain-tasks"],"enabledMcpjsonServers":["gbrain","gbrain-recall"],"permissions":{"allow":["x"]}}\n' >"$SL1"
 chmod 640 "$SL1"
 _approve_channel_mcp "$SL1"
 _approve_channel_mcp "$SL1"
 check "mcp: rejected channel repaired" \
-    python3 -c "import json,sys; d=json.load(open('$SL1')); sys.exit(0 if d['disabledMcpjsonServers']==['other'] and d['enabledMcpjsonServers']==['gbrain','dashi-channel'] else 1)"
+    python3 -c "import json,sys; d=json.load(open('$SL1')); sys.exit(0 if d['disabledMcpjsonServers']==['other'] and d['enabledMcpjsonServers']==['gbrain','gbrain-recall','dashi-channel','gbrain-memory','gbrain-swarm','gbrain-tasks'] else 1)"
 check "mcp: existing mode kept" test "$(stat -c %a "$SL1")" = "640"
 check "mcp: other keys kept" \
     python3 -c "import json,sys; d=json.load(open('$SL1')); sys.exit(0 if d['permissions']=={'allow':['x']} else 1)"
@@ -472,6 +472,8 @@ check "jarvis: root settings approve channel" \
     python3 -c "import json,sys; d=json.load(open('${PR}/.claude/settings.local.json')); sys.exit(0 if 'dashi-channel' in d['enabledMcpjsonServers'] and 'dashi-channel' not in d.get('disabledMcpjsonServers',[]) else 1)"
 check "jarvis: plugin settings approve channel" \
     python3 -c "import json,sys; d=json.load(open('${PR}/plugin/.claude/settings.local.json')); sys.exit(0 if 'dashi-channel' in d['enabledMcpjsonServers'] else 1)"
+check "jarvis: plugin settings pre-approve gbrain" \
+    python3 -c "import json,sys; d=json.load(open('${PR}/plugin/.claude/settings.local.json')); sys.exit(0 if all(n in d['enabledMcpjsonServers'] for n in ('gbrain-memory','gbrain-recall','gbrain-swarm','gbrain-tasks')) else 1)"
 check "jarvis: repo root + plugin trusted" \
     python3 -c "import json,sys; p=json.load(open('${FAKE_HOME}/.claude.json'))['projects']; sys.exit(0 if p['${PR}']['hasTrustDialogAccepted'] and p['${PR}/plugin']['hasTrustDialogAccepted'] else 1)"
 check "jarvis: start script installed"  test -x "${TDIR}/libexec/channel-start.sh"

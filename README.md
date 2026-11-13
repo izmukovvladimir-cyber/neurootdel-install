@@ -107,7 +107,7 @@ Telegram --> Bot API --> Telegram-плагин (MCP-канал) --> Claude Code 
     rules.md                   # границы и запреты
     MEMORY.md                  # архив
     LEARNINGS.md               # уроки из ошибок
-    hot/handoff.md             # последние 10 записей
+    hot/handoff.md             # только открытое
     hot/recent.md              # полный журнал
     warm/decisions.md          # решения за 14 дней
   skills/                      # 10 скиллов
