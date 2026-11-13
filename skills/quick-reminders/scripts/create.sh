@@ -56,12 +56,16 @@ if [[ "$WAKE" == 1 ]]; then
     WAKE_DIR="${QR_WAKE_DIR:-$HOME/.claude-lab/shared/state/reminders}"
     [[ "$SCRIPTS" != *"'"* && "$WAKE_DIR" != *"'"* ]] || { echo "error: a path contains a quote" >&2; exit 1; }
     mkdir -p "$WAKE_DIR"
-    jq -n --arg m "[будильник] ${MESSAGE}" --arg c "$CHAT" --arg e "$ENV_FILE" \
-        '{message: $m, chat: $c, env: $e}' > "${WAKE_DIR}/${NONCE}.json"
-    CRON_LINE="${MIN} ${HOUR} ${DAY} ${MON} * QR_WAKE_DIR='${WAKE_DIR}' /bin/bash '${SCRIPTS}/wake.sh' ${NONCE} >/dev/null 2>&1; (crontab -l 2>/dev/null | grep -vF 'qr:ID=${NONCE}') | crontab - # qr:ID=${NONCE} wake"
-    ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
+    # The text goes to jq through the environment (not argv) into a private file; nothing of it is printed.
+    ( umask 077; QR_MSG="[будильник] ${MESSAGE}" jq -n --arg c "$CHAT" --arg e "$ENV_FILE" \
+        '{message: env.QR_MSG, chat: $c, env: $e}' > "${WAKE_DIR}/${NONCE}.json" )
+    # wake.sh removes this line itself after delivery or its last retry, under the same lock.
+    CRON_LINE="${MIN} ${HOUR} ${DAY} ${MON} * QR_WAKE_DIR='${WAKE_DIR}' /bin/bash '${SCRIPTS}/wake.sh' ${NONCE} >/dev/null 2>&1 # qr:ID=${NONCE} wake"
+    (
+        flock -w 30 9 || { echo "error: crontab lock busy, try again" >&2; exit 1; }
+        ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
+    ) 9>"${WAKE_DIR}/.crontab.lock"
     echo "scheduled: id=${NONCE} at=$(date -d "@${TARGET_EPOCH}" '+%Y-%m-%d %H:%M') wake=${AGENT}"
-    echo "message: ${MESSAGE}"
     exit 0
 fi
 # Token source and owner id: see tg-target.sh (channel.env from the installer,

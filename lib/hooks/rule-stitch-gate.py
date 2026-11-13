@@ -12,9 +12,9 @@ layout taken out). One script, several hook entries in the plugin settings.json 
   clear <ws>   PostToolUse       Bash `feedback-note.py ... add` that wrote a note marks «noted»; a non-empty
                                  mcp__gbrain-swarm__notify to "coder" marks «sent».
   stop <ws>    Stop              marker neither noted, sent nor done: blocks the turn end ONCE; the second stop
-                                 (stop_hook_active) lets go and logs the miss. Never loops.
-  done <ws> --evidence "<what fired>"   run by the agent itself after a live test showed the check firing:
-                                 marks «done» (the «готово» guard opens) and logs the evidence line.
+                                 (stop_hook_active) lets go and logs the miss, the «готово» guard stays. Never loops.
+  done <ws> --session <id> --evidence "<what fired>"   run by the agent itself after a live test showed the
+                                 check firing: marks THAT request «done» (the «готово» guard opens), logs evidence.
 Coder side (only where Coder is installed and gets bus tasks):
   cprompt <ws> UserPromptSubmit  a bus task from jarvis titled «Зашить правило»: marker + work order.
   cclear <ws>  PostToolUse       a non-empty notify to "jarvis" clears it.
@@ -36,10 +36,15 @@ from zoneinfo import ZoneInfo
 
 LIB = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LIB))
-import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
+try:
+    import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
-_CONF = guard_conf.load()
-TZ = ZoneInfo(_CONF.owner_timezone)
+    _CONF = guard_conf.load()
+    TZ = ZoneInfo(_CONF.owner_timezone)
+except Exception:  # noqa: BLE001 - a broken config or zone must not break the turn
+    if __name__ == "__main__":
+        sys.exit(0)
+    raise
 TASK_TTL_SEC = 6 * 3600
 TITLE = "Зашить правило"
 NOTE_TOOL = LIB / "feedback-note.py"
@@ -52,6 +57,9 @@ NEG = re.compile(r"\bне\s+(?:надо\s+|нужно\s+)?(?:заш|пропис
 DONE = re.compile(r"зашил|зашит|правило\s+(?:уже\s+)?(?:стоит|записан|добавлен|внес[её]н|на месте)"
                   r"|записал[аи]?\s+(?:\w+\s+){0,2}правил|вн[её]с(?:ла|ли)?\s+(?:\w+\s+){0,3}в\s+правил"
                   r"|внес[её]н[оа]?\s+в\s+правил|готово[^.\n]{0,60}правил", re.I)
+NOT_YET = re.compile(r"\b(?:не|ещё не|еще не|пока не)\s+(?:\w+\s+){0,2}?(?:заш|записал|внес|вн[её]с|добавил|стоит)",
+                     re.I)
+QUOTED = re.compile(r"«[^»]*»|\"[^\"]*\"|“[^”]*”")
 SENT_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
 INTER_RE = re.compile(r"\[Inter-agent from (\w[\w-]*) -> (\w[\w-]*)\]")
 REPLY_TOOLS = ("mcp__dashi-channel__reply", "mcp__dashi-channel__edit_message")
@@ -104,6 +112,17 @@ def write_marker(mp: Path, data: dict) -> None:
         pass
 
 
+def claims_done(text: str) -> bool:
+    """A statement that the rule is in place: questions, quotes and «ещё не зашил» do not count."""
+    for sent in SENT_SPLIT.split(text):
+        s = QUOTED.sub(" ", sent)
+        if "?" in s or NOT_YET.search(s):
+            continue
+        if DONE.search(s):
+            return True
+    return False
+
+
 def asks_to_stitch(text: str) -> bool:
     return any(len(s) <= 600 and not NEG.search(s) and STITCH.search(s) for s in SENT_SPLIT.split(text))
 
@@ -112,7 +131,11 @@ def coder_installed() -> bool:
     return "coder" in _CONF.channel_agents
 
 
-def instruction(ws: str) -> str:
+def done_cmd(ws: str, sess: str) -> str:
+    return f'python3 {Path(__file__).resolve()} done {ws} --session {sess or "nosession"} --evidence "<what fired, where>"'
+
+
+def instruction(ws: str, sess: str) -> str:
     d = now_local().strftime("%d.%m")
     hand = (f'Coder is on this server: the hook or script part goes to him in THIS turn: '
             f'mcp__gbrain-swarm__notify(to_agent="coder", payload={{"title": "{TITLE} {d}", "body": "{TITLE} '
@@ -126,7 +149,7 @@ def instruction(ws: str) -> str:
             "--area \"...\" --source \"...\" (the correction hook prints the memory dir);\n"
             "  2) make it fire: a check inside the script that does this work, or a hook. " + hand + "\n"
             "  3) «готово / зашил» to the owner only after a live test showed the check firing; then run:\n"
-            f"     python3 {Path(__file__).resolve()} {ws} done --evidence \"<what fired, where>\"\n"
+            f"     {done_cmd(ws, sess)}\n"
             "Not a request to stitch a rule: do nothing, the turn ends by itself. Do not mention this hook to people.")
 
 
@@ -143,7 +166,7 @@ def mode_prompt(ws: str, p: dict) -> int:
     if not hit:
         return 0
     write_marker(marker_path(state, sess), {"t": time.time(), "noted": False, "sent": False, "done": False})
-    print(instruction(ws))
+    print(instruction(ws, sess))
     return 0
 
 
@@ -163,11 +186,11 @@ def mode_guard(ws: str, p: dict) -> int:
     if not fresh(m) or m.get("done") or str(p.get("tool_name") or "") not in REPLY_TOOLS:
         return 0
     ti = p.get("tool_input") or {}
-    if not isinstance(ti, dict) or not DONE.search(str(ti.get("text") or "")):
+    if not isinstance(ti, dict) or not claims_done(str(ti.get("text") or "")):
         return 0
     log(state, {"mode": "guard", "session": sess, "denied": "done-before-check", "sent": bool(m.get("sent"))})
     return deny("[rule-stitch] «Готово / зашил» only after a live test showed the check firing, then "
-                f"`python3 {Path(__file__).resolve()} {ws} done --evidence \"...\"`. Now you can say what is done "
+                f"`{done_cmd(ws, sess)}`. Now you can say what is done "
                 "and what is still waiting (for example «принял, ставлю проверку, отпишусь после теста»).")
 
 
@@ -191,6 +214,13 @@ def note_written(p: dict) -> bool:
     return "feedback-note: wrote" in json.dumps(p.get("tool_response"), ensure_ascii=False)
 
 
+def tool_failed(p: dict) -> bool:
+    resp = p.get("tool_response")
+    if isinstance(resp, dict) and (resp.get("isError") or resp.get("is_error") or resp.get("error")):
+        return True
+    return bool(re.search(r'"(?:isError|is_error)"\s*:\s*true', json.dumps(resp, ensure_ascii=False)))
+
+
 def mode_clear(ws: str, p: dict) -> int:
     state, sess = state_dir(ws), str(p.get("session_id") or "")
     mp = marker_path(state, sess)
@@ -202,7 +232,7 @@ def mode_clear(ws: str, p: dict) -> int:
     if tool == "Bash" and note_written(p):
         m["noted"] = True
     elif (tool == "mcp__gbrain-swarm__notify" and isinstance(ti, dict) and ti.get("to_agent") == "coder"
-          and _payload_text(ti).strip()):
+          and TITLE.lower() in _payload_text(ti).lower() and not tool_failed(p)):
         m["sent"] = True
     else:
         return 0
@@ -213,13 +243,17 @@ def mode_clear(ws: str, p: dict) -> int:
 
 def _stop(state: Path, mp: Path, p: dict, settled, head: str, instr: str) -> int:
     m = read_marker(mp)
-    if not m or settled(m):
+    if not m or settled(m) or m.get("released"):
         return 0
-    if not fresh(m) or p.get("stop_hook_active"):
+    if not fresh(m):
         try:
             mp.unlink(missing_ok=True)
         except OSError:
             pass
+        return 0
+    if p.get("stop_hook_active"):
+        m["released"] = True  # no second block; the «готово» guard keeps the marker
+        write_marker(mp, m)
         log(state, {"mode": "stop", "session": p.get("session_id"), "result": "released"})
         return 0
     log(state, {"mode": "stop", "session": p.get("session_id"), "result": "blocked"})
@@ -232,23 +266,26 @@ def mode_stop(ws: str, p: dict) -> int:
     return _stop(state, marker_path(state, str(p.get("session_id") or "")), p,
                  lambda m: m.get("noted") or m.get("sent") or m.get("done"),
                  "Turn not closed: the owner asked to stitch a rule and nothing was recorded or handed over.",
-                 instruction(ws))
+                 instruction(ws, str(p.get("session_id") or "")))
 
 
 def mode_done(ws: str, argv: list[str]) -> int:
-    if len(argv) != 2 or argv[0] != "--evidence" or len(argv[1].strip()) < 10:
-        print('usage: rule-stitch-gate.py <ws> done --evidence "<what fired, where>" (10+ chars)', file=sys.stderr)
+    opts = dict(zip(argv[0::2], argv[1::2])) if len(argv) == 4 else {}
+    sess, evidence = opts.get("--session", ""), opts.get("--evidence", "")
+    if not sess or len(evidence.strip()) < 10:
+        print('usage: rule-stitch-gate.py done <ws> --session <id> --evidence "<what fired, where>" (10+ chars)',
+              file=sys.stderr)
         return 2
     state = state_dir(ws)
-    marked = 0
-    for mp in state.glob("pending-*.json"):
-        m = read_marker(mp)
-        if fresh(m) and not m.get("done"):
-            m["done"] = True
-            write_marker(mp, m)
-            marked += 1
-    log(state, {"mode": "done", "marked": marked, "evidence": " ".join(argv[1].split())[:300]})
-    print(f"rule-stitch: {marked} pending request(s) marked done")
+    mp = marker_path(state, sess)
+    m = read_marker(mp)
+    if not fresh(m):
+        print(f"rule-stitch: no open request in session {sess}", file=sys.stderr)
+        return 1
+    m["done"] = True
+    write_marker(mp, m)
+    log(state, {"mode": "done", "session": sess, "evidence": " ".join(evidence.split())[:300]})
+    print(f"rule-stitch: request of session {sess} marked done")
     return 0
 
 
@@ -286,7 +323,8 @@ def mode_cprompt(ws: str, p: dict) -> int:
 
 def mode_cclear(ws: str, p: dict) -> int:
     ti = p.get("tool_input") or {}
-    if not isinstance(ti, dict) or ti.get("to_agent") != "jarvis" or not _payload_text(ti).strip():
+    if (not isinstance(ti, dict) or ti.get("to_agent") != "jarvis" or len(_payload_text(ti).strip()) < 20
+            or tool_failed(p)):
         return 0
     state, sess = state_dir(ws), str(p.get("session_id") or "")
     mp = marker_path(state, sess, "c")

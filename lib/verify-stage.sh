@@ -287,15 +287,20 @@ section_server() {
         cron_on "${U}-root-requests" "${ETC}/${U}-root-requests.STOP"
 }
 
-# samples_count <dir> -- sample files of the owner's texts: non-empty .md/.txt other than README.md, at most 5.
+# samples_count <dir> -- genres of the owner's sample texts: the file name is the genre (post.md, post.txt and
+# post-2.md are one genre «post»); non-empty .md/.txt other than README.md; at most 5.
 samples_count() {
-    local d=$1 f n=0
+    local d=$1 f g n
+    local -A seen=()
     [[ -d "$d" ]] || { echo 0; return; }
     for f in "$d"/*.md "$d"/*.txt; do
         [[ -f "$f" && -s "$f" && "$(basename "$f")" != README.md ]] || continue
         grep -q '[^[:space:]]' "$f" || continue
-        n=$((n + 1))
+        g=$(basename "$f"); g="${g%.*}"; g="${g,,}"
+        [[ "$g" =~ ^(.*[^-_[:space:]0-9])[-_[:space:]]*[0-9]+$ ]] && g="${BASH_REMATCH[1]}"
+        seen["$g"]=1
     done
+    n=${#seen[@]}
     ((n > 5)) && n=5
     echo "$n"
 }

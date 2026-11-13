@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,8 @@ owner("Зашей это", "s1")
 out = stop("s1")
 check("stop: nothing recorded -> blocked once", '"decision": "block"' in out, out)
 check("stop: second stop releases", stop("s1", active=True) == "")
+check("stop: released, no third block", stop("s1") == "")
+check("guard: after release «зашил» still denied", '"permissionDecision": "deny"' in reply("Готово, правило зашил.", "s1"))
 owner("Зашей это", "s2")
 run("clear", {"session_id": "s2", "tool_name": "Bash", "tool_input": {"command": "python3 /l/feedback-note.py /m add --name a"},
               "tool_response": {"stdout": "feedback-note: wrote /m/feedback-a.md"}})
@@ -95,18 +98,38 @@ owner("Зашей это", "s4")
 run("clear", {"session_id": "s4", "tool_name": "mcp__gbrain-swarm__notify",
               "tool_input": {"to_agent": "coder", "payload": {"title": "", "body": ""}}})
 check("stop: an empty notify does not count", '"decision": "block"' in stop("s4"))
+owner("Зашей это", "s5")
+run("clear", {"session_id": "s5", "tool_name": "mcp__gbrain-swarm__notify",
+              "tool_input": {"to_agent": "coder", "payload": {"title": "Посмотри логи", "body": "другое дело"}}})
+check("stop: an unrelated notify does not count", '"decision": "block"' in stop("s5"))
+owner("Зашей это", "s6")
+run("clear", {"session_id": "s6", "tool_name": "mcp__gbrain-swarm__notify", "tool_response": {"isError": True},
+              "tool_input": {"to_agent": "coder", "payload": {"title": "Зашить правило", "body": "правило"}}})
+check("stop: a failed notify does not count", '"decision": "block"' in stop("s6"))
 
 # --- «готово» only after done --evidence ----------------------------------------------------------------------
-owner("Зашей правило", "g1")
+out = owner("Зашей правило", "g1")
 out = reply("Готово, правило зашил.", "g1")
 check("guard: «зашил» before the test denied", '"permissionDecision": "deny"' in out, out)
 check("guard: an honest status passes", reply("Принял, ставлю проверку, отпишусь после теста.", "g1") == "")
 check("guard: other session not affected", reply("Готово, правило зашил.", "g9") == "")
-r = run("done", "", extra=["--evidence", "short"])
+for honest in ("Ещё не зашил правило, ставлю проверку.", "Coder спросил: зашил ли я правило?",
+               "Ты просил «зашей правило», делаю."):
+    check(f"guard: «{honest}» passes", reply(honest, "g1") == "", honest)
+owner("Зашей правило про отчёты", "g2")
+r = run("done", "", extra=["--session", "g1", "--evidence", "short"])
 check("done: evidence too short refused", r.returncode == 2, r)
-r = run("done", "", extra=["--evidence", "хук отказал на тестовом сообщении, лог events.jsonl"])
-check("done: marks pending", r.returncode == 0 and "marked done" in r.stdout, r)
+r = run("done", "", extra=["--evidence", "хук отказал на тестовом сообщении"])
+check("done: without --session refused", r.returncode == 2, r)
+cmd = re.search(r"python3 (\S+) done (\S+) --session (\S+) --evidence", out)
+check("instruction: printed done command has the right shape", bool(cmd) and cmd.group(3) == "g1", out)
+r = subprocess.run([sys.executable, cmd.group(1), "done", cmd.group(2), "--session", cmd.group(3), "--evidence",
+                    "хук отказал на тестовом сообщении, лог events.jsonl"], capture_output=True, text=True,
+                   env={**os.environ, "NEUROOTDEL_GUARD_CONF": str(conf("jarvis"))}, timeout=30)
+check("done: the printed command marks this request", r.returncode == 0 and "marked done" in r.stdout, r)
 check("guard: «зашил» after done passes", reply("Готово, правило зашил: хук срабатывает.", "g1") == "")
+check("done: another session's request stays closed",
+      '"permissionDecision": "deny"' in reply("Готово, правило зашил.", "g2"))
 check("done: evidence logged", "хук отказал" in (STATE / "events.jsonl").read_text(encoding="utf-8"))
 
 # --- old marker, STOP, bad input -----------------------------------------------------------------------------
@@ -133,7 +156,7 @@ out = run("cstop", {"session_id": "c1"}, ws=CWS).stdout
 check("coder: no report -> blocked once", '"decision": "block"' in out, out)
 check("coder: second stop releases", run("cstop", {"session_id": "c1", "stop_hook_active": True}, ws=CWS).stdout == "")
 run("cprompt", {"prompt": task, "session_id": "c3"}, ws=CWS)
-run("cclear", {"session_id": "c3", "tool_input": {"to_agent": "jarvis", "payload": {"title": "Отчёт", "body": "ok"}}},
+run("cclear", {"session_id": "c3", "tool_input": {"to_agent": "jarvis", "payload": {"title": "Отчёт", "body": "хук стоит, тест прошёл"}}},
     ws=CWS)
 check("coder: after the report -> free", run("cstop", {"session_id": "c3"}, ws=CWS).stdout == "")
 

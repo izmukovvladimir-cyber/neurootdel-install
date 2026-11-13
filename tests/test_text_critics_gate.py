@@ -93,6 +93,10 @@ check("on: a service reply is not a text for people", hook("Принял, дел
 check("on: other tools ignored", hook(MSG, tool="Bash") == "")
 record(PIECE, "APPROVE", "APPROVE")
 check("on: approved later -> passes", hook(MSG) == "")
+record(PIECE, "APPROVE", "REQUEST_CHANGES")
+check("on: approved, then rejected on a re-run -> denied", denied(hook(MSG)))
+record(PIECE, "APPROVE", "APPROVE")
+check("on: approved again -> passes", hook(MSG) == "")
 
 # --- attachments -----------------------------------------------------------------------------------------------
 bad = PIECE.replace("тёплой", "колодезной")

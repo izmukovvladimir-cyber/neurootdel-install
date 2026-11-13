@@ -249,6 +249,10 @@ build intensive; mkcoder; mkauditor; rm "${SMP}/post.md"; run
 check "samples: zero on intensive ❌ with hint" hint_has "Образцы текстов: 0 из 5 жанров" "разложи как образцы"
 build intensive; mkcoder; mkauditor; printf '  \n' >"${SMP}/post.md"; echo x >"${SMP}/letter.txt"; run
 check "samples: blank file not counted"        out_has "✅ Образцы текстов: 1 из 5 жанров"
+build intensive; mkcoder; mkauditor; echo x >"${SMP}/post.txt"; echo y >"${SMP}/post-2.md"; echo z >"${SMP}/Post3.md"; run
+check "samples: files of one genre count once" out_has "✅ Образцы текстов: 1 из 5 жанров"
+build intensive; mkcoder; mkauditor; echo x >"${SMP}/letter.md"; echo y >"${SMP}/client-reply.md"; run
+check "samples: different genres counted"      out_has "✅ Образцы текстов: 3 из 5 жанров"
 build; rm "${SMP}/post.md"; run
 check "samples: zero on workshop ⏸, not ❌"   out_has "⏸ Образцы текстов: 0 из 5 жанров"
 check "samples: zero on workshop keeps exit 0" test "$RC" -eq 0

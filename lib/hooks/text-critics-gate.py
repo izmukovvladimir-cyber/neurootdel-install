@@ -38,9 +38,14 @@ from zoneinfo import ZoneInfo
 
 HOOKS = Path(__file__).resolve().parent
 sys.path.insert(0, str(HOOKS.parent))
-import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
+try:
+    import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
-_CONF = guard_conf.load()
+    _CONF = guard_conf.load()
+except Exception:  # noqa: BLE001 - as a hook a broken config never blocks a reply; the CLI shows the error
+    if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] not in {"record", "override", "report"}:
+        sys.exit(0)
+    raise
 DEFAULT_STATE = str(_CONF.lab / "shared" / "state" / "critics")
 EDITORIAL_CONF = _CONF.lab / "shared" / "editorial.conf"
 CRITICS = HOOKS.parent / "text-critics.sh"
@@ -128,14 +133,25 @@ def journal(state: Path) -> Path:
     return state / "gate.jsonl"
 
 
+def latest_state(rows: list[dict]) -> dict[str, bool]:
+    """sha -> True (approved or overridden) / False (rejected); the LAST run or override of a text decides."""
+    state: dict[str, bool] = {}
+    for r in rows:
+        if "sha" not in r:
+            continue
+        if r.get("event") == "override":
+            state[r["sha"]] = True
+        elif r.get("event") == "run":
+            state[r["sha"]] = r.get("v1") == "APPROVE" and r.get("v2") == "APPROVE"
+    return state
+
+
 def approved_hashes(rows: list[dict]) -> set[str]:
-    return {r["sha"] for r in rows if r.get("event") == "override"
-            or (r.get("event") == "run" and r.get("v1") == "APPROVE" and r.get("v2") == "APPROVE")}
+    return {k for k, ok in latest_state(rows).items() if ok}
 
 
 def rejected_hashes(rows: list[dict]) -> set[str]:
-    return {r["sha"] for r in rows if r.get("event") == "run"
-            and not (r.get("v1") == "APPROVE" and r.get("v2") == "APPROVE")}
+    return {k for k, ok in latest_state(rows).items() if not ok}
 
 
 def deny_text(what: str, state: Path) -> str:

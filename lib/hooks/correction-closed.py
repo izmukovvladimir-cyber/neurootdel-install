@@ -25,9 +25,14 @@ from zoneinfo import ZoneInfo
 
 LIB = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LIB))
-import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
+try:
+    import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
-_CONF = guard_conf.load()
+    _CONF = guard_conf.load()
+except Exception:  # noqa: BLE001 - a broken config must not break the turn
+    if __name__ == "__main__":
+        sys.exit(0)
+    raise
 MARKER_TTL_SEC = 6 * 3600
 NOTE_TOOL = LIB / "feedback-note.py"
 

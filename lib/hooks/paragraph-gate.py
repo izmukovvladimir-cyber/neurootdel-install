@@ -27,9 +27,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
+try:
+    import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
-_RAW = guard_conf.read_raw()
+    _RAW = guard_conf.read_raw()
+except Exception:  # noqa: BLE001 - a broken config must not break the turn
+    if __name__ == "__main__":
+        sys.exit(0)
+    raise
 
 
 

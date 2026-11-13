@@ -26,7 +26,10 @@ F
 cat >"${TDIR}/bin/curl" <<'F'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >"${HOME}/curl.argv"
+printf '%s\n' "$@" >>"${HOME}/curl.argv.all"
 cat >"${HOME}/curl.stdin"
+cat "${HOME}/curl.stdin" >>"${HOME}/curl.stdin.all"
+for a in "$@"; do [[ "$a" == @* ]] && cat "${a#@}" >"${HOME}/curl.body"; done
 cat "${HOME}/curl.code" 2>/dev/null || printf 200
 F
 chmod +x "${TDIR}/bin/crontab" "${TDIR}/bin/curl"
@@ -42,21 +45,31 @@ check "job: message with the wake mark"             bash -c 'jq -e ".message == 
 check "job: owner chat = first allowed id"          bash -c 'jq -e ".chat == \"555\"" "$0"' "$JOB"
 check "cron: one wake line, tagged"                 bash -c 'test "$(grep -c "qr:ID=$0 wake$" "$1")" -eq 1' "$ID" "${HOME}/crontab.txt"
 check "cron: no token, no message text in it"       bash -c '! grep -qE "AAHsecret|whsecret|Проверь" "$0"' "${HOME}/crontab.txt"
+check "create: the text is not printed"           bash -c '! grep -q "Проверь" <<<"$0"' "$OUT"
+check "job file private (600)"                     test "$(stat -c %a "$JOB")" = 600
 check "list: shows the wake"                        bash -c 'bash "$0/list.sh" | grep -q "будильник агента"' "$SK"
 
 bash "${SK}/wake.sh" "$ID"; RC=$?
 check "wake: delivered, exit 0"                     test "$RC" -eq 0
 check "wake: webhook URL of the agent's port"       grep -qx 'http://127.0.0.1:8091/hooks/agent' "${HOME}/curl.argv"
 check "wake: token only through stdin"              bash -c 'grep -q "Bearer whsecret" "$0" && ! grep -q whsecret "$1"' "${HOME}/curl.stdin" "${HOME}/curl.argv"
-check "wake: body = message + chatId"               bash -c 'grep -qF "\"chatId\":\"555\"" "$0"' "${HOME}/curl.argv"
+check "wake: body = message + chatId"               bash -c 'grep -qF "\"chatId\":\"555\"" "$0" && grep -q "Проверь" "$0"' "${HOME}/curl.body"
+check "wake: the text never in curl argv"           bash -c '! grep -q "Проверь" "$0"' "${HOME}/curl.argv"
 check "wake: job file removed after delivery"       test ! -e "$JOB"
+check "wake: its cron line removed"                 bash -c '! grep -q "qr:ID=$0" "$1"' "$ID" "${HOME}/crontab.txt"
 
 OUT=$(bash "${SK}/create.sh" --wake "in 1 hour" "второй" 2>&1)
 ID2=$(sed -n 's/^scheduled: id=\([0-9a-f]*\) .*/\1/p' <<<"$OUT")
 printf 502 >"${HOME}/curl.code"
-bash "${SK}/wake.sh" "$ID2"; RC=$?
+: >"${HOME}/curl.stdin.all"; : >"${HOME}/curl.argv.all"
+QR_WAKE_RETRY_SEC=0 bash "${SK}/wake.sh" "$ID2"; RC=$?
+WL="${HOME}/.claude-lab/shared/state/reminders/wake.log"
 check "wake: webhook down -> exit 1, job kept"      bash -c 'test "$0" -eq 1 && test -f "$1"' "$RC" "${HOME}/.claude-lab/shared/state/reminders/${ID2}.json"
-check "wake: reason in wake.log"                    grep -q 'webhook answered 502' "${HOME}/.claude-lab/shared/state/reminders/wake.log"
+check "wake: three tries logged"                    grep -q 'webhook answered 502 (try 3/3)' "$WL"
+check "wake: owner told by the bot after the tries" bash -c 'grep -q "owner notified by the bot" "$0" && grep -q "api.telegram.org/bot111:AAHsecret/sendMessage" "$1"' "$WL" "${HOME}/curl.stdin.all"
+check "wake: fallback text marks the miss"          grep -q '%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B9' "${HOME}/curl.body"
+check "wake: bot token never in argv"               bash -c '! grep -q AAHsecret "$0"' "${HOME}/curl.argv.all"
+check "wake: failed line removed too"               bash -c '! grep -q "qr:ID=$0" "$1"' "$ID2" "${HOME}/crontab.txt"
 bash "${SK}/wake.sh" "../etc"; RC=$?
 check "wake: a bad id refused"                      test "$RC" -eq 2
 
