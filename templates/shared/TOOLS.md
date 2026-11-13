@@ -20,7 +20,7 @@ Restarting another agent's service is {{DOCTOR_NAME}}'s job. Your own service: `
   owner unanswered, restart queue. Alerts: `python3 {{LIB}}/agents-guard.py --drain`. Stop: touch /var/lib/{{USER}}-guard/STOP.
 - `agents-reset.sh` (cron every 10 min, --auto): nightly 04:00 and daytime reset of bloated sessions by the
   owner's clock. Dry run: `bash {{LIB}}/agents-reset.sh --dry-run`.
-- `agent-handoff-flush.py <agent>`: "Last 15 actions" into core/hot/handoff.md.
+- `agent-handoff-flush.py <agent>`: "Last 15 actions" into core/archive/last-actions.md, a pointer to it in core/hot/handoff.md.
 - `claude-auth-watch.sh` (cron hourly, root): a lost Claude login ("Not logged in", no login, long-lived token
   near expiry) -> one line to the owner by the agent's own bot. Stop: touch /var/lib/{{USER}}-auth-watch/STOP.
 - `memory-backup.sh` (cron hourly, --auto = 03:30 owner time): ~/backups/memory, 14 days.

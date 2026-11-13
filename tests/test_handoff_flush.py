@@ -130,8 +130,63 @@ def main() -> int:
         out_b = run(mut, cut, 1)
         check(f"control: mutant '{name}' is caught", heads(out_a) > 1 or heads(out_b) > 1)
 
+    archive_cases(good, src)
+
     print(f"\nPASS={PASS} FAIL={FAIL}")
     return 0 if FAIL == 0 else 1
+
+
+def archive_cases(good, src: str) -> None:
+    """The list goes to core/archive/last-actions.md, handoff.md keeps only a pointer."""
+    import json
+    from datetime import datetime, timezone
+    proj = _HOME / ".claude/projects" / good.AGENT_TO_JSONL_DIR["jarvis"]
+    proj.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    rec = {"type": "assistant", "timestamp": now, "message": {"content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "/x/marker-file-77.py"}}]}}
+    (proj / "s.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    (_WS / "core/hot").mkdir(parents=True, exist_ok=True)
+    h = _WS / "core/hot/handoff.md"
+    arch = _WS / good.ARCHIVE_REL
+    for extra in h.parent.glob("handoff.md.*"):
+        extra.unlink()
+    arch.unlink(missing_ok=True)
+    h.write_text(STICKY, encoding="utf-8")
+    res = good.flush_for_agent("jarvis")
+    out = h.read_text(encoding="utf-8")
+    check("archive: flush OK", res.startswith("OK"), res)
+    check("archive: entry is in core/archive/last-actions.md",
+          arch.is_file() and "marker-file-77.py" in arch.read_text(encoding="utf-8"))
+    check("archive: archive keeps the heading", arch.is_file() and heads(arch.read_text(encoding="utf-8")) == 1)
+    check("archive: handoff has no entries, only the pointer",
+          "marker-file-77.py" not in out and good.ARCHIVE_POINTER in out, repr(out[-300:]))
+    check("archive: handoff keeps one section and the sticky part",
+          heads(out) == 1 and "- an open item that must survive" in out and good.AUTO_END_MARKER in out)
+    h.write_text(out + "\n- appended below\n", encoding="utf-8")
+    good.flush_for_agent("jarvis")
+    out2 = h.read_text(encoding="utf-8")
+    check("archive: second flush replaces the section, text below kept",
+          heads(out2) == 1 and out2.count(good.ARCHIVE_POINTER) == 1 and "- appended below" in out2, repr(out2))
+    legacy = STICKY + "\n" + AUTO_BODY + good.AUTO_END_MARKER + "\n"
+    h.write_text(legacy, encoding="utf-8")
+    good.flush_for_agent("jarvis")
+    out3 = h.read_text(encoding="utf-8")
+    check("archive: an old inline list is replaced by the pointer",
+          "Bash: something" not in out3 and good.ARCHIVE_POINTER in out3 and heads(out3) == 1, repr(out3))
+    check("archive: pointer line is ours for the no-end-marker migration",
+          good.split_tail(STICKY + "\n## Last 15 actions (auto-generated)\n\nAuto-flushed by agent-handoff-flush.py "
+                          "at x.\n" + good.ARCHIVE_POINTER + "\n") == "")
+    arch.unlink()
+    arch.symlink_to(_TMP / "elsewhere.md")
+    res = good.flush_for_agent("jarvis")
+    check("archive: symlinked archive refused", res.startswith("ERR") and "symlink" in res, res)
+    arch.unlink()
+    mut = load(src.replace("        auto_lines = auto_lines[:3] + [ARCHIVE_POINTER]\n", "", 1))
+    h.write_text(STICKY, encoding="utf-8")
+    mut.flush_for_agent("jarvis")
+    check("control: without the pointer swap the list stays in handoff",
+          "marker-file-77.py" in h.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
