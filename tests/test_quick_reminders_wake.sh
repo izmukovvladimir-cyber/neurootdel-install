@@ -19,7 +19,12 @@ export NEUROOTDEL_CHANNEL_ENV="$ENV"
 cat >"${TDIR}/bin/crontab" <<'F'
 #!/usr/bin/env bash
 f="${HOME}/crontab.txt"
-if [[ "${1:-}" == "-l" ]]; then [[ -f "$f" ]] && cat "$f"; exit 0; fi
+# Like the real one: no crontab -> "no crontab for <user>", exit 1; crontab.fail -> a read error.
+if [[ "${1:-}" == "-l" ]]; then
+    [[ -f "${HOME}/crontab.fail" ]] && { echo "crontab: permission denied" >&2; exit 1; }
+    [[ -f "$f" ]] || { echo "no crontab for tester" >&2; exit 1; }
+    cat "$f"; exit 0
+fi
 if [[ "${1:-}" == "-" ]]; then cat >"$f"; exit 0; fi
 exit 1
 F
@@ -57,6 +62,7 @@ check "wake: body = message + chatId"               bash -c 'grep -qF "\"chatId\
 check "wake: the text never in curl argv"           bash -c '! grep -q "Проверь" "$0"' "${HOME}/curl.argv"
 check "wake: job file removed after delivery"       test ! -e "$JOB"
 check "wake: its cron line removed"                 bash -c '! grep -q "qr:ID=$0" "$1"' "$ID" "${HOME}/crontab.txt"
+check "wake: last line removed, no false failure"   bash -c '! grep -q "crontab rewrite failed" "$0"' "${HOME}/.claude-lab/shared/state/reminders/wake.log"
 
 OUT=$(bash "${SK}/create.sh" --wake "in 1 hour" "второй" 2>&1)
 ID2=$(sed -n 's/^scheduled: id=\([0-9a-f]*\) .*/\1/p' <<<"$OUT")
@@ -88,6 +94,54 @@ bash "${SK}/create.sh" --wake "in 5 minutes" "x" >/dev/null 2>&1; RC=$?
 check "create --wake: no webhook port -> refused"   test "$RC" -ne 0
 OUT=$(bash "${SK}/create.sh" "in 5 minutes" "обычное напоминание" 2>&1); RC=$?
 check "plain reminder still works"                  bash -c 'test "$0" -eq 0 && grep -q "sendMessage" "$1"' "$RC" "${HOME}/crontab.txt"
+
+PID1=$(sed -n 's/^scheduled: id=\([0-9a-f]*\).*/\1/p' <<<"$OUT")
+LOCKF="${HOME}/.claude-lab/shared/state/reminders/.crontab.lock"
+check "plain: own removal goes through delete.sh"  bash -c 'grep "qr:ID=$0$" "$1" | grep -qF "/delete.sh'"'"' $0 >/dev/null"' "$PID1" "${HOME}/crontab.txt"
+LINE=$(grep "qr:ID=${PID1}$" "${HOME}/crontab.txt")
+sh -c "${LINE#*>/dev/null 2>&1; }"
+check "plain: fired line removes itself"            bash -c '! grep -q "qr:ID=$0" "$1"' "$PID1" "${HOME}/crontab.txt"
+
+: >"${HOME}/crontab.txt"
+OUT=$(bash "${SK}/create.sh" "in 5 minutes" "последнее" 2>&1)
+PID2=$(sed -n 's/^scheduled: id=\([0-9a-f]*\).*/\1/p' <<<"$OUT")
+OUT=$(bash "${SK}/delete.sh" "$PID2" 2>&1); RC=$?
+check "delete: the only line -> exit 0, deleted"    bash -c 'test "$0" -eq 0 && grep -q "deleted reminder" <<<"$1" && ! grep -q "qr:ID=$2" "$3"' "$RC" "$OUT" "$PID2" "${HOME}/crontab.txt"
+bash "${SK}/delete.sh" "$PID2" >/dev/null 2>&1; RC=$?
+check "delete: unknown id -> exit 1"                test "$RC" -eq 1
+
+rm -f "${HOME}/crontab.txt"
+OUT=$(bash "${SK}/create.sh" "in 5 minutes" "первый в пустом" 2>&1); RC=$?
+check "create: no crontab yet -> exit 0, one line"  bash -c 'test "$0" -eq 0 && test "$(grep -c "qr:ID=" "$1")" -eq 1' "$RC" "${HOME}/crontab.txt"
+
+cp "${HOME}/crontab.txt" "${TDIR}/crontab.before"
+PIDF=$(sed -n 's/^scheduled: id=\([0-9a-f]*\).*/\1/p' <<<"$OUT")
+touch "${HOME}/crontab.fail"
+bash "${SK}/delete.sh" "$PIDF" >/dev/null 2>&1; RC=$?
+check "delete: read error -> exit 1, nothing written" bash -c 'test "$0" -eq 1 && cmp -s "$1" "$2"' "$RC" "${TDIR}/crontab.before" "${HOME}/crontab.txt"
+bash "${SK}/create.sh" "in 5 minutes" "не запишется" >/dev/null 2>&1; RC=$?
+check "create: read error -> exit 1, nothing written" bash -c 'test "$0" -ne 0 && cmp -s "$1" "$2"' "$RC" "${TDIR}/crontab.before" "${HOME}/crontab.txt"
+printf '{"message":"x","chat":"555","env":"%s"}' "$ENV" >"${HOME}/.claude-lab/shared/state/reminders/${PIDF}.json"
+printf 200 >"${HOME}/curl.code"
+printf 'TELEGRAM_BOT_TOKEN=111:AAHsecret\nTELEGRAM_WEBHOOK_PORT=8091\nTELEGRAM_WEBHOOK_TOKEN=whsecret\nTELEGRAM_ALLOWED_USER_IDS=555\n' >"$ENV"
+bash "${SK}/wake.sh" "$PIDF" >/dev/null 2>&1
+check "wake: read error -> crontab kept, logged"    bash -c 'cmp -s "$0" "$1" && grep -q "crontab not read or not rewritten, line left" "$2"' "${TDIR}/crontab.before" "${HOME}/crontab.txt" "${HOME}/.claude-lab/shared/state/reminders/wake.log"
+rm -f "${HOME}/crontab.fail"
+
+flock "$LOCKF" sleep 2 & HOLD=$!
+sleep 0.3
+T0=$(date +%s.%N)
+bash "${SK}/create.sh" "in 5 minutes" "ждёт замок" >/dev/null 2>&1; RC=$?
+T1=$(date +%s.%N)
+wait "$HOLD"
+check "create: waits for the crontab lock"          bash -c 'test "$0" -eq 0 && awk -v a="$1" -v b="$2" "BEGIN{exit !(b-a>=1)}"' "$RC" "$T0" "$T1"
+flock "$LOCKF" sleep 2 & HOLD=$!
+sleep 0.3
+T0=$(date +%s.%N)
+bash "${SK}/delete.sh" "0000000000000000" >/dev/null 2>&1
+T1=$(date +%s.%N)
+wait "$HOLD"
+check "delete: waits for the crontab lock"          awk -v a="$T0" -v b="$T1" 'BEGIN{exit !(b-a>=1)}'
 
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

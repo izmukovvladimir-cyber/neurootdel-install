@@ -39,6 +39,8 @@ MON=$(date -d "@${TARGET_EPOCH}" +%m)
 
 # One-shot: run at specific minute/hour/day/month, then remove its own cron line.
 NONCE=$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')
+# shellcheck source=crontab-edit.sh
+source "$(dirname "${BASH_SOURCE[0]}")/crontab-edit.sh"
 
 if [[ "$WAKE" == 1 ]]; then
     # The agent whose skill this is: ~/.claude-lab/<agent>/.claude/skills/quick-reminders/scripts.
@@ -63,7 +65,7 @@ if [[ "$WAKE" == 1 ]]; then
     CRON_LINE="${MIN} ${HOUR} ${DAY} ${MON} * QR_WAKE_DIR='${WAKE_DIR}' /bin/bash '${SCRIPTS}/wake.sh' ${NONCE} >/dev/null 2>&1 # qr:ID=${NONCE} wake"
     (
         flock -w 30 9 || { echo "error: crontab lock busy, try again" >&2; exit 1; }
-        ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
+        qr_crontab_add "$CRON_LINE" || { echo "error: crontab not read or not written, nothing scheduled" >&2; exit 1; }
     ) 9>"${WAKE_DIR}/.crontab.lock"
     echo "scheduled: id=${NONCE} at=$(date -d "@${TARGET_EPOCH}" '+%Y-%m-%d %H:%M') wake=${AGENT}"
     exit 0
@@ -80,12 +82,23 @@ if [[ -z "$TG_ID" ]]; then
     exit 1
 fi
 
+# Every crontab rewrite (this add, the line's own removal through delete.sh when it fires, wake.sh) runs
+# under one lock, so a parallel add or removal cannot drop another line.
+SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCK_DIR="${QR_WAKE_DIR:-$HOME/.claude-lab/shared/state/reminders}"
+[[ "$SCRIPTS" != *"'"* && "$LOCK_DIR" != *"'"* ]] || { echo "error: a path contains a quote" >&2; exit 1; }
+mkdir -p "$LOCK_DIR"
+LOCK="${LOCK_DIR}/.crontab.lock"
+
 # Escape message for cron line (no newlines, no unescaped quotes)
 SAFE_MSG=$(printf '%s' "$MESSAGE" | tr '\n' ' ' | sed 's/"/\\"/g')
 
-CRON_LINE="${MIN} ${HOUR} ${DAY} ${MON} * TOKEN=\$(${TOKEN_CMD}) && curl -fsSL --max-time 30 -d \"chat_id=${TG_ID}\" -d \"text=${SAFE_MSG}\" \"https://api.telegram.org/bot\${TOKEN}/sendMessage\" >/dev/null 2>&1; (crontab -l 2>/dev/null | grep -vF 'qr:ID=${NONCE}') | crontab - # qr:ID=${NONCE}"
+CRON_LINE="${MIN} ${HOUR} ${DAY} ${MON} * TOKEN=\$(${TOKEN_CMD}) && curl -fsSL --max-time 30 -d \"chat_id=${TG_ID}\" -d \"text=${SAFE_MSG}\" \"https://api.telegram.org/bot\${TOKEN}/sendMessage\" >/dev/null 2>&1; QR_WAKE_DIR='${LOCK_DIR}' /bin/bash '${SCRIPTS}/delete.sh' ${NONCE} >/dev/null 2>&1 # qr:ID=${NONCE}"
 
-( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab -
+(
+    flock -w 30 9 || { echo "error: crontab lock busy, try again" >&2; exit 1; }
+    qr_crontab_add "$CRON_LINE" || { echo "error: crontab not read or not written, nothing scheduled" >&2; exit 1; }
+) 9>"$LOCK"
 
 echo "scheduled: id=${NONCE} at=$(date -d "@${TARGET_EPOCH}" '+%Y-%m-%d %H:%M')"
 echo "message: ${MESSAGE}"
