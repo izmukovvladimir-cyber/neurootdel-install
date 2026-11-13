@@ -9,8 +9,8 @@ set -euo pipefail
 # Delivery: up to QR_WAKE_TRIES attempts (3), QR_WAKE_RETRY_SEC apart (60). All failed: the owner gets the
 # text from the agent's bot ("будильник не дошёл до агента"), so the promise is not lost silently.
 # The cron line is removed by this script under the same lock create.sh appends with, once the job is handled
-# (delivered, or the owner was told). channel.env unreadable or the job file broken: nobody can be told, the line
-# and the file stay and the reason is in wake.log.
+# (delivered, or the owner was told: no port, unreadable job, all tries failed). channel.env path missing or
+# unreadable: nobody can be told, the line and the file stay and the reason is in wake.log.
 # Exit: 0 delivered (the file is removed), 1 not delivered to the agent (the file stays, the reason in wake.log).
 
 [[ $# -eq 1 && "$1" =~ ^[0-9a-f]{16}$ ]] || { echo "usage: $0 ID" >&2; exit 2; }
