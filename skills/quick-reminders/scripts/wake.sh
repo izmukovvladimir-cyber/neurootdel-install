@@ -8,7 +8,9 @@ set -euo pipefail
 # private temp file: neither lands in argv or in crontab.
 # Delivery: up to QR_WAKE_TRIES attempts (3), QR_WAKE_RETRY_SEC apart (60). All failed: the owner gets the
 # text from the agent's bot ("будильник не дошёл до агента"), so the promise is not lost silently.
-# The cron line is removed by this script under the same lock create.sh appends with.
+# The cron line is removed by this script under the same lock create.sh appends with, once the job is handled
+# (delivered, or the owner was told). channel.env unreadable or the job file broken: nobody can be told, the line
+# and the file stay and the reason is in wake.log.
 # Exit: 0 delivered (the file is removed), 1 not delivered to the agent (the file stays, the reason in wake.log).
 
 [[ $# -eq 1 && "$1" =~ ^[0-9a-f]{16}$ ]] || { echo "usage: $0 ID" >&2; exit 2; }
@@ -27,18 +29,30 @@ drop_cron_line() {
         crontab -l 2>/dev/null | grep -vF "qr:ID=${id} wake" | crontab - || say "crontab rewrite failed"
     ) 9>"${dir}/.crontab.lock"
 }
-trap drop_cron_line EXIT
-
-[[ -f "$job" ]] || { say "no job file"; exit 1; }
-env_file=$(jq -r '.env // empty' "$job")
-[[ -r "$env_file" ]] || { say "channel.env not readable: ${env_file}"; exit 1; }
+[[ -f "$job" ]] || { say "no job file"; drop_cron_line; exit 1; }
+env_file=$(jq -r '.env // empty' "$job" 2>/dev/null || true)
+[[ -n "$env_file" && -r "$env_file" ]] || { say "job broken or channel.env not readable: ${env_file}; line kept"; exit 1; }
 env_val() { sed -n "s/^$1=//p" "$env_file" | tail -n1 | tr -d '[:space:]"'; }
-port=$(env_val TELEGRAM_WEBHOOK_PORT)
-[[ "$port" =~ ^[0-9]+$ ]] || { say "no TELEGRAM_WEBHOOK_PORT in ${env_file}"; exit 1; }
 
 body=$(mktemp)
-trap 'rm -f "${body:?}"; drop_cron_line' EXIT
-jq -c '{message: .message, chatId: .chat}' "$job" >"$body"
+trap 'rm -f "${body:?}"' EXIT
+
+# notify_owner REASON -- the owner gets the text from the agent's bot; the job is handled either way.
+notify_owner() {
+    local tg=""
+    if jq -r '"chat_id=" + (.chat | @uri) + "&text=" + ("[будильник не дошёл до агента] " + .message | @uri)' \
+            "$job" >"$body" 2>/dev/null; then
+        tg=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$(env_val TELEGRAM_BOT_TOKEN)" \
+            | curl -s -o /dev/null -w '%{http_code}' -m 30 -K - --data-binary "@${body}" || true)
+    fi
+    say "$1; owner notified by the bot: ${tg:-nothing}"
+    drop_cron_line
+    exit 1
+}
+
+port=$(env_val TELEGRAM_WEBHOOK_PORT)
+[[ "$port" =~ ^[0-9]+$ ]] || notify_owner "no TELEGRAM_WEBHOOK_PORT in ${env_file}"
+jq -c '{message: .message, chatId: .chat}' "$job" >"$body" 2>/dev/null || notify_owner "job file unreadable"
 
 code=""
 for ((i = 1; i <= tries; i++)); do
@@ -48,15 +62,11 @@ for ((i = 1; i <= tries; i++)); do
     if [[ "$code" == 200 ]]; then
         rm -f -- "${job:?}"
         say "delivered"
+        drop_cron_line
         exit 0
     fi
     say "webhook answered ${code:-nothing} (try ${i}/${tries})"
     ((i < tries)) && sleep "$pause"
 done
 
-# The agent did not wake: the owner gets the text from the agent's bot.
-jq -r '"chat_id=" + (.chat | @uri) + "&text=" + ("[будильник не дошёл до агента] " + .message | @uri)' "$job" >"$body"
-tg=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$(env_val TELEGRAM_BOT_TOKEN)" \
-    | curl -s -o /dev/null -w '%{http_code}' -m 30 -K - --data-binary "@${body}" || true)
-say "agent not woken; owner notified by the bot: ${tg:-nothing}"
-exit 1
+notify_owner "agent not woken"

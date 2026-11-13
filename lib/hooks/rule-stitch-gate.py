@@ -17,7 +17,7 @@ layout taken out). One script, several hook entries in the plugin settings.json 
                                  check firing: marks THAT request «done» (the «готово» guard opens), logs evidence.
 Coder side (only where Coder is installed and gets bus tasks):
   cprompt <ws> UserPromptSubmit  a bus task from jarvis titled «Зашить правило»: marker + work order.
-  cclear <ws>  PostToolUse       a non-empty notify to "jarvis" clears it.
+  cclear <ws>  PostToolUse       a successful notify to "jarvis" about «Зашить правило» clears it.
   cstop <ws>   Stop              report not sent: blocks once, then releases and logs the miss.
 
 It never sends anything itself. Every call is logged without message text to
@@ -114,8 +114,7 @@ def write_marker(mp: Path, data: dict) -> None:
 
 def claims_done(text: str) -> bool:
     """A statement that the rule is in place: questions, quotes and «ещё не зашил» do not count."""
-    for sent in SENT_SPLIT.split(text):
-        s = QUOTED.sub(" ", sent)
+    for s in SENT_SPLIT.split(QUOTED.sub(" ", text)):
         if "?" in s or NOT_YET.search(s):
             continue
         if DONE.search(s):
@@ -296,8 +295,9 @@ def coder_instruction() -> str:
     return ("[rule-stitch] A «Зашить правило» task from jarvis. Order: 1) backup of every file before the edit "
             f"(cp -p <file> <file>.bak-{d}-coder-<topic>); 2) the check: inside the script that does the work, or a "
             "hook; 3) proof: a test or a live run that shows it firing; 4) report to jarvis in THIS turn: "
-            'mcp__gbrain-swarm__notify(to_agent="jarvis", payload={"title": "Отчёт: <topic>", "body": "<files, what '
-            'fired, backups, what did not work, how to stop>"}). Do not write to people.')
+            f'mcp__gbrain-swarm__notify(to_agent="jarvis", payload={{"title": "Отчёт: {TITLE} <topic>", "body": "<files, '
+            'what fired, backups, what did not work, how to stop>"}). The title must keep «' + TITLE + '». '
+            'Do not write to people.')
 
 
 def jarvis_task_in(prompt: str) -> bool:
@@ -323,7 +323,7 @@ def mode_cprompt(ws: str, p: dict) -> int:
 
 def mode_cclear(ws: str, p: dict) -> int:
     ti = p.get("tool_input") or {}
-    if (not isinstance(ti, dict) or ti.get("to_agent") != "jarvis" or len(_payload_text(ti).strip()) < 20
+    if (not isinstance(ti, dict) or ti.get("to_agent") != "jarvis" or TITLE.lower() not in _payload_text(ti).lower()
             or tool_failed(p)):
         return 0
     state, sess = state_dir(ws), str(p.get("session_id") or "")

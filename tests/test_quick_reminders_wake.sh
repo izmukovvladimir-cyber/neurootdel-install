@@ -70,6 +70,16 @@ check "wake: owner told by the bot after the tries" bash -c 'grep -q "owner noti
 check "wake: fallback text marks the miss"          grep -q '%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B9' "${HOME}/curl.body"
 check "wake: bot token never in argv"               bash -c '! grep -q AAHsecret "$0"' "${HOME}/curl.argv.all"
 check "wake: failed line removed too"               bash -c '! grep -q "qr:ID=$0" "$1"' "$ID2" "${HOME}/crontab.txt"
+OUT=$(bash "${SK}/create.sh" --wake "in 2 hours" "третий" 2>&1)
+ID3=$(sed -n 's/^scheduled: id=\([0-9a-f]*\) .*/\1/p' <<<"$OUT")
+mv "$ENV" "${ENV}.away"
+bash "${SK}/wake.sh" "$ID3"; RC=$?
+mv "${ENV}.away" "$ENV"
+check "wake: env unreadable -> line and job kept"   bash -c 'test "$0" -eq 1 && grep -q "qr:ID=$1 wake" "$2" && test -f "$3"' "$RC" "$ID3" "${HOME}/crontab.txt" "${HOME}/.claude-lab/shared/state/reminders/${ID3}.json"
+sed -i '/^TELEGRAM_WEBHOOK_PORT=/d' "$ENV"
+: >"${HOME}/curl.stdin.all"
+bash "${SK}/wake.sh" "$ID3"; RC=$?
+check "wake: no port -> owner told, line removed"   bash -c 'test "$0" -eq 1 && grep -q "sendMessage" "$1" && ! grep -q "qr:ID=$2" "$3"' "$RC" "${HOME}/curl.stdin.all" "$ID3" "${HOME}/crontab.txt"
 bash "${SK}/wake.sh" "../etc"; RC=$?
 check "wake: a bad id refused"                      test "$RC" -eq 2
 

@@ -114,7 +114,8 @@ check("guard: «зашил» before the test denied", '"permissionDecision": "de
 check("guard: an honest status passes", reply("Принял, ставлю проверку, отпишусь после теста.", "g1") == "")
 check("guard: other session not affected", reply("Готово, правило зашил.", "g9") == "")
 for honest in ("Ещё не зашил правило, ставлю проверку.", "Coder спросил: зашил ли я правило?",
-               "Ты просил «зашей правило», делаю."):
+               "Ты просил «зашей правило», делаю.", "Он сказал «Готово. Правило зашито». Я проверяю.",
+               "Правило не зашито, жду тест."):
     check(f"guard: «{honest}» passes", reply(honest, "g1") == "", honest)
 owner("Зашей правило про отчёты", "g2")
 r = run("done", "", extra=["--session", "g1", "--evidence", "short"])
@@ -156,8 +157,13 @@ out = run("cstop", {"session_id": "c1"}, ws=CWS).stdout
 check("coder: no report -> blocked once", '"decision": "block"' in out, out)
 check("coder: second stop releases", run("cstop", {"session_id": "c1", "stop_hook_active": True}, ws=CWS).stdout == "")
 run("cprompt", {"prompt": task, "session_id": "c3"}, ws=CWS)
-run("cclear", {"session_id": "c3", "tool_input": {"to_agent": "jarvis", "payload": {"title": "Отчёт", "body": "хук стоит, тест прошёл"}}},
-    ws=CWS)
+run("cclear", {"session_id": "c3", "tool_input": {"to_agent": "jarvis", "payload": {
+    "title": "Отчёт по логам", "body": "другая задача: логи почищены, место освободилось"}}}, ws=CWS)
+check("coder: an unrelated long report does not clear", '"decision": "block"' in run("cstop", {"session_id": "c3"},
+                                                                                      ws=CWS).stdout)
+run("cprompt", {"prompt": task, "session_id": "c3"}, ws=CWS)
+run("cclear", {"session_id": "c3", "tool_input": {"to_agent": "jarvis", "payload": {
+    "title": "Отчёт: Зашить правило подписи", "body": "хук стоит, тест прошёл"}}}, ws=CWS)
 check("coder: after the report -> free", run("cstop", {"session_id": "c3"}, ws=CWS).stdout == "")
 
 print(f"FAILS: {len(FAILS)}")
