@@ -6,16 +6,21 @@
 #      an agent whose flush failed is NOT reset (the reset would lose its day);
 #   1. hold-file, live turn (transcript timestamps, 15 min window), background job in the unit;
 #   2. context = cache_read of the last turn of the newest session; reset only above the threshold
-#      (250k; an agent with a task in progress on the board gets 350k in the daytime run);
+#      (250k; an agent with a task in progress on the board gets 350k in the daytime run;
+#      the nightly run resets EVERY agent, threshold 0, see --night below);
 #   3. second look at turn time and background job right before the restart;
 #   4. reset = sudo systemctl restart channel-<agent>, with a QUIET marker so channel-confirm.sh
 #      skips the resume-nudge: an automatic reset must never send anything to a person.
 #
 # Cron (/etc/cron.d/<user>-agents-reset, runs as the agent user): */10 * * * * --auto.
 # --auto picks the run by the OWNER's clock (guard.conf OWNER_TIMEZONE), whatever the
-# server timezone: nightly at 04:00-04:09, --daytime 06:00-22:59, nothing otherwise.
-# Flags: --auto, --daytime, --dry-run (decides and logs into $LOG; never writes handoff, streak/hold
-# files or the quiet marker, never restarts). The log line is the point of a dry run.
+# server timezone: nightly (--night) at 04:00-04:09, --daytime 06:00-22:59, nothing otherwise.
+# Flags: --auto, --daytime, --night, --dry-run (decides and logs into $LOG; never writes handoff,
+# streak/hold files or the quiet marker, never restarts). The log line is the point of a dry run.
+# --night: every agent is reset whatever its context size (threshold 0), so each day starts from a
+# fresh session; flush, hold, live-turn/TUI/background-job checks stay. An agent held by a running
+# turn, a background job or a failed flush is flushed again and retried every NIGHT_RETRY_SLEEP s,
+# up to NIGHT_RETRIES times; then it is left for the next night. Without a flag: threshold 250k.
 # Stop: touch ~/.claude-lab/shared/state/agents-reset/STOP
 # Hold one agent through a date (owner timezone): echo 2026-10-30 > .../agents-reset/hold/<agent>
 # Richard (claude-richard, SDK sessions) is NOT reset here.
@@ -24,14 +29,22 @@ set -euo pipefail
 DAYTIME=0
 DRY=0
 AUTO=0
+NIGHT_ALL=0
 for _arg in "$@"; do
     case "$_arg" in
         --auto) AUTO=1 ;;
         --daytime) DAYTIME=1 ;;
+        --night) NIGHT_ALL=1 ;;
         --dry-run) DRY=1 ;;
         *) echo "unknown argument: $_arg" >&2; exit 2 ;;
     esac
 done
+if [ "$DAYTIME" = 1 ] && [ "$NIGHT_ALL" = 1 ]; then
+    echo "--daytime and --night exclude each other" >&2; exit 2
+fi
+if [ "$AUTO" = 1 ] && { [ "$DAYTIME" = 1 ] || [ "$NIGHT_ALL" = 1 ]; }; then
+    echo "--auto picks the run itself; do not combine it with --daytime/--night" >&2; exit 2
+fi
 
 LIB="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CONF="${NEUROOTDEL_GUARD_CONF:-$LIB/guard.conf}"
@@ -49,6 +62,7 @@ if [ "$AUTO" = 1 ]; then
     _h="$(TZ="$OWNER_TZ" date +%-H)"; _m="$(TZ="$OWNER_TZ" date +%-M)"
     if [ "$_h" -eq 4 ] && [ "$_m" -lt 10 ]; then
         DAYTIME=0
+        NIGHT_ALL=1
     elif [ "$_h" -ge 6 ] && [ "$_h" -le 22 ]; then
         DAYTIME=1
     else
@@ -63,8 +77,14 @@ DAY_CTX_BUSY_THRESHOLD=350000
 LIVE_TURN_WINDOW=900
 JOB_ERR_MAX_STREAK=6
 STREAK_ALERT=3
+NIGHT_RETRIES=6
+NIGHT_RETRY_SLEEP=600
+if [ "$NIGHT_ALL" = 1 ]; then
+    CTX_THRESHOLD=0
+    DAY_CTX_BUSY_THRESHOLD=0
+fi
 
-tag=night; [ "$DAYTIME" = 1 ] && tag=day; [ "$DRY" = 1 ] && tag="$tag dry-run"
+tag=night; [ "$NIGHT_ALL" = 1 ] && tag=night-all; [ "$DAYTIME" = 1 ] && tag=day; [ "$DRY" = 1 ] && tag="$tag dry-run"
 log() {
     echo "$(date -Is) [$tag] $*" >> "$LOG"
     if [ "$DRY" = 1 ] || [ -t 2 ]; then echo "$(date -Is) [$tag] $*" >&2; fi
@@ -301,7 +321,19 @@ for agent in "${AGENTS[@]}"; do
     log "handoff-flush: $out"
 done
 
-for agent in "${AGENTS[@]}"; do
+# --night retry: a result of this kind means "not now", the agent is tried again later.
+night_retryable() {
+    case "$1" in
+        "skipped: live turn"*|"skipped: turn running"*|"skipped: turn started"*|\
+        "skipped: background job"*|"skipped: flush failed"*) return 0 ;;
+    esac
+    return 1
+}
+
+RUN_AGENTS=("${AGENTS[@]}")
+night_pass=0
+while :; do
+for agent in "${RUN_AGENTS[@]}"; do
     if on_hold "$agent"; then
         note_reset "$agent"
         RESULT[$agent]="skipped: hold"
@@ -436,6 +468,31 @@ for agent in "${AGENTS[@]}"; do
         RESULT[$agent]="error: restart failed or not ready in 90s (streak $(note_skip "$agent"))"
         log "[$agent] ERR: restart failed"
     fi
+done
+
+[ "$NIGHT_ALL" = 1 ] || break
+pending=()
+for agent in "${RUN_AGENTS[@]}"; do
+    if night_retryable "${RESULT[$agent]:-}"; then pending+=("$agent"); fi
+done
+[ "${#pending[@]}" -gt 0 ] || break
+night_pass=$(( night_pass + 1 ))
+if [ "$night_pass" -gt "$NIGHT_RETRIES" ]; then
+    log "night-all: gave up after $NIGHT_RETRIES retries, still busy: ${pending[*]}"
+    break
+fi
+if [ "$DRY" = 1 ]; then
+    log "night-all: DRY-RUN: would wait ${NIGHT_RETRY_SLEEP}s and retry (pass $night_pass/$NIGHT_RETRIES): ${pending[*]}"
+    break
+fi
+log "night-all: busy, retry $night_pass/$NIGHT_RETRIES in ${NIGHT_RETRY_SLEEP}s: ${pending[*]}"
+sleep "$NIGHT_RETRY_SLEEP"
+if [ -e "$STATE/STOP" ]; then log "STOP file appeared, no more retries"; break; fi
+for agent in "${pending[@]}"; do
+    out="$(python3 "$LIB/agent-handoff-flush.py" "$agent" 2>&1)" && FLUSH_OK[$agent]=1 || FLUSH_OK[$agent]=0
+    log "handoff-flush (retry $night_pass): $out"
+done
+RUN_AGENTS=("${pending[@]}")
 done
 
 for agent in "${AGENTS[@]}"; do

@@ -3718,7 +3718,8 @@ install_guard() {
     _install_cron_file "${AGENT_USER}-agents-reset" "$(cat <<CRON
 # ${INSTALL_TAG} v${INSTALLER_VERSION}: session reset of the channel agents (agents-reset.sh).
 # Every 10 min; --auto picks the run by the owner's clock (OWNER_TIMEZONE in guard.conf),
-# so the server timezone does not matter: nightly 04:00, by context size 06:00-22:59.
+# so the server timezone does not matter: nightly 04:00 every agent (night-all, busy ones retried
+# every 10 min up to 6 times), by context size 06:00-22:59.
 # Stop: touch ${reset_state}/STOP ; remove this file to uninstall. Log: ${reset_state}/agents-reset.log
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin

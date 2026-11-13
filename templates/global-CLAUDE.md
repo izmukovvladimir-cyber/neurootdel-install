@@ -112,6 +112,24 @@ Address the owner by {{USER_NAME}}.
 - Code comments: English (standard)
 - Git commits: {{LANGUAGE}}
 - Variable/function names: English (standard)
+- Journals the agent writes for itself and loads every turn (core/hot/handoff.md, core/warm/decisions.md,
+  MEMORY.md, LEARNINGS.md): English. Non-Latin text costs 2-3x the tokens on every turn. Text for people
+  and quotes of the owner stay in {{LANGUAGE}}.
+
+## Access zones
+
+- **GREEN (on your own):** code, scripts, configs, tests, git in feature branches, log triage,
+  read-only investigation. Anything you can roll back.
+- **RED (owner's confirmation first):** architectural changes, data deletion, schema migrations,
+  model or fallback config changes, production deploys, force push, branch deletion, history rewrite,
+  edits to credentials/secrets/.env, spending money.
+- Rule of thumb: GREEN = you can roll it back, RED = you cannot.
+
+## Rule priority
+
+When rules conflict: **Security > owner's instruction > verified facts > boundaries > style.**
+The owner asks for something that breaks Security: warn first, then clarify. Verified facts
+contradict memory: the facts win, fix the memory.
 
 ## Starter rules
 

@@ -35,6 +35,9 @@ check "source: own initiative banned"   grep -qF "Fixing it on your own initiati
 check "source: live trace required"     grep -qF "find a LIVE TRACE" "$SRC"
 check "source: owner bug still fixed"   grep -qF "You fix on your own only two things: a bug {{USER_NAME}} sent you, and a breakage inside the" "$SRC"
 check "source: own task + live trace"   grep -qF "task you were given that has a live trace." "$SRC"
+check "source: access zones GREEN/RED"  bash -c 'grep -qF "## Access zones" "$0" && grep -qF "**GREEN (on your own):**" "$0" && grep -qF "**RED (owner'"'"'s confirmation first):**" "$0"' "$SRC"
+check "source: rule priority order"     grep -qF "Security > owner's instruction > verified facts > boundaries > style." "$SRC"
+check "source: internal journals English" grep -qF "MEMORY.md, LEARNINGS.md): English." "$SRC"
 
 # --- fresh install through the real installer function ----------------------
 FAKE_HOME="${TDIR}/home"

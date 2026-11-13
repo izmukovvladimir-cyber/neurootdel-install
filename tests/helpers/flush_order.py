@@ -27,5 +27,5 @@ with (pd / "s.jsonl").open("w") as fh:
             {"type": "tool_use", "name": "Edit", "input": {"file_path": str(home / n)}}]}}) + "\n")
 subprocess.run([sys.executable, f"{repo}/lib/agent-handoff-flush.py", "jarvis"], check=True,
                env={**os.environ, "NEUROOTDEL_GUARD_CONF": str(conf)}, capture_output=True)
-rows = [ln for ln in (ws / "core/hot/handoff.md").read_text().splitlines() if ln.startswith("- **")]
+rows = [ln for ln in (ws / "core/archive/last-actions.md").read_text().splitlines() if ln.startswith("- **")]
 sys.exit(0 if len(rows) == 15 and rows[-1].endswith("Edit f0.txt") else 1)

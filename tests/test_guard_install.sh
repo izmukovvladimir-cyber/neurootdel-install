@@ -208,7 +208,8 @@ check "flush: dry run sees the agent"         grep -q '^DRY jarvis: would write 
 OUT=$(python3 "${REPO}/lib/agent-handoff-flush.py" jarvis)
 check "flush: writes handoff"                 grep -q '^OK jarvis' <<<"$OUT"
 check "flush: hand-written part kept"         grep -q -- '- open: something' "${WS}/core/hot/handoff.md"
-check "flush: action listed, home-relative"   grep -q 'Edit x.txt' "${WS}/core/hot/handoff.md"
+check "flush: action listed, home-relative"   grep -q 'Edit x.txt' "${WS}/core/archive/last-actions.md"
+check "flush: handoff points to the archive"  grep -qF 'core/archive/last-actions.md' "${WS}/core/hot/handoff.md"
 check "flush: owner timezone in stamp"        grep -q 'Auto-flushed by agent-handoff-flush.py at .* +04' "${WS}/core/hot/handoff.md"
 check "flush: newest repeat survives dedup" python3 "${REPO}/tests/helpers/flush_order.py" "$REPO"
 OUT=$(bash "${REPO}/lib/agents-reset.sh" --dry-run 2>&1)

@@ -2,7 +2,7 @@
 # precompact-flush.sh -- PreCompact hook of the agents (installed by neurootdel-install).
 # Snapshot of handoff/recent before compaction plus a fresh
 # agent-handoff-flush.py run, so the compacted session and the next one see the
-# latest "Last 15 actions" in core/hot/handoff.md.
+# latest "Last 15 actions" (core/archive/last-actions.md, pointer in core/hot/handoff.md).
 #
 # Usage: precompact-flush.sh <agent>   (runs as the agent user, from the agent's hook)
 #   channel agents (guard.conf CHANNEL_AGENTS): handoff-flush + snapshot; richard (SDK, no handoff-flush support): snapshot only.
