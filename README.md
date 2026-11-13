@@ -143,7 +143,7 @@ Telegram --> Bot API --> Telegram-плагин (MCP-канал) --> Claude Code 
     MEMORY.md                  # Архив (on-demand)
     LEARNINGS.md               # Уроки из ошибок (on-demand)
     warm/decisions.md           # Решения за 14 дней (@include)
-    hot/handoff.md             # Последние 10 записей (@include)
+    hot/handoff.md             # Только открытое (@include); последние 15 действий flush кладёт в core/archive/last-actions.md
     hot/recent.md              # Полный журнал (НЕ в контексте)
   tools/TOOLS.md               # Серверы, порты, API (on-demand)
   skills/                      # Скиллы агента
