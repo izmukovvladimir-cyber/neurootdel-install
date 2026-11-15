@@ -4930,9 +4930,43 @@ parse_args() {
         || die "--stage must be workshop or intensive (got: ${STAGE_ARG:-<empty>})."
 }
 
+# azv_refresh_correction_hooks -- installed «Агент за вечер»: the two correction hooks of this
+# installer (their solo branch sends the owner's correction to core/rules.md) into the root-owned
+# lib dir, the previous copy kept as .bak-<date>-owner-work. A file already current, a hook not on
+# this install, or one an old guard_conf.py could not run is left alone.
+azv_refresh_correction_hooks() {
+    local n src dst left=0
+    if [[ ! -d "${GUARD_LIB_DIR}/hooks" || -L "${GUARD_LIB_DIR}" || -L "${GUARD_LIB_DIR}/hooks" ]]; then
+        warn "${GUARD_LIB_DIR}/hooks missing -- correction hooks not updated."
+        return 1
+    fi
+    for n in correction-detector.py correction-closed.py; do
+        src="${INSTALLER_ROOT}/lib/hooks/${n}"
+        dst="${GUARD_LIB_DIR}/hooks/${n}"
+        [[ -f "$src" ]] || { warn "${src} missing -- ${n} not updated."; left=1; continue; }
+        # Not there = not registered on this install: nothing to update. A guard_conf.py older than
+        # the hooks (no correction_group_chat_ids, before 05.11) would break them: left as they are.
+        [[ -f "$dst" ]] || continue
+        if ! grep -qF correction_group_chat_ids "${GUARD_LIB_DIR}/guard_conf.py" 2>/dev/null; then
+            warn "${GUARD_LIB_DIR}/guard_conf.py is older than the correction hooks -- ${n} not updated (full re-run with --solo needed)."
+            left=1
+            continue
+        fi
+        cmp -s -- "$src" "$dst" && continue
+        if [[ -f "$dst" ]]; then
+            cp -p -- "$dst" "${dst}.bak-$(date +%Y%m%d-%H%M%S)-owner-work" \
+                || { warn "Cannot back up ${dst} -- not updated."; left=1; continue; }
+        fi
+        install -m 0755 -o root -g root "$src" "$dst" || { warn "Cannot write ${dst}."; left=1; continue; }
+        ok "Correction hook updated: ${dst}."
+    done
+    return "$left"
+}
+
 # azv_owner_rules_only -- --azv-owner-rules: on an installed «Агент за вечер» swaps the starter
 # rules 1-4 for the owner-work rules 9-13 in the global CLAUDE.md, puts the solo texts into
-# shared/team-rules.md and core/rules.md (_azv_fix), switches Superpowers off and
+# shared/team-rules.md and core/rules.md (_azv_fix), switches Superpowers off, updates the
+# correction hooks (azv_refresh_correction_hooks) and
 # does nothing else (no packages, questions, key, services). Stops on a server without --solo
 # materials.
 azv_owner_rules_only() {
@@ -4950,6 +4984,7 @@ azv_owner_rules_only() {
     else
         warn "Superpowers выключен не везде, причина выше. Напиши куратору."
     fi
+    azv_refresh_correction_hooks || warn "Хуки поправок обновлены не все, причина выше. Напиши куратору."
     ok "Агент подхватит изменения с новой сессии (ночной сброс или перезапуск)."
 }
 

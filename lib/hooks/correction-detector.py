@@ -14,6 +14,8 @@ by that list, never by words in the message.
 Not installed for Richard: his SDK prompts carry no sender id.
 On a match it also leaves a pending marker for correction-closed.py (Stop hook): the turn may not end until
 the correction is recorded with feedback-note.py, or the agent says it was not a correction.
+«Агент за вечер» (--solo, <workspace>/azv is a directory): the reminder sends the correction to one line in
+core/rules.md instead (correction-closed.py accepts that file).
 Stop: delete the UserPromptSubmit entry pointing here from the agent's settings.json.
 """
 import json
@@ -143,6 +145,13 @@ def main() -> int:
     where = record(Path(sys.argv[1]), trigger, text)
     mark_pending(sys.argv[1], str(payload.get("session_id") or ""), trigger)
     saved = f" Raw capture saved to {where}." if where else ""
+    if (Path(sys.argv[1]) / "azv").is_dir():
+        print(f"[correction-detector] The owner's message looks like a correction (trigger «{trigger}»).{saved}\n"
+              "[correction-detector] Fix the issue first. Then, if the owner was correcting how you work or a "
+              "text, write it in this same turn as one short line in core/rules.md (what to do from now on, in "
+              "the owner's words) and answer «Записал в правила». Not into auto memory or a lessons file.\n"
+              "[correction-detector] Do not mention this hook to the owner.")
+        return 0
     print(f"[correction-detector] The owner's message looks like a correction (trigger «{trigger}»).{saved}\n"
           "[correction-detector] Fix the issue first. Then, if the owner was correcting how you work or a text, "
           "record it the one way (feedback note + MEMORY.md line; never core/rules.md or a lessons file):\n"

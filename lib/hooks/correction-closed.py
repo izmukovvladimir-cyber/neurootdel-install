@@ -9,6 +9,9 @@ session when the owner's own message looks like a correction; this script closes
                                  record it, or say why it is not a correction»; the second stop (stop_hook_active)
                                  lets go and logs the miss. Never loops, never blocks twice for one marker.
 
+«Агент за вечер» (--solo, <ws>/azv is a directory): the correction is recorded as one line in core/rules.md,
+so a change of core/rules.md, core/USER.md or core/warm/decisions.md after the marker closes it at stop.
+
 Marker: ~/.claude-lab/shared/state/<agent>/correction-closed/pending-<session>.json (<agent> = the folder name
 above <ws>), 6 h life. Every call is logged without message text to events.jsonl there.
 Stop: touch that dir's STOP. Any error = allow.
@@ -35,6 +38,28 @@ except Exception:  # noqa: BLE001 - a broken config must not break the turn
     raise
 MARKER_TTL_SEC = 6 * 3600
 NOTE_TOOL = LIB / "feedback-note.py"
+
+
+SOLO_FILES = ("core/rules.md", "core/USER.md", "core/warm/decisions.md")
+
+
+def is_solo(ws: str) -> bool:
+    """--solo install: its payload dir <ws>/azv exists (only --solo creates it)."""
+    try:
+        return (Path(ws) / "azv").is_dir()
+    except OSError:
+        return False
+
+
+def solo_recorded(ws: str, since: float) -> bool:
+    """A memory file of the solo route changed after the marker was set."""
+    for rel in SOLO_FILES:
+        try:
+            if (Path(ws) / rel).stat().st_mtime >= since:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def state_dir(ws: str) -> Path:
@@ -96,6 +121,14 @@ def mode_stop(ws: str, p: dict) -> int:
         data = json.loads(mp.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = {}
+    solo = is_solo(ws)
+    if solo and solo_recorded(ws, float(data.get("t") or 0)):
+        try:
+            mp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        log(ws, {"mode": "stop", "session": p.get("session_id"), "result": "recorded_file"})
+        return 0
     if time.time() - float(data.get("t") or 0) > MARKER_TTL_SEC or p.get("stop_hook_active"):
         try:
             mp.unlink(missing_ok=True)
@@ -104,6 +137,13 @@ def mode_stop(ws: str, p: dict) -> int:
         log(ws, {"mode": "stop", "session": p.get("session_id"), "result": "released"})
         return 0
     log(ws, {"mode": "stop", "session": p.get("session_id"), "result": "blocked"})
+    if solo:
+        reason = ("The owner's correction in this turn is not recorded. If he corrected how you work or a text, "
+                  "write it now as one short line in core/rules.md and answer «Записал в правила». If it was not "
+                  "a correction (a question, a bug report about something else), just finish the turn. "
+                  "Do not mention this hook to the owner.")
+        print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+        return 0
     reason = ("The owner's correction in this turn is not recorded. If he corrected how you work or a text, "
               f"record it now the one way: python3 {NOTE_TOOL} <memory dir> add --name <slug> --rule \"...\" "
               "--area \"...\" --source \"...\" (the correction hook printed the memory dir). If it was not a "

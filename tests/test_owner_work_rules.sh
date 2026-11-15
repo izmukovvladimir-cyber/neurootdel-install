@@ -41,6 +41,17 @@ set +e    # the checks below report failures themselves
 AGENT_HOME="$FAKE_HOME"
 AGENT_USER="$ME"
 AZV_AGENT_DIR="${FAKE_HOME}/.claude-lab/jarvis/.claude/azv"
+GUARD_LIB_DIR="${TDIR}/lib"
+INSTALLER_ROOT="$REPO"
+# No root here: install(1) without -o/-g (the hook refresh writes into the root-owned lib dir).
+install() {
+    local a=() skip=0
+    for x in "$@"; do
+        if ((skip)); then skip=0; continue; fi
+        case "$x" in -o|-g) skip=1 ;; *) a+=("$x") ;; esac
+    done
+    command install "${a[@]}"
+}
 fix_owner() { :; }
 # No sudo in the sandbox (the test user is the agent user); calls are logged.
 AS_AGENT_LOG="${TDIR}/as_agent.log"
@@ -400,6 +411,33 @@ fin() { ( JARVIS_BOT_TOKEN=x RICHARD_BOT_TOKEN=x SOLO=$1 final_instructions ) 2>
 check "final: full has 2 superpowers lines" test "$(fin 0)" -eq 2
 check "final: solo has none"              test "$(fin 1)" -eq 0
 
+# --- correction hooks refreshed into the lib dir -------------------------------------
+H="${GUARD_LIB_DIR}/hooks"
+( azv_refresh_correction_hooks ) >/dev/null 2>&1; rc=$?
+check "hooks: no lib dir -> rc 1"         test "$rc" -eq 1
+mkdir -p "$H"
+printf 'old detector\n' >"${H}/correction-detector.py"
+printf 'old closer\n' >"${H}/correction-closed.py"
+printf 'old conf\n' >"${GUARD_LIB_DIR}/guard_conf.py"
+( azv_refresh_correction_hooks ) >/dev/null 2>&1; rc=$?
+check "hooks: old guard_conf -> rc 1"     test "$rc" -eq 1
+check "hooks: old guard_conf -> kept"     test "$(cat "${H}/correction-detector.py")" = "old detector"
+cp "${REPO}/lib/guard_conf.py" "${GUARD_LIB_DIR}/guard_conf.py"
+cp "${REPO}/lib/hooks/correction-closed.py" "${H}/correction-closed.py"
+azv_refresh_correction_hooks >/dev/null 2>&1; rc=$?
+check "hooks: rc 0"                       test "$rc" -eq 0
+check "hooks: detector current"           cmp -s "${H}/correction-detector.py" "${REPO}/lib/hooks/correction-detector.py"
+check "hooks: closer current"             cmp -s "${H}/correction-closed.py" "${REPO}/lib/hooks/correction-closed.py"
+rm -f "${H:?}/correction-closed.py"
+azv_refresh_correction_hooks >/dev/null 2>&1
+check "hooks: absent hook not added"      test ! -e "${H}/correction-closed.py"
+cp "${REPO}/lib/hooks/correction-closed.py" "${H}/correction-closed.py"
+check "hooks: old detector backed up"     test "$(cat "${H}"/correction-detector.py.bak-*-owner-work)" = "old detector"
+check "hooks: one backup"                 test "$(find "$H" -name '*.bak-*' | wc -l)" -eq 1
+azv_refresh_correction_hooks >/dev/null 2>&1
+check "hooks: repeat no new backup"       test "$(find "$H" -name '*.bak-*' | wc -l)" -eq 1
+printf 'old closer\n' >"${H}/correction-closed.py"
+
 # --- --azv-owner-rules: only these steps ----------------------------------------------
 reset_home
 parse_args --azv-owner-rules >/dev/null 2>&1
@@ -447,6 +485,7 @@ check "only: repeat settings unchanged"   cmp -s "$SETTINGS" "${TDIR}/only.setti
 check "only: repeat no new backup"        test "$(baks)" -eq 1
 check "only: repeat team-rules unchanged" cmp -s "$SH_TEAM" "${TDIR}/only.team"
 check "only: repeat rules.md unchanged"   cmp -s "$J_RULES" "${TDIR}/only.rules"
+check "only: closer hook refreshed"      cmp -s "${H}/correction-closed.py" "${REPO}/lib/hooks/correction-closed.py"
 check "only: repeat no team/rules backup" test "$(find "${FAKE_HOME}/.claude-lab" -name '*.bak-*-owner-work' | wc -l)" -eq 2
 
 # main with the flag: preflight, then only this step (the rest of main never runs).
