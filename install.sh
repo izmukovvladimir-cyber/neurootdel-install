@@ -24,6 +24,7 @@
 #                                  # (or NEUROOTDEL_AZV_KEY=...), stops without a valid one
 #   sudo bash /root/neurootdel-install.sh --stage workshop    # stage 1: Jarvis + Richard
 #   sudo bash /root/neurootdel-install.sh --stage intensive   # stage 2: adds Coder + Auditor
+#   sudo bash /root/neurootdel-install.sh --azv-owner-rules   # installed «Агент за вечер»: rules 1-4 -> 9-13, Superpowers off
 #   sudo neurootdel-verify                                    # end-of-stage check, any time
 #
 # Every agent has its OWN Telegram bot, and within a stage every bot is required: the installer asks
@@ -1070,6 +1071,8 @@ OPERATOR_TIMEZONE=""
 # Install stage: workshop = Jarvis + Richard, intensive = + Coder + Auditor. Set by resolve_stage.
 STAGE=""
 STAGE_ARG=""
+# --azv-owner-rules: only the --solo rules swap + Superpowers off in an installed «Агент за вечер».
+AZV_OWNER_RULES_ONLY=0
 # Where the bot and stage questions read answers from (tests point it at a file). Opened once
 # (TTY_FD), so a question asked again reads the NEXT answer.
 TTY_IN="/dev/tty"
@@ -2539,6 +2542,106 @@ ensure_starter_rules() {
     ok "Starter rules appended to ${dst} (backup: ${bak})."
 }
 
+# «Агент за вечер» (--solo): one agent-bot and no programmers, so the code rules 1-4 of the
+# starter block are cut out and the owner-work rules 9-13 (templates/AGENT-RULES-OWNER-WORK.md,
+# their own markers) stand right after that block. Rules 0 and 5-8 stay. The full install keeps
+# the starter block whole and gets no owner-work block.
+readonly OWNER_WORK_BEGIN='<!-- agent-rules-owner-work:begin -->'
+readonly OWNER_WORK_END='<!-- agent-rules-owner-work:end -->'
+# Heading of rule 11; a file that already has it carries the block, pasted by hand.
+readonly OWNER_WORK_PROBE='Тест глазами живого человека'
+
+# _azv_owner_rules <in> <out> -- writes <in> into <out> with rules 1-4 cut from the starter block
+# (heading «## 1. » up to heading «## 5. », only between the starter markers) and the owner-work
+# block added once (after the starter end marker, else at the end of the file).
+# rc 0 = written, 1 = nothing to change, other = error.
+_azv_owner_rules() {
+    local tpl="${TEMPLATES_DIR}/AGENT-RULES-OWNER-WORK.md"
+    [[ -f "$tpl" ]] || die "Template not found: $tpl"
+    python3 - "$1" "$2" "$tpl" "$STARTER_RULES_BEGIN" "$STARTER_RULES_END" \
+        "$OWNER_WORK_BEGIN" "$OWNER_WORK_END" "$OWNER_WORK_PROBE" <<'PY3'
+import sys
+
+inp, out, tpl, s_begin, s_end, o_begin, o_end, probe = sys.argv[1:9]
+with open(inp, encoding="utf-8", newline="") as fh:
+    lines = fh.read().splitlines(keepends=True)
+with open(tpl, encoding="utf-8", newline="") as fh:
+    block = fh.read()
+if not block.endswith("\n"):
+    block += "\n"
+
+
+def starter_span() -> tuple[int, int] | None:
+    bs = [i for i, ln in enumerate(lines) if ln.rstrip("\r\n") == s_begin]
+    es = [i for i, ln in enumerate(lines) if ln.rstrip("\r\n") == s_end]
+    if len(bs) == 1 and len(es) == 1 and bs[0] < es[0]:
+        return bs[0], es[0]
+    return None
+
+
+changed = False
+span = starter_span()
+if span is not None:
+    b, e = span
+    one = next((i for i in range(b + 1, e) if lines[i].startswith("## 1. ")), None)
+    five = None if one is None else next(
+        (i for i in range(one + 1, e) if lines[i].startswith("## 5. ")), None)
+    if one is not None and five is not None:
+        del lines[one:five]
+        changed = True
+        span = starter_span()
+
+text = "".join(lines)
+# Present = both markers, or pasted by hand: the rule-11 heading and every heading 9-13.
+marked = o_begin in text and o_end in text
+pasted = probe in text and all(
+    any(ln.startswith(f"## {n}. ") for ln in lines) for n in range(9, 14))
+if not marked and not pasted:
+    owner = ["\n", o_begin + "\n", block, o_end + "\n"]
+    if span is not None:
+        lines[span[1] + 1:span[1] + 1] = owner
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines += owner
+    changed = True
+
+if not changed:
+    sys.exit(1)
+with open(out, "w", encoding="utf-8", newline="") as fh:
+    fh.write("".join(lines))
+PY3
+}
+
+# ensure_azv_owner_rules FILE -- the --solo rules (above) in an installed global CLAUDE.md:
+# backup next to it first (written through install, so a symlink planted at the backup name is
+# replaced, never written through as root), the rest of the owner's text kept. Idempotent.
+ensure_azv_owner_rules() {
+    local dst
+    dst=$(readlink -f -- "$1") || return 0
+    [[ -f "$dst" ]] || return 0
+    # A link the agent user planted to someone else's file (/etc/...) is never rewritten as root.
+    [[ "$(stat -c %U -- "$dst")" == "$AGENT_USER" ]] \
+        || die "${dst} is not owned by ${AGENT_USER}; rules not changed."
+
+    local tmp bak_tmp bak mode rc=0
+    tmp=$(mktemp)
+    bak_tmp=$(mktemp)
+    TMPFILES+=("$tmp" "$bak_tmp")
+    # Read once, as the agent user: a file swapped for a link to a root-only file after the
+    # check above is unreadable here, so no secret lands in the result or the backup.
+    as_agent cat -- "$dst" > "$bak_tmp" || die "Cannot read ${dst} as ${AGENT_USER}; rules not changed."
+    _azv_owner_rules "$bak_tmp" "$tmp" || rc=$?
+    [[ "$rc" -eq 1 ]] && return 0
+    [[ "$rc" -eq 0 ]] || die "Cannot update the rules in ${dst} (rc=${rc}); file left as it was."
+
+    bak="${dst}.bak-$(date +%Y%m%d-%H%M%S)-owner-work"
+    mode=$(stat -c '%a' -- "$dst")
+    write_as_user "$bak_tmp" "$bak" "$mode" || die "Cannot back up ${dst}; rules not changed."
+    write_as_user "$tmp" "$dst" "$mode"
+    ok "Rules 1-4 replaced by the owner-work rules 9-13 in ${dst} (backup: ${bak})."
+}
+
 # RED secrets rule: passwords, keys, access and internal details go out only by
 # the owner's decision. Its own block, so installs made before it get it too.
 readonly RED_SECRETS_BEGIN='<!-- red-secrets-rule:begin -->'
@@ -2807,9 +2910,19 @@ SJEOF
             LANGUAGE   "$OPERATOR_LANGUAGE" \
             TIMEZONE   "$OPERATOR_TIMEZONE"
         _starter_rules_block >> "$tmp"
+        if [[ "$SOLO" == "1" ]]; then
+            local solo_tmp
+            solo_tmp=$(mktemp)
+            TMPFILES+=("$solo_tmp")
+            _azv_owner_rules "$tmp" "$solo_tmp" || die "Cannot lay down the --solo rules in ${global_claude_md}."
+            tmp=$solo_tmp
+        fi
         write_as_user "$tmp" "$global_claude_md" 0644
     else
         ensure_starter_rules "$global_claude_md"
+        if [[ "$SOLO" == "1" ]]; then
+            ensure_azv_owner_rules "$global_claude_md"
+        fi
     fi
     ensure_red_secrets_rule "$global_claude_md"
 
@@ -3066,6 +3179,66 @@ install_superpowers() {
 
     fix_owner "$plugins_dir"
     ok "Superpowers installed at ${sp_dir}"
+}
+
+# disable_superpowers -- --solo: «Агент за вечер» runs without Superpowers (its brainstorm/plan
+# skills make a single owner-facing agent propose its own ideas and redo work). Switches it off
+# where install_superpowers switched it on: enabledPlugins "<name>@..." true -> false in
+# ~/.claude/settings.json and plugins.superpowers.enabled true -> false in plugins/config.json.
+# Reversible (set back to true), nothing deleted, each changed file backed up next to it first
+# (.bak-<date>-superpowers-off). Idempotent; a missing file is skipped; rc 1 when a file that is
+# a symlink, someone else's or broken JSON was left as it is (warned).
+disable_superpowers() {
+    local settings="${AGENT_HOME}/.claude/settings.json"
+    local cfg="${AGENT_HOME}/.claude/plugins/config.json"
+    local manifest="${AGENT_HOME}/.claude/plugins/superpowers/.claude-plugin/marketplace.json"
+    local pname="" f filter tmp mode bak_tmp bak left=0
+
+    pname=$(jq -er '.plugins[0].name' "$manifest" 2>/dev/null) || pname=""
+    [[ "$pname" =~ ^[A-Za-z0-9._-]+$ ]] || pname="superpowers"
+
+    for f in "$settings" "$cfg"; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        if [[ -L "$f" || ! -f "$f" || "$(stat -c %U -- "$f")" != "$AGENT_USER" ]]; then
+            warn "${f} is a symlink, not a file or not owned by ${AGENT_USER} -- left as it is, Superpowers not switched off there."
+            left=1
+            continue
+        fi
+        tmp=$(mktemp)
+        bak_tmp=$(mktemp)
+        TMPFILES+=("$tmp" "$bak_tmp")
+        # Read once, as the agent user (a swap to a root-only file after the check stays unread).
+        as_agent cat -- "$f" > "$bak_tmp" || {
+            warn "Cannot read ${f} as ${AGENT_USER} -- left as it is, Superpowers not switched off there."
+            left=1
+            continue
+        }
+        jq -s -e 'length == 1 and (.[0] | type) == "object"' "$bak_tmp" >/dev/null 2>&1 || {
+            warn "${f} is not one JSON object -- left as it is, Superpowers not switched off there."
+            left=1
+            continue
+        }
+        if [[ "$f" == "$settings" ]]; then
+            filter='if (.enabledPlugins | type) == "object" then .enabledPlugins |= with_entries(
+                        if (.key | startswith($n + "@")) and .value == true then .value = false else . end)
+                    else . end'
+        else
+            filter='if (.plugins.superpowers? | type) == "object" and .plugins.superpowers.enabled == true
+                    then .plugins.superpowers.enabled = false else . end'
+        fi
+        jq --arg n "$pname" "$filter" "$bak_tmp" > "$tmp" 2>/dev/null || { warn "jq failed on ${f} -- left as it is."; left=1; continue; }
+        jq -e -n --slurpfile a "$bak_tmp" --slurpfile b "$tmp" '$a == $b' >/dev/null 2>&1 && continue
+        bak="${f}.bak-$(date +%Y%m%d-%H%M%S)-superpowers-off"
+        mode=$(stat -c '%a' -- "$f")
+        write_as_user "$bak_tmp" "$bak" "$mode" || die "Cannot back up ${f}; Superpowers not switched off."
+        if ! write_as_user "$tmp" "$f" "$mode"; then
+            warn "Cannot write ${f} -- Superpowers not switched off there (backup: ${bak})."
+            left=1
+            continue
+        fi
+        ok "Superpowers switched off in ${f} (backup: ${bak})."
+    done
+    return "$left"
 }
 
 # =============================================================================
@@ -4621,11 +4794,12 @@ EOF
 # MAIN
 # =============================================================================
 
-# parse_args <args...> -- --solo, --stage workshop|intensive (or --stage=...). A wrong stage stops here.
+# parse_args <args...> -- --solo, --azv-owner-rules, --stage workshop|intensive (or --stage=...). A wrong stage stops here.
 parse_args() {
     while (($#)); do
         case "$1" in
             --solo) SOLO=1 ;;
+            --azv-owner-rules) AZV_OWNER_RULES_ONLY=1 ;;
             --stage)
                 [[ $# -ge 2 ]] || die "--stage needs a value: workshop or intensive."
                 STAGE_ARG="$2"; shift ;;
@@ -4636,6 +4810,26 @@ parse_args() {
     done
     [[ -z "$STAGE_ARG" || "$STAGE_ARG" == workshop || "$STAGE_ARG" == intensive ]] \
         || die "--stage must be workshop or intensive (got: ${STAGE_ARG:-<empty>})."
+}
+
+# azv_owner_rules_only -- --azv-owner-rules: on an installed «Агент за вечер» swaps the starter
+# rules 1-4 for the owner-work rules 9-13 in the global CLAUDE.md, switches Superpowers off and
+# does nothing else (no packages, questions, key, services). Stops on a server without --solo
+# materials.
+azv_owner_rules_only() {
+    local f="${AGENT_HOME}/.claude/CLAUDE.md" real
+    [[ -d "$AZV_AGENT_DIR" ]] \
+        || die "Не найдено ${AZV_AGENT_DIR}: эта команда только для установленного «Агента за вечер»."
+    real=$(readlink -f -- "$f") && [[ -f "$real" ]] \
+        || die "Не найден файл ${f}: агент на этом сервере ещё не установлен."
+    ensure_azv_owner_rules "$f"
+    ok "Правила работы с владельцем (9-13) стоят в ${f}."
+    if disable_superpowers; then
+        ok "Superpowers выключен."
+    else
+        warn "Superpowers выключен не везде, причина выше. Напиши куратору."
+    fi
+    ok "Агент подхватит изменения с новой сессии (ночной сброс или перезапуск)."
 }
 
 # run_stage_verify -- the end-of-stage check (verify-stage.sh): what was taught and installed, ✅/❌.
@@ -4661,6 +4855,11 @@ main() {
         return 0
     fi
     parse_args "$@"
+    if [[ "$AZV_OWNER_RULES_ONLY" == "1" ]]; then
+        preflight
+        azv_owner_rules_only
+        return 0
+    fi
 
     banner
     preflight
@@ -4684,7 +4883,11 @@ main() {
     if [[ "$SOLO" == "1" ]]; then
         azv_install_payload
     fi
-    install_superpowers
+    if [[ "$SOLO" == "1" ]]; then
+        disable_superpowers || warn "Superpowers is not switched off everywhere -- see the warnings above."
+    else
+        install_superpowers
+    fi
     install_sudoers
     install_memory_cron
     install_guard
