@@ -6,7 +6,8 @@
 #   gets no owner-work block; an old --solo CLAUDE.md with rules 0-8 is converted once (backup
 #   next to it, owner text kept), a repeat changes nothing; a block pasted by hand is not
 #   duplicated; Superpowers is switched off reversibly (backup, idempotent);
-#   --azv-owner-rules runs only these two steps.
+#   team-rules.md and the core/rules.md stub get the solo texts (correction -> core/rules.md, no
+#   «Skills first»), the final notes lose the Superpowers lines; --azv-owner-rules runs only these steps.
 # Run: bash tests/test_owner_work_rules.sh
 set -euo pipefail
 
@@ -59,6 +60,8 @@ block_of() { awk -v b="$BEGIN" -v e="$END" '$0==e{f=0} f{print} $0==b{f=1}' "$1"
 baks() { find "${FAKE_HOME}/.claude" -maxdepth 1 -name 'CLAUDE.md.bak-*-owner-work' | wc -l; }
 # rule headings present in the file, in order: "0 5 6 7 8 9 10 11 12 13"
 rules_of() { grep -oE '^## [0-9]+\. ' "$1" | grep -oE '[0-9]+' | tr '\n' ' ' | sed 's/ $//'; }
+SOLO_HEAD='Правила закрывают места, где агент обычно тупит.'
+SOLO_TAIL='Правила работают, если: меньше переделок, агент не трогает лишнего и помнит сказанное с первого раза.'
 reset_home() { rm -rf "${FAKE_HOME:?}/.claude"; mkdir -p "${FAKE_HOME}/.claude"; }
 
 # --- source file: nothing private leaks into the public installer ---------------
@@ -79,6 +82,9 @@ check "full: no probe"                    no_line "$GMD" "$PROBE"
 cp "$GMD" "${TDIR}/full.copy"
 setup_global_claude >/dev/null 2>&1
 check "full re-run: unchanged"            cmp -s "$GMD" "${TDIR}/full.copy"
+check "full: old header kept"             grep -qxF "Правила закрывают девять мест, где ИИ-агент обычно тупит." "$GMD"
+check "full: old closing kept"            grep -qF "в диффах меньше лишних изменений" "$GMD"
+check "full: no solo closing"             no_line "$GMD" "$SOLO_TAIL"
 
 # --- fresh --solo install: 0,5-8 + 9-13 ----------------------------------------
 reset_home
@@ -94,6 +100,10 @@ check "solo fresh: block after starter"   test "$(grep -nF "$BEGIN" "$GMD" | cut
 check "solo fresh: RED block kept"        count_is "$GMD" "$RED_SECRETS_BEGIN" 1
 check "solo fresh: template rendered"     grep -qF "**Name:** Tester" "$GMD"
 check "solo fresh: no backup"             test "$(baks)" -eq 0
+check "solo fresh: solo header"           grep -qxF "$SOLO_HEAD" "$GMD"
+check "solo fresh: solo closing"          grep -qxF "$SOLO_TAIL" "$GMD"
+check "solo fresh: no 'девять мест'"      no_line "$GMD" "девять мест"
+check "solo fresh: no 'в диффах'"         no_line "$GMD" "в диффах"
 cp "$GMD" "${TDIR}/solo.copy"
 setup_global_claude >/dev/null 2>&1
 check "solo re-run: unchanged"            cmp -s "$GMD" "${TDIR}/solo.copy"
@@ -112,6 +122,7 @@ cp "$GMD" "${TDIR}/old.copy"
 check "old: starts with 0-8"              test "$(rules_of "$GMD")" = "0 1 2 3 4 5 6 7 8"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "old: 0,5-8 + 9-13"                 test "$(rules_of "$GMD")" = "0 5 6 7 8 9 10 11 12 13"
+check "old: solo header and closing"      bash -c 'grep -qxF "$1" "$0" && grep -qxF "$2" "$0"' "$GMD" "$SOLO_HEAD" "$SOLO_TAIL"
 check "old: block once"                   count_is "$GMD" "$BEGIN" 1
 check "old: block == source"              diff -q <(block_of "$GMD") "$SRC"
 check "old: owner head kept"              grep -qxF "Owner line that must survive." "$GMD"
@@ -126,6 +137,12 @@ check "old: only 1-4 and block differ"    python3 - "${TDIR}/old.copy" "$GMD" "$
 import sys
 old = open(sys.argv[1], encoding="utf-8").read()
 new = open(sys.argv[2], encoding="utf-8").read()
+i, j = old.index("\n## 1. ") + 1, old.index("\n## 5. ") + 1
+old = old.replace("Правила закрывают девять мест, где ИИ-агент обычно тупит.",
+                  "Правила закрывают места, где агент обычно тупит.")
+old = old.replace("**Правила работают, если:** в диффах меньше лишних изменений, реже приходится переписывать\n"
+                  "переусложнённое, и вопросы задаются до работы, а не после переделки.",
+                  "Правила работают, если: меньше переделок, агент не трогает лишнего и помнит сказанное с первого раза.")
 i, j = old.index("\n## 1. ") + 1, old.index("\n## 5. ") + 1
 b = new.index("\n" + sys.argv[3] + "\n")
 e = new.index(sys.argv[4] + "\n") + len(sys.argv[4]) + 1
@@ -168,6 +185,8 @@ _starter_rules_block >"$GMD"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "read: CLAUDE.md via as_agent cat"  grep -qxF "cat -- ${GMD}" "$AS_AGENT_LOG"
 check "read: converted"                   test "$(rules_of "$GMD")" = "0 5 6 7 8 9 10 11 12 13"
+check "write: CLAUDE.md as the agent"     grep -qF " write ${GMD} " "$AS_AGENT_LOG"
+check "write: backup as the agent"        grep -qE " write ${GMD}\.bak-[0-9-]+-owner-work " "$AS_AGENT_LOG"
 # A read the agent user cannot do stops the change (the case of a swap to a root-only file).
 reset_home
 _starter_rules_block >"$GMD"
@@ -195,7 +214,7 @@ check "no starter: owner text kept"       grep -qxF "just owner text" "$GMD"
 check "no starter: block once"            count_is "$GMD" "$BEGIN" 1
 check "no starter: rules 9-13"            test "$(rules_of "$GMD")" = "9 10 11 12 13"
 
-# --- backup name planted as a symlink: replaced, its target never written ----------
+# --- backup name planted as a symlink: stops, its target never written ------------
 reset_home
 _starter_rules_block >"$GMD"
 VICTIM="${TDIR}/victim"
@@ -205,7 +224,8 @@ ln -s "$VICTIM" "$PLANT"
 ( date() { printf '20260101-000000\n'; }
   ensure_azv_owner_rules "$GMD" ) >/dev/null 2>&1
 check "plant: victim untouched"           grep -qxF victim "$VICTIM"
-check "plant: backup is a regular file"   test -f "$PLANT" -a ! -L "$PLANT"
+check "plant: link left, not followed"    test -L "$PLANT"
+check "plant: CLAUDE.md not changed"      test "$(rules_of "$GMD")" = "0 1 2 3 4 5 6 7 8"
 
 # --- symlinked CLAUDE.md: target updated, link kept ------------------------------
 reset_home
@@ -249,7 +269,7 @@ check "sp repeat: no new backup"          test "$(sp_baks)" -eq 2
 # write of the result fails after the backup: rc 1, not reported off
 printf '{"enabledPlugins":{"superpowers@spm":true}}\n' >"$SETTINGS"
 rm -f "${CFG:?}"
-out=$( write_as_user() { [[ "$2" == *.bak-* ]] || return 1; install -m "$3" "$1" "$2"; }
+out=$( _agent_write() { [[ "$2" == *.bak-* ]] || return 1; install -m "$3" "$1" "$2"; }
        disable_superpowers 2>&1 ); rc=$?
 check "sp: write fails -> rc 1"           test "$rc" -eq 1
 check "sp: write fails -> no 'off' line"  bash -c '! grep -qF "Superpowers switched off in" <<<"$0"' "$out"
@@ -272,7 +292,115 @@ out=$( { mkdir -p "$AZV_AGENT_DIR"; _starter_rules_block >"$GMD"; azv_owner_rule
 check "sp: not off -> not reported off"   bash -c '! grep -qF "Superpowers выключен." <<<"$0"' "$out"
 rm -f "${SETTINGS:?}"
 
-# --- --azv-owner-rules: only these two steps ---------------------------------------
+# --- team-rules.md and core/rules.md: solo texts ---------------------------------
+TEAM_SRC="${TDIR}/team-rules.rendered"
+render_template "${REPO}/templates/shared/team-rules.md" "$TEAM_SRC" \
+    USER_NAME Tester LIB /opt/lib CONFIG_ROOT /etc/x USER "$ME" AGENT_NAME A DOCTOR_NAME D >/dev/null 2>&1
+check "team: rendered"                    test -s "$TEAM_SRC"
+_azv_fix team "$TEAM_SRC" "${TDIR}/team.solo" >/dev/null 2>&1; rc=$?
+TS="${TDIR}/team.solo"
+check "team: changed (rc 0)"              test "$rc" -eq 0
+check "team: no Skills first"             no_line "$TS" "## Skills first"
+check "team: no brainstorming"            no_line "$TS" "brainstorming"
+check "team: no feedback-note route"      no_line "$TS" "feedback-note.py"
+check "team: no 'Not into core/rules.md'" no_line "$TS" "Not into core/rules.md"
+check "team: route = core/rules.md"       grep -qF "one short line in core/rules.md" "$TS"
+check "team: «Записал в правила»"         grep -qF "«Записал в правила»" "$TS"
+check "team: cancel in core/rules.md"     grep -qF "rewrite or delete that line in core/rules.md" "$TS"
+check "team: Memory heading kept"         count_is "$TS" "## Memory" 1
+check "team: other lines kept"            python3 - "$TEAM_SRC" "$TS" <<'PY'
+import sys
+old = open(sys.argv[1], encoding="utf-8").read().split("\n")
+new = open(sys.argv[2], encoding="utf-8").read().split("\n")
+h = old.index("## Skills first")
+m = old.index("## Memory")
+f = next(i for i, ln in enumerate(old) if ln.startswith("- The owner's correction has ONE route."))
+c = next(i for i, ln in enumerate(old) if ln.startswith("- Cancel: a new note"))
+keep = old[:h] + old[m:f] + old[c + 1:]
+nf = next(i for i, ln in enumerate(new) if ln.startswith("- The owner's correction has ONE route."))
+nc = next(i for i, ln in enumerate(new) if ln.startswith("- Cancel: rewrite"))
+sys.exit(0 if new[:nf] + new[nc + 1:] == keep else 1)
+PY
+_azv_fix team "$TS" "${TDIR}/team.twice" >/dev/null 2>&1; rc=$?
+check "team: second pass rc 1"            test "$rc" -eq 1
+# owner edits inside the replaced parts: those parts stay as they are
+python3 - "$TEAM_SRC" "${TDIR}/team.edited" <<'PY'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+t = t.replace("  Fields: area (where it applies)", "  Fields (owner edit): area (where it applies)")
+t = t.replace("the old note and its line are deleted.", "the old note and its line are deleted. OWNER ADDITION.")
+t = t.replace("No fitting skill: skill-finder.", "No fitting skill: ask me.")
+open(sys.argv[2], "w", encoding="utf-8").write(t)
+PY
+_azv_fix team "${TDIR}/team.edited" "${TDIR}/team.edited.out" >/dev/null 2>&1; rc=$?
+check "team edited: nothing replaced"     test "$rc" -eq 1
+why=$(_azv_fix team "${TDIR}/team.edited" "${TDIR}/team.edited.out" 2>&1 >/dev/null)
+check "team edited: says why (2 parts)"   test "$(grep -c "edited by the owner" <<<"$why")" -eq 2
+# only the route edited: the untouched «Cancel» stays too (they move together); Skills still cut
+python3 - "$TEAM_SRC" "${TDIR}/team.route" <<'PY'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+open(sys.argv[2], "w", encoding="utf-8").write(
+    t.replace("  Fields: area (where it applies)", "  Fields (owner edit): area (where it applies)"))
+PY
+_azv_fix team "${TDIR}/team.route" "${TDIR}/team.route.out" >/dev/null 2>&1; rc=$?
+check "route edited: Skills still cut"    test "$rc" -eq 0 -a "$(grep -c "## Skills first" "${TDIR}/team.route.out")" -eq 0
+check "route edited: route kept"          grep -qF "Fields (owner edit)" "${TDIR}/team.route.out"
+check "route edited: old Cancel kept"     grep -qF -- "- Cancel: a new note with" "${TDIR}/team.route.out"
+check "route edited: no new Cancel"       no_line "${TDIR}/team.route.out" "rewrite or delete that line"
+# only «Cancel» edited: the untouched route stays too
+python3 - "$TEAM_SRC" "${TDIR}/team.cancel" <<'PY'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+open(sys.argv[2], "w", encoding="utf-8").write(
+    t.replace("the old note and its line are deleted.", "the old note and its line are deleted. OWNER ADDITION."))
+PY
+_azv_fix team "${TDIR}/team.cancel" "${TDIR}/team.cancel.out" >/dev/null 2>&1
+check "cancel edited: route kept"         grep -qF "feedback-note.py" "${TDIR}/team.cancel.out"
+check "cancel edited: cancel kept"        grep -qF "OWNER ADDITION." "${TDIR}/team.cancel.out"
+
+RS="${TDIR}/rules.md"
+printf '# Rules\n\n- Ask before destructive operations.\n- On each correction of the owner: one feedback note in auto memory + one line in MEMORY.md (route and command: ~/.claude-lab/shared/team-rules.md, «Memory»). Not here, not in LEARNINGS.md.\n- Owner rule: no emoji.\n' >"$RS"
+_azv_fix rules "$RS" "${TDIR}/rules.solo" >/dev/null 2>&1; rc=$?
+check "rules: changed (rc 0)"             test "$rc" -eq 0
+check "rules: line points here"           grep -qF "one line here, in this file, in the same turn" "${TDIR}/rules.solo"
+check "rules: no feedback note"           no_line "${TDIR}/rules.solo" "feedback note"
+check "rules: owner line kept"            grep -qxF -- "- Owner rule: no emoji." "${TDIR}/rules.solo"
+check "rules: 5 lines as before"          test "$(wc -l <"${TDIR}/rules.solo")" -eq "$(wc -l <"$RS")"
+_azv_fix rules "${TDIR}/rules.solo" "${TDIR}/rules.twice" >/dev/null 2>&1; rc=$?
+check "rules: second pass rc 1"           test "$rc" -eq 1
+printf -- '- On each correction of the owner: my own wording.\n' >"${TDIR}/rules.edited"
+_azv_fix rules "${TDIR}/rules.edited" "${TDIR}/rules.e2" >/dev/null 2>&1; rc=$?
+check "rules: owner-edited line kept"     test "$rc" -eq 1
+
+# workspace: full install keeps the stub line, --solo writes the solo one
+WS="${TDIR}/ws-full/.claude"
+SOLO=0
+_write_agent_workspace "$WS" >/dev/null 2>&1
+check "ws full: stub feedback line kept"  grep -qF "one feedback note in auto memory" "${WS}/core/rules.md"
+WS="${TDIR}/ws-solo/.claude"
+SOLO=1
+_write_agent_workspace "$WS" >/dev/null 2>&1
+check "ws solo: stub points at rules.md"  grep -qF "one line here, in this file, in the same turn" "${WS}/core/rules.md"
+check "ws solo: no backup on fresh"       test "$(find "${WS}/core" -name '*.bak-*' | wc -l)" -eq 0
+cp "${WS}/core/rules.md" "${TDIR}/ws.copy"
+_write_agent_workspace "$WS" >/dev/null 2>&1
+check "ws solo re-run: unchanged"         cmp -s "${WS}/core/rules.md" "${TDIR}/ws.copy"
+# an old solo workspace with the full stub: converted on re-run, backup made
+WS="${TDIR}/ws-old/.claude"
+SOLO=0
+_write_agent_workspace "$WS" >/dev/null 2>&1
+SOLO=1
+_write_agent_workspace "$WS" >/dev/null 2>&1
+check "ws old: converted on solo re-run"  grep -qF "one line here, in this file, in the same turn" "${WS}/core/rules.md"
+check "ws old: one backup"                test "$(find "${WS}/core" -name 'rules.md.bak-*-owner-work' | wc -l)" -eq 1
+
+# final notes: no Superpowers lines in --solo, both in the full install
+fin() { ( JARVIS_BOT_TOKEN=x RICHARD_BOT_TOKEN=x SOLO=$1 final_instructions ) 2>/dev/null | grep -c superpowers; }
+check "final: full has 2 superpowers lines" test "$(fin 0)" -eq 2
+check "final: solo has none"              test "$(fin 1)" -eq 0
+
+# --- --azv-owner-rules: only these steps ----------------------------------------------
 reset_home
 parse_args --azv-owner-rules >/dev/null 2>&1
 check "flag: parsed"                      test "$AZV_OWNER_RULES_ONLY" = "1"
@@ -292,6 +420,11 @@ check "only: no CLAUDE.md -> stops"       test "$rc" -ne 0
 check "only: no CLAUDE.md -> none made"   test ! -e "$GMD"
 
 { printf '# owner\n'; _starter_rules_block; } >"$GMD"
+SH_TEAM="${FAKE_HOME}/.claude-lab/shared/team-rules.md"
+J_RULES="${FAKE_HOME}/.claude-lab/jarvis/.claude/core/rules.md"
+mkdir -p "$(dirname "$SH_TEAM")" "$(dirname "$J_RULES")"
+cp "$TEAM_SRC" "$SH_TEAM"
+cp "$RS" "$J_RULES"
 sp_setup
 printf '{"enabledPlugins":{"superpowers@spm":true}}\n' >"$SETTINGS"
 ( azv_owner_rules_only ) >/dev/null 2>&1; rc=$?
@@ -300,12 +433,21 @@ check "only: rules 0,5-8 + 9-13"          test "$(rules_of "$GMD")" = "0 5 6 7 8
 check "only: superpowers off"             test "$(jq -r '.enabledPlugins["superpowers@spm"]' "$SETTINGS")" = "false"
 check "only: RED not added"               no_line "$GMD" "$RED_SECRETS_BEGIN"
 check "only: CLAUDE.md backup"            test "$(baks)" -eq 1
+check "only: solo header"                 grep -qxF "$SOLO_HEAD" "$GMD"
+check "only: team-rules converted"        cmp -s "$SH_TEAM" "$TS"
+check "only: team-rules backup"           test "$(find "$(dirname "$SH_TEAM")" -name 'team-rules.md.bak-*-owner-work' | wc -l)" -eq 1
+check "only: rules.md converted"          cmp -s "$J_RULES" "${TDIR}/rules.solo"
+check "only: rules.md backup"             test "$(find "$(dirname "$J_RULES")" -name 'rules.md.bak-*-owner-work' | wc -l)" -eq 1
+cp "$SH_TEAM" "${TDIR}/only.team"; cp "$J_RULES" "${TDIR}/only.rules"
 cp "$GMD" "${TDIR}/only.copy"; cp "$SETTINGS" "${TDIR}/only.settings"
 ( azv_owner_rules_only ) >/dev/null 2>&1; rc=$?
 check "only: repeat rc 0"                 test "$rc" -eq 0
 check "only: repeat CLAUDE.md unchanged"  cmp -s "$GMD" "${TDIR}/only.copy"
 check "only: repeat settings unchanged"   cmp -s "$SETTINGS" "${TDIR}/only.settings"
 check "only: repeat no new backup"        test "$(baks)" -eq 1
+check "only: repeat team-rules unchanged" cmp -s "$SH_TEAM" "${TDIR}/only.team"
+check "only: repeat rules.md unchanged"   cmp -s "$J_RULES" "${TDIR}/only.rules"
+check "only: repeat no team/rules backup" test "$(find "${FAKE_HOME}/.claude-lab" -name '*.bak-*-owner-work' | wc -l)" -eq 2
 
 # main with the flag: preflight, then only this step (the rest of main never runs).
 out=$( preflight() { :; }
