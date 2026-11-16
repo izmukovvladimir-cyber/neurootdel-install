@@ -1055,6 +1055,8 @@ JARVIS_BOT_TOKEN=""
 JARVIS_BOT_USERNAME=""
 RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
+# --solo without a Richard bot (decision #1902): his step is skipped, the install goes on.
+RICHARD_SKIPPED=0
 # Coder bot (third bot), required at the intensive stage. Empty = kept from this server or not this stage.
 CODER_BOT_TOKEN=""
 CODER_BOT_USERNAME=""
@@ -1147,8 +1149,10 @@ _bot_clash() {
 # after the same three checks: a revoked or shared bot is not kept silently.
 # With a tty the question repeats until a token passes; a token from env, or a run without a tty,
 # stops the installer instead (nobody is there to answer again). The token is never printed.
+# collect_bot_token <agent> optional -- no token at all (no env, none on this server, empty answer
+# or no tty) returns 1 with a warning instead of a stop; a token that is given is checked as above.
 collect_bot_token() {
-    local agent=$1 label up tok resp why from_env=0 have_old=0 kept prompt
+    local agent=$1 optional=${2:-} label up tok resp why from_env=0 have_old=0 kept prompt
     label=$(_bot_label "$agent")
     up="${agent^^}"
     local -n tok_out="${up}_BOT_TOKEN"
@@ -1173,7 +1177,10 @@ collect_bot_token() {
             tok=$(_bot_existing_token "$agent")
             kept=1
         fi
-        if [[ -z "$tok" ]]; then
+        if [[ -z "$tok" && "$optional" == optional ]]; then
+            warn "${label}: no bot token -- ${label} is skipped. Add later: sudo NEUROOTDEL_${up}_BOT_TOKEN=<token> bash install.sh --solo"
+            return 1
+        elif [[ -z "$tok" ]]; then
             why="${label} needs its own bot: create it in @BotFather (docs/lesson-create-bots.md) and give its token (NEUROOTDEL_${up}_BOT_TOKEN without a tty)."
         elif ! validate_tg_token "$tok"; then
             why="${label} token format invalid (expected '<digits>:<30+ chars>')."
@@ -1326,7 +1333,11 @@ BRIEF
     prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "${saved_tz:-Europe/Moscow}"
 
     collect_bot_token jarvis
-    collect_bot_token richard
+    if [[ "$SOLO" == "1" ]]; then
+        collect_bot_token richard optional || RICHARD_SKIPPED=1
+    else
+        collect_bot_token richard
+    fi
     prompt_or_env TG_USER_ID        NEUROOTDEL_TG_USER_ID \
         "Ваш Telegram numeric user ID (from @userinfobot)" \
         "$saved_id"
@@ -2409,6 +2420,10 @@ render_doctor_role() {
 
 install_richard() {
     step 7 "Installing Richard (claude-code-telegram)"
+    if [[ "$RICHARD_SKIPPED" == "1" ]]; then
+        warn "Richard skipped: --solo without his bot token."
+        return 0
+    fi
 
     install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$RICHARD_HOME"
 
@@ -4815,6 +4830,12 @@ _coder_unit_word() {
     return 0
 }
 
+# _richard_unit_word -- " claude-richard" unless --solo skipped Richard (no unit on this server).
+_richard_unit_word() {
+    [[ "$RICHARD_SKIPPED" == "1" ]] || printf ' %s' claude-richard
+    return 0
+}
+
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
@@ -4839,7 +4860,7 @@ Installed on this VPS:
   - Jarvis:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/  (systemd: ${JARVIS_UNIT})
                env: ${JARVIS_ENV_DIR}/channel.env
   - Coder:     $([[ "$CODER_INSTALLED" == "1" ]] && echo "${AGENT_HOME}/.claude-lab/coder/.claude/  (systemd: ${CODER_UNIT}, env: ${CODER_ENV_DIR}/channel.env, bot: @${CODER_BOT_USERNAME:-<fill-in>})" || echo "not installed: intensive stage (its own bot): sudo bash install.sh --stage intensive")
-  - Richard:   ${RICHARD_HOME}                       (systemd: claude-richard)
+  - Richard:   $([[ "$RICHARD_SKIPPED" == "1" ]] && echo "not installed: --solo without his bot (add: sudo NEUROOTDEL_RICHARD_BOT_TOKEN=<token> bash install.sh --solo)" || echo "${RICHARD_HOME}                       (systemd: claude-richard)")
   - Auditor:   $([[ "$AUDITOR_INSTALLED" == "1" ]] && echo "$(auditor_hermes_home)/  (Hermes on GPT, systemd: ${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT}, bot: @${AUDITOR_BOT_USERNAME:-<fill-in>}, role: $(auditor_hermes_home)/SOUL.md)" || echo "not installed: intensive stage (its own bot): sudo bash install.sh --stage intensive")
   - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  ($(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} )) skills)
   - Login watch: hourly, the agent's own bot tells you when Claude login is lost
@@ -4863,11 +4884,11 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         #   TELEGRAM_BOT_TOKEN=<token>, and your id in BOTH
         #   TELEGRAM_ALLOWED_USER_IDS=<id> and TELEGRAM_ALLOWED_CHAT_IDS=<id>
         #   Permission prompts ("allow this command?") go only to TELEGRAM_ALLOWED_USER_IDS
-        # Richard: ${RICHARD_HOME}/.env -- TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>
+        # Richard: $([[ "$RICHARD_SKIPPED" == "1" ]] && echo "not installed -- sudo NEUROOTDEL_RICHARD_BOT_TOKEN=<token> bash install.sh --solo" || echo "${RICHARD_HOME}/.env -- TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>")
 
-        sudo systemctl enable ${JARVIS_UNIT}$(_coder_unit_word) claude-richard
-        sudo systemctl restart ${JARVIS_UNIT}$(_coder_unit_word) claude-richard
-        sudo systemctl status  ${JARVIS_UNIT}$(_coder_unit_word) claude-richard --no-pager
+        sudo systemctl enable ${JARVIS_UNIT}$(_coder_unit_word)$(_richard_unit_word)
+        sudo systemctl restart ${JARVIS_UNIT}$(_coder_unit_word)$(_richard_unit_word)
+        sudo systemctl status  ${JARVIS_UNIT}$(_coder_unit_word)$(_richard_unit_word) --no-pager
         sudo journalctl -u ${JARVIS_UNIT} -f       # Jarvis logs
         sudo -u ${AGENT_USER} tmux -L ${JARVIS_UNIT} capture-pane -p -t ${JARVIS_UNIT} | tail -30   # Jarvis screen
 
@@ -4885,7 +4906,7 @@ $(_offsite_final_notes)
         sudo -u ${AGENT_USER} bash -lc 'which claude'         # ${AGENT_HOME}/.local/bin/claude
         ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/          # CLAUDE.md, core/, skills/
         systemctl is-active ${JARVIS_UNIT}                       # active (after steps 1+2)
-        systemctl is-active claude-richard                      # active (after steps 1+2)$([[ "$CODER_INSTALLED" == "1" ]] && printf '\n        systemctl is-active %s                       # active (after steps 1+2)' "$CODER_UNIT")
+$([[ "$RICHARD_SKIPPED" == "1" ]] || printf '\n        systemctl is-active claude-richard                      # active (after steps 1+2)')$([[ "$CODER_INSTALLED" == "1" ]] && printf '\n        systemctl is-active %s                       # active (after steps 1+2)' "$CODER_UNIT")
         ls -la ${SUDOERS_FILE}                    # exists, 0440
         ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # $(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))${sp_check_line}
 
@@ -4898,7 +4919,7 @@ $(_offsite_final_notes)
         # stop: sudo touch /var/lib/${AGENT_USER}-group-watch/main/STOP && sudo systemctl disable --now ${AGENT_USER}-group-watch@main
 
   $(printf '%b' "$C_YELLOW")5.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
-      If Jarvis dies, the student messages Richard:  ${richard_label}
+$([[ "$RICHARD_SKIPPED" == "1" ]] || printf '      If Jarvis dies, the student messages Richard:  %s\n' "$richard_label")
 
   $(printf '%b' "$C_YELLOW")6.$(printf '%b' "$C_NC") End-of-stage check (stage: ${STAGE:-workshop}), runs below now and any time later,
       after the logins of steps 1-2 run it again, every line must be ✅:
