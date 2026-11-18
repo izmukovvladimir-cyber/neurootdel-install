@@ -2649,6 +2649,7 @@ TEAM_CANCEL_NEW = "- Cancel: rewrite or delete that line in core/rules.md («о�
 STARTER_R8 = "## 8. "
 STARTER_R8_OWNER = "- К владельцу идёшь только с "
 STARTER_R8_LEGACY = "- К владельцу идёшь только с тремя вещами: деньги, доступы, обещания клиентам и людям."
+STARTER_R8_FREE = "  Новую строку с его поправкой в core/rules.md пишешь без вопроса."
 SOLO_R8 = [
     "## 8. Что решаешь сам\n",
     "\n",
@@ -2713,7 +2714,8 @@ if kind == "starter":
             part = st[t8:t8_end]
             # An install before #1920 has rule 8 with the old «тремя вещами» line in place of the owner's
             # «да» list: the template part with that one line instead of the list (up to the blank line).
-            parts = [part]
+            # An install of the #1920 hooks branch: the list without the closing correction-line exception.
+            parts = [part, [ln for ln in part if ln != STARTER_R8_FREE]]
             k = next((n for n, ln in enumerate(part) if ln.startswith(STARTER_R8_OWNER)), None)
             if k is not None:
                 k_end = next((n for n in range(k + 1, len(part)) if not part[n].strip()), len(part))

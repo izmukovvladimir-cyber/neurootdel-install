@@ -505,7 +505,7 @@ check "rules: rule 8 only after the owner's yes" grep -qF 'только посл
 check "rules: rule 4 no longer a blanket «не жди»" bash -c '! grep -q "разрешения не жди\. " "$0"' "$SRC"
 SOLO_G="${REPO}/templates/solo/global-CLAUDE.md"
 check "rules: solo global names the owner's bots, services" grep -qF 'подключения его ботов, сервисов, cron,' "$SOLO_G"
-check "rules: solo global own rules after «да»" grep -qF 'свои CLAUDE.md, settings и правила (кроме его поправок) только после «да»' "$SOLO_G"
+check "rules: solo global own rules after «да»" grep -qF 'свои CLAUDE.md, settings и правила (кроме новой строки в core/rules.md) только после' "$SOLO_G"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

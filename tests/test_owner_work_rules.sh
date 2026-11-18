@@ -187,6 +187,14 @@ check "legacy r8: converted to solo rule 8" grep -qxF "## 8. Что решаеш
 check "legacy r8: «Решаю сам» gone"        no_line "$GMD" "Решаю сам"
 check "legacy r8: «тремя вещами» gone"     no_line "$GMD" "тремя вещами"
 
+# --- install of the #1920 hooks branch: rule 8 without the correction-line exception -> solo rule 8 ------
+reset_home
+old_starter | grep -vxF "  Новую строку с его поправкой в core/rules.md пишешь без вопроса." >"$GMD"
+check "hooks r8: fixture has the list, no exception" bash -c 'grep -qF "изменения из пункта ниже" "$0" && ! grep -qF "пишешь без вопроса" "$0"' "$GMD"
+ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
+check "hooks r8: converted to solo rule 8"  grep -qxF "## 8. Что решаешь сам" "$GMD"
+check "hooks r8: «Решаю сам» gone"          no_line "$GMD" "Решаю сам"
+
 # --- pasted by hand without markers: not added again, 1-4 still cut ---------------
 reset_home
 { old_starter; printf '\nowner text\n'; cat "$SRC"; } >"$GMD"

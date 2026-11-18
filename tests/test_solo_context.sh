@@ -90,9 +90,9 @@ check "texts: one first meeting"             grep -qF "Знакомство од
 # #1920: the owner's things and own rules only after «да», how-to stays with the agent (rule 8), deadlines in
 # hours with a ready time (#1921), the first meeting starts with the agent's own name.
 check "texts: owner's settings after «да»"   grep -qF "подключения его ботов, сервисов, cron," "$TURN"
-check "texts: own rules after «да»"          grep -qF "свои CLAUDE.md, settings и правила (кроме его поправок) только после «да»" "$TURN"
+check "texts: own rules after «да»"          grep -qF "свои CLAUDE.md, settings и правила (кроме новой строки в core/rules.md) только после" "$TURN"
 check "texts: rule 8 how = agent"            grep -qF "сам решаешь, как его сделать" "$TURN"
-check "texts: deadlines in hours"            grep -qF "Расход в минутах или часах -> время готовности по его часам" "$TURN"
+check "texts: deadlines in hours"            grep -qF "Расход в минутах/часах -> время готовности по его часам" "$TURN"
 check "texts: greets with its own name"      grep -qF "«Привет, я Jarvis»" "$TURN"
 check "texts: no placeholders left"          bash -c '! grep -qF "{{" "$0"' "$TURN"
 
