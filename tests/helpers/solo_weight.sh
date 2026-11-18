@@ -19,6 +19,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Real soul on 18.11.2026: CLAUDE.md + character.md + rules.md + morning-brief.md = 7590 bytes (7947 with
 # the #1920 memory/idea lines); the filler is the budget for it.
 SOUL_FILLER_BYTES=8192
+# As a live install sees it (#1920): the activation server watermarks every .md of the payload
+# (bin/agent-activate.py watermark(): two lines with the buyer's name and key, ~214 B per file on the stand),
+# and the plugin's own CLAUDE.md (channel rule, 1541 B at PLUGIN_COMMIT_DEFAULT d846493) loads from the
+# agent's working dir. The name is a long-ish buyer name, the key has the real AZV-XXXX-XXXX-XXXX-XXXX shape.
+WM_NAME="Мария Константинова"
+WM_KEY="AZV-ABCD-EFGH-JKLM-NPQR"
+PLUGIN_CLAUDE_BYTES=1541
 solo=1 payload="" keep=""
 while (($#)); do
     case "$1" in
@@ -92,9 +99,27 @@ if [[ "$solo" == 1 ]]; then
             head -c $(( (SOUL_FILLER_BYTES - 30) / 3 )) /dev/zero | tr '\0' 'x' >"${AZV_AGENT_DIR}/soul/${f}.md"
         done
     fi
+    python3 - "${AZV_AGENT_DIR}" "$WM_NAME" "$WM_KEY" <<'WM'
+import sys
+from pathlib import Path
+
+root, name, key = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+head = (f"<!-- Личная копия: {name}. Ключ {key}. -->\n"
+        f"> Личная копия для {name}, ключ {key}. Передавать другим нельзя.\n\n")
+for p in root.rglob("*.md"):
+    t = p.read_text(encoding="utf-8")
+    end = t.find("\n---\n", 4) if t.startswith("---\n") else -1
+    if end != -1:
+        cut = end + len("\n---\n")
+        t = t[:cut] + "\n" + head + t[cut:]
+    else:
+        t = head + t
+    p.write_text(t, encoding="utf-8")
+WM
     azv_wire_payload >/dev/null || { echo "payload wiring failed" >&2; exit 1; }
 fi
 install_team_refs >/dev/null || { echo "team refs failed" >&2; exit 1; }
+head -c "$PLUGIN_CLAUDE_BYTES" /dev/zero | tr '\0' 'p' >"${WS}/dashi-plugin-claude-code/plugin/CLAUDE.md"
 
 HOME="$H" PYTHONPATH="${REPO}/lib" python3 - "$H" <<'PY'
 import sys

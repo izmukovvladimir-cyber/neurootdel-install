@@ -112,6 +112,13 @@ check "refs: no lessons in MEMORY.md"        bash -c '! grep -qE "^- \[[^]]*\]\(
 check "refs: team solo route kept"           grep -qF "one short line in core/rules.md" "${SH}/team-rules.md"
 check "refs: team solo no «better option»"   bash -c '! grep -qF "the better option" "$0"' "${SH}/team-rules.md"
 check "refs: LEARNINGS stub -> core/rules"   grep -qF "core/rules.md" "${WS}/core/LEARNINGS.md"
+# #1920 live weight: the model counts what a live install loads (key watermark in every soul file, the
+# plugin's own CLAUDE.md); the solo core/rules.md stub has no copies of the global rules.
+check "weight: soul files carry the watermark" grep -qF "Личная копия для" "${WS}/azv/soul/rules.md"
+check "weight: plugin CLAUDE.md counted"     grep -q 'dashi-plugin-claude-code/plugin/CLAUDE.md$' "${TDIR}/solo.txt"
+check "rules stub: correction line kept"     grep -qF "one line here, in this file, in the same turn" "${WS}/core/rules.md"
+check "rules stub: one reply per question"   grep -qF "## Один ответ на вопрос" "${WS}/core/rules.md"
+check "rules stub: no global duplicates"     bash -c '! grep -qE "Ask before destructive|Never commit secrets|Prefer small" "$0"' "${WS}/core/rules.md"
 
 # --- the team install is unchanged -----------------------------------------------------
 FH="${TDIR}/full/home"

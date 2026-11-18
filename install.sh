@@ -2388,7 +2388,19 @@ REOF
             USER     "$AGENT_USER"
     fi
     if [[ "$kind" != coder && "$SOLO" == "1" ]]; then
-        _azv_fix_tmp rules "$rules_tmp"
+        # --solo: the global already says «да» before deleting, secrets and the correction route (rules 9-13,
+        # RED); this file keeps only the owner's corrections and the one-reply rule, in fewer bytes per turn.
+        cat > "$rules_tmp" <<'SREOF'
+# Rules
+
+- On each correction of the owner: one line here, in this file, in the same turn (route: ~/.claude-lab/shared/team-rules.md, «Memory»). Not in auto memory, not in LEARNINGS.md.
+
+## Один ответ на вопрос
+
+- На вопрос одно сообщение, без промежуточных статусов; «готово» один раз в конце, другими словами не повторяешь.
+- Побудка из группы: ответ в группу, не в личку.
+- Отправил пункт из handoff: вычеркни его в том же ходе. После рестарта сначала проверь чат, не ушло ли уже.
+SREOF
     fi
     _write_if_absent "$rules_tmp" "${ws}/core/rules.md" 0644
     if [[ "$kind" != coder && "$SOLO" == "1" ]]; then
