@@ -87,6 +87,13 @@ check "texts: rules 9-13 in the turn"        test "$(grep -cE '^## (9|1[0-3])\. 
 check "texts: correction -> core/rules.md"   grep -qF "правило работы в \`core/rules.md\`" "$TURN"
 check "texts: RED block in the turn"         grep -qF "red-secrets-rule:begin" "$TURN"
 check "texts: one first meeting"             grep -qF "Знакомство одно" "$TURN"
+# #1920: the owner's things and own rules only after «да», how-to stays with the agent (rule 8), deadlines in
+# hours with a ready time (#1921), the first meeting starts with the agent's own name.
+check "texts: owner's settings after «да»"   grep -qF "подключения его ботов, сервисов, cron," "$TURN"
+check "texts: own rules after «да»"          grep -qF "свои CLAUDE.md, settings и правила (кроме его поправок) только после «да»" "$TURN"
+check "texts: rule 8 how = agent"            grep -qF "сам решаешь, как его сделать" "$TURN"
+check "texts: deadlines in hours"            grep -qF "Расход в минутах или часах -> время готовности по его часам" "$TURN"
+check "texts: greets with its own name"      grep -qF "«Привет, я Jarvis»" "$TURN"
 check "texts: no placeholders left"          bash -c '! grep -qF "{{" "$0"' "$TURN"
 
 # --- what left the turn is kept, with a pointer --------------------------------------

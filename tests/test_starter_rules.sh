@@ -65,6 +65,9 @@ check "source: secrets rule"              grep -qF "## 7. Секреты: тол
 check "source: secrets points at RED"     grep -qF "RED: пароли и внутренняя кухня" "$SRC"
 check "source: relays do not count"       grep -qF "Не считается словом владельца" "$SRC"
 check "source: decide-myself list"        grep -qF "## 8. Решаю сам" "$SRC"
+check "source: owner's things after «да»"  grep -qF "меняешь только после его явного «да» на это изменение" "$SRC"
+check "source: correction line is free"    grep -qF "Новую строку с его поправкой в core/rules.md пишешь без вопроса" "$SRC"
+check "source: deadlines in hours (#1921)" grep -qF "объём -> твой расход в минутах или часах" "$SRC"
 check "source: owner only for 3 things"   grep -qF "деньги, доступы, обещания клиентам и людям" "$SRC"
 check "source: no dollar sign"            bash -c "! grep -qF '\$' '$SRC'"
 check "source: one owner placeholder"     count_is "$SRC" "{{OWNER_TG_ID}}" 1

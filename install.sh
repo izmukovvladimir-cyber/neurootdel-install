@@ -2647,6 +2647,8 @@ TEAM_CANCEL_NEW = "- Cancel: rewrite or delete that line in core/rules.md («о�
 # Rule 8 «Решаю сам» and the team «Thinking» line push the solo agent to decide and argue; the solo
 # texts say the same as rule 9: do what was asked, an idea is one line after the task.
 STARTER_R8 = "## 8. "
+STARTER_R8_OWNER = "- К владельцу идёшь только с "
+STARTER_R8_LEGACY = "- К владельцу идёшь только с тремя вещами: деньги, доступы, обещания клиентам и людям."
 SOLO_R8 = [
     "## 8. Что решаешь сам\n",
     "\n",
@@ -2709,9 +2711,18 @@ if kind == "starter":
         r8 = next((i for i in range(b + 1, e) if lines[i].startswith(STARTER_R8)), None)
         if t8 is not None and t8_end is not None and r8 is not None:
             part = st[t8:t8_end]
-            if r8 + len(part) < e and [bare(x) for x in lines[r8:r8 + len(part)]] == part:
-                lines[r8:r8 + len(part)] = SOLO_R8
-                changed = True
+            # An install before #1920 has rule 8 with the old «тремя вещами» line in place of the owner's
+            # «да» list: the template part with that one line instead of the list (up to the blank line).
+            parts = [part]
+            k = next((n for n, ln in enumerate(part) if ln.startswith(STARTER_R8_OWNER)), None)
+            if k is not None:
+                k_end = next((n for n in range(k + 1, len(part)) if not part[n].strip()), len(part))
+                parts.append(part[:k] + [STARTER_R8_LEGACY] + part[k_end:])
+            for cand in parts:
+                if r8 + len(cand) < e and [bare(x) for x in lines[r8:r8 + len(cand)]] == cand:
+                    lines[r8:r8 + len(cand)] = SOLO_R8
+                    changed = True
+                    break
     text = "".join(lines)
     # Present = both markers, or pasted by hand: the rule-11 heading and every heading 9-13.
     marked = o_begin in text and o_end in text

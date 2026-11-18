@@ -171,6 +171,22 @@ ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "old repeat: unchanged"             cmp -s "$GMD" "${TDIR}/old2.copy"
 check "old repeat: still one backup"      test "$(baks)" -eq 1
 
+# --- old --solo install from before #1920: rule 8 with «тремя вещами» -> solo rule 8 ------
+reset_home
+old_starter | python3 -c '
+import re, sys
+t = sys.stdin.read()
+t2 = re.sub(r"^- К владельцу идёшь только с .*?(?=\n\n)",
+            "- К владельцу идёшь только с тремя вещами: деньги, доступы, обещания клиентам и людям.", t, count=1,
+            flags=re.M | re.S)
+assert t2 != t
+sys.stdout.write(t2)' >"$GMD"
+check "legacy r8: fixture has «тремя вещами»" grep -qF "только с тремя вещами" "$GMD"
+ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
+check "legacy r8: converted to solo rule 8" grep -qxF "## 8. Что решаешь сам" "$GMD"
+check "legacy r8: «Решаю сам» gone"        no_line "$GMD" "Решаю сам"
+check "legacy r8: «тремя вещами» gone"     no_line "$GMD" "тремя вещами"
+
 # --- pasted by hand without markers: not added again, 1-4 still cut ---------------
 reset_home
 { old_starter; printf '\nowner text\n'; cat "$SRC"; } >"$GMD"

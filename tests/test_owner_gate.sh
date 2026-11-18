@@ -484,6 +484,12 @@ check "install: not in user settings (Richard)" jqtrue "$US" '[.. | .command? //
 cp "$PS" "${TDIR}/ps1"
 CODER_INSTALLED=1 setup_agent_hooks
 check "install: re-run adds nothing"          cmp -s "$PS" "${TDIR}/ps1"
+# --solo (one agent, no Coder): the hook is registered the same way (#1920).
+rm -f "$PS"
+SOLO=1 CODER_INSTALLED=0 setup_agent_hooks
+check "install: solo jarvis owner-gate registered once" jqtrue "$PS" "${OGM} | length == 1 and (.[0].hooks[0].command | test(\"owner-gate.py jarvis\$\")) and .[0].hooks[0].timeout >= 200"
+CODER_INSTALLED=1 setup_agent_hooks
+check "install: back to the full run, still once" jqtrue "$PS" "${OGM} | length == 1"
 C="${TDIR}/config.json"
 ensure_channel_config_defaults "$C"
 check "install: plugin permission route on"   jqtrue "$C" '.permission_gate.enabled == true and .permission_gate.timeout_ms >= 180000'
@@ -497,6 +503,9 @@ SRC="${REPO}/templates/AGENT-RULES-STARTER.md"
 check "rules: rule 8 names the owner's bots, services" grep -qF 'ботов, сервисов, расписаний и файлов владельца' "$SRC"
 check "rules: rule 8 only after the owner's yes" grep -qF 'только после его явного «да»' "$SRC"
 check "rules: rule 4 no longer a blanket «не жди»" bash -c '! grep -q "разрешения не жди\. " "$0"' "$SRC"
+SOLO_G="${REPO}/templates/solo/global-CLAUDE.md"
+check "rules: solo global names the owner's bots, services" grep -qF 'подключения его ботов, сервисов, cron,' "$SOLO_G"
+check "rules: solo global own rules after «да»" grep -qF 'свои CLAUDE.md, settings и правила (кроме его поправок) только после «да»' "$SOLO_G"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
