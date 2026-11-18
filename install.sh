@@ -2393,7 +2393,7 @@ REOF
         cat > "$rules_tmp" <<'SREOF'
 # Rules
 
-- On each correction of the owner: one line here, in this file, in the same turn (route: ~/.claude-lab/shared/team-rules.md, «Memory»). Not in auto memory, not in LEARNINGS.md.
+- On each correction of the owner: one line here, in this file, in the same turn (rule 12).
 
 ## Один ответ на вопрос
 
@@ -4732,13 +4732,13 @@ install_team_refs() {
         local lp_line=""
         if [[ -f "${ws}/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md" ]]; then
             # shellcheck disable=SC2088  # a path for the agent to read, ~ stays literal
-            lp_line=$'\n'"- опыт других агентов: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"
+            lp_line=$'\n'"- опыт агентов: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"
         fi
         # shellcheck disable=SC2088  # paths for the agent to read, ~ stays literal
-        team_line="Справочники (Read, когда задача про это):
+        team_line="Справочники (Read по задаче):
 - код, git, сервер: ~/.claude-lab/shared/GLOBAL-TEAM-RULES.md${lp_line}
-- команда агентов (если появится второй): ~/.claude-lab/shared/team-rules.md"
-        root_line="- заявка на действие с правами root: ~/.claude-lab/shared/TOOLS-root-requests.md"
+- второй агент: ~/.claude-lab/shared/team-rules.md"
+        root_line="- заявка root: ~/.claude-lab/shared/TOOLS-root-requests.md"
     fi
     if [[ "$SOLO" == "1" ]]; then
         _install_solo_refs "$shared" || fail=1
