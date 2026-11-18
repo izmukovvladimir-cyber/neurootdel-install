@@ -1,7 +1,6 @@
 # Memory index
 
-Правила, факты о владельце и договорённости живут в core/rules.md, core/USER.md и
-core/warm/decisions.md (правило 12). Здесь только оглавление справочных заметок.
+Правила, факты и решения живут в core/ (правило 12), здесь оглавление заметок.
 
 <!-- BEGIN {{TAG}}: memory-lessons -->
 <!-- END {{TAG}}: memory-lessons -->
