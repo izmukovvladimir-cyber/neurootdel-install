@@ -338,6 +338,59 @@ mkdir -p "${WS}/work/nm/node_modules/x"; printf 'x\n' >"${WS}/work/nm/node_modul
 check "pass: rm -rf of a build tree (node_modules skipped)" passes "$(bash_p "rm -rf ${WS}/work/nm")"
 check "pass: rm -rf of a plain work subdir still free" passes "$(bash_p "rm -rf ${WS}/work/sub")"
 
+# --- coordinator review: starting services, node fs calls, copy source vs destination, append on a new line --
+for c in "systemctl enable adminbot" "sudo systemctl enable --now adminbot.service" "systemctl start adminbot" \
+        "docker compose up -d" "docker compose up -d --force-recreate" "docker run -d --name bot img" \
+        "docker create img" "pm2 start bot.js" "pm2 restart bot --update-env"; do
+    check "held: ${c}" held "$(bash_p "$c")"
+done
+check "pass: systemctl status / list-units still free" passes "$(bash_p "systemctl status adminbot; systemctl list-units --type=service")"
+check "pass: docker ps / compose ps still free"  passes "$(bash_p "docker ps && docker compose ps && pm2 list")"
+check "held: node unlinkSync of the owner's file" held "$(bash_p "node -e 'require(\"fs\").unlinkSync(\"${H}/bots/admin/config.py\")'")"
+check "held: node unlinkSync outside HOME"       held "$(bash_p "node -e 'require(\"fs\").unlinkSync(\"/srv/owner-bot/config.json\")'")"
+check "held: node writeFileSync over the owner's file" held "$(bash_p "node -e 'require(\"fs\").writeFileSync(\"${H}/bots/admin/config.py\", \"x\")'")"
+check "pass: python shutil.copy owner file -> /tmp" passes "$(bash_p "python3 -c 'import shutil; shutil.copy(\"${H}/bots/admin/config.py\",\"/tmp/config.json\")'")"
+check "pass: node copyFileSync owner file -> /tmp" passes "$(bash_p "node -e 'require(\"fs\").copyFileSync(\"${H}/bots/admin/config.py\",\"/tmp/c.py\")'")"
+check "pass: shutil.copy via variables -> /tmp"  passes "$(bash_p "python3 - <<'EOF'
+import shutil
+src = '${H}/bots/admin/config.py'
+dst = '/tmp/c2.py'
+shutil.copy(src, dst)
+EOF")"
+check "held: python shutil.copy back over the owner's file" held "$(bash_p "python3 -c 'import shutil; shutil.copy(\"/tmp/config.json\",\"${H}/bots/admin/config.py\")'")"
+check "held: shutil.copy into the owner's dir"   held "$(bash_p "python3 -c 'import shutil; shutil.copy(\"/tmp/config.py\",\"${H}/bots/admin\")'")"
+check "held: shutil.move of the owner's file away" held "$(bash_p "python3 -c 'import shutil; shutil.move(\"${H}/bots/admin/config.py\",\"/tmp/x.py\")'")"
+check "held: node renameSync of the owner's file" held "$(bash_p "node -e 'require(\"fs\").renameSync(\"${H}/bots/admin/config.py\",\"/tmp/x.py\")'")"
+check "held: rules.md tail glued to the last rule" held "$(edit_p "${WS}/core/rules.md" "- one" "- one и ещё")"
+check "pass: rules.md new line after the last"   passes "$(edit_p "${WS}/core/rules.md" "- one" $'- one\n- three')"
+
+# codex r6: copytree into the workspace, a dir destination in a variable, glued curl -uUSER:PASS
+check "held: shutil.copytree into the workspace" held "$(bash_p "python3 -c 'import shutil; shutil.copytree(\"${TDIR}/restore\", \"${WS}\", dirs_exist_ok=True)'")"
+check "held: shutil.copy to a dir held in a variable" held "$(bash_p "python3 - <<'EOF'
+import shutil
+src = '/tmp/config.py'
+dst = '${H}/bots/admin'
+shutil.copy(src, dst)
+EOF")"
+check "pass: shutil.copytree into a new work dir" passes "$(bash_p "python3 -c 'import shutil; shutil.copytree(\"${TDIR}/restore\", \"${WS}/work/newcopy\")'")"
+verdict deny
+gate "$(bash_p "curl -X PATCH https://chatplace.io/api/bots/12 -uadmin:q7NglueCred99 -d x=1")" >/dev/null
+check "card: glued -uUSER:PASS masked"           bash -c '! grep -q "q7NglueCred99" "$0"' "${TDIR}/reqs.jsonl"
+
+# init errors: fail closed with a clear text (missing dependency, load() raising)
+FD="${TDIR}/brokenlib"; mkdir -p "${FD}/hooks"
+cp "$GATE" "${REPO}/lib/hooks/block-dangerous.py" "${FD}/hooks/"
+R=0; OUT=$(printf "%s" "$(bash_p "ls")" | python3 "${FD}/hooks/owner-gate.py" jarvis 2>&1) || R=$?
+check "init: missing guard_conf -> rc 2"         test "$R" = 2
+check "init: missing guard_conf -> clear text"   grep -q 'проверка не запустилась' <<<"$OUT"
+printf 'def load(*a, **k):\n    raise RuntimeError("boom")\ndef read_raw(*a, **k):\n    return {}\n' >"${FD}/guard_conf.py"
+R=0; OUT=$(printf "%s" "$(bash_p "ls")" | python3 "${FD}/hooks/owner-gate.py" jarvis 2>&1) || R=$?
+check "init: load() raises -> rc 2"              test "$R" = 2
+check "init: load() raises -> names the error"   grep -q 'RuntimeError: boom' <<<"$OUT"
+cp "${REPO}/lib/guard_conf.py" "${FD}/guard_conf.py"; rm -f "${FD}/hooks/block-dangerous.py"
+R=0; OUT=$(printf "%s" "$(bash_p "ls")" | python3 "${FD}/hooks/owner-gate.py" jarvis 2>&1) || R=$?
+check "init: missing block-dangerous.py -> rc 2" test "$R" = 2 -a -n "$(grep 'проверка не запустилась' <<<"$OUT")"
+
 # CLAUDE_CONFIG_DIR: the agent's config dir under another name is the same as ~/.claude
 CCD="${H}/.claude-alt"; mkdir -p "${CCD}/projects/p/memory"
 gate_ccd() { local r=0; printf '%s' "$1" | CLAUDE_CONFIG_DIR="$CCD" python3 "$GATE" jarvis >/dev/null 2>&1 || r=$?; echo "$r"; }

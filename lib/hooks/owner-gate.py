@@ -45,19 +45,30 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-LIB = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(LIB))
-import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
+INIT_FAIL = ("BLOCKED by owner-gate: проверка не запустилась ({err}); пока её не починят, действия с ботами, "
+             "сервисами и файлами владельца не выполняются. Спроси владельца и дождись его «да»; "
+             "починка: переустановка или sudo neurootdel-verify.")
+try:
+    LIB = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(LIB))
+    import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
-_spec = importlib.util.spec_from_file_location("block_dangerous", Path(__file__).resolve().parent / "block-dangerous.py")
-assert _spec and _spec.loader
-bd = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(bd)
+    _spec = importlib.util.spec_from_file_location("block_dangerous",
+                                                   Path(__file__).resolve().parent / "block-dangerous.py")
+    if not _spec or not _spec.loader:
+        raise ImportError("block-dangerous.py not found")
+    bd = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(bd)
 
-CONF = guard_conf.load()
-RAW = guard_conf.read_raw()
-HOME = str(CONF.agent_home)
-LAB = f"{HOME}/.claude-lab"
+    CONF = guard_conf.load()
+    RAW = guard_conf.read_raw()
+    HOME = str(CONF.agent_home)
+    LAB = f"{HOME}/.claude-lab"
+except Exception as _e:  # noqa: BLE001 - fail closed: a hook that cannot start must not wave calls through
+    if __name__ == "__main__":
+        print(INIT_FAIL.format(err=f"{type(_e).__name__}: {_e}"[:200]), file=sys.stderr)
+        sys.exit(2)
+    raise
 DEFAULT_WAIT_SEC = 170
 MAX_WAIT_SEC = 185          # the installer registers the hook with timeout 200: we must answer first
 HTTP_MARGIN_SEC = 5
@@ -83,19 +94,28 @@ TMUX_SEG = re.compile(r"\btmux\b[^\n;&|]*")
 INTERPRETERS = {"python", "python3", "node", "bun", "perl", "ruby", "php", "deno"}
 INLINE_WRITE = re.compile(
     r"write_text|write_bytes|\.write\(|open\([^)]*,\s*['\"][wax+]|unlink|os\.remove|rmtree|\.rename|os\.replace|"
-    r"shutil\.(copy|move)|json\.dump\(|writeFile|appendFile|rmSync|fs\.rm", re.I)
+    r"shutil\.(copy|move)|json\.dump\(|writeFile|appendFile|rmSync|fs\.rm|unlinkSync|renameSync|copyFile|"
+    r"rmdirSync|fs\.rename|fs\.unlink|truncateSync", re.I)
+INLINE_DELETE = re.compile(r"unlink|remove|rmtree|rmSync|rmdirSync|fs\.rm|renameSync|fs\.rename|os\.rename", re.I)
+# copy/move calls with two literal paths: the SOURCE is only read (a move also removes it), the DEST is written
+INLINE_COPY = re.compile(
+    r"""(?:shutil\.(copy\w*|move)|\b(copyFileSync|copyFile|renameSync|cpSync|fs\.rename|fs\.cp|fs\.promises\.rename)"""
+    r"""|os\.(rename|replace))"""
+    r"""\(\s*[rfb]?(['"])([^'"\n]+)\4\s*,\s*[rfb]?(['"])([^'"\n]+)\6""")
 INLINE_PATH = re.compile(
     r"CLAUDE(\.local)?\.md|settings(\.local)?\.json|\.claude/(hooks|rules|plugins|channels)/|core/rules\.md|"
     r"\.mcp\.json|\.claude\.json|azv/soul/|/etc/cron|/var/spool/cron|channel\.env|owner-gate")
 
 SYSTEMCTL_GATED = {"stop", "disable", "mask", "restart", "try-restart", "reload-or-restart", "try-reload-or-restart",
                    "condrestart", "force-reload", "kill", "reload", "edit", "revert", "set-property", "isolate",
-                   "poweroff", "reboot", "halt", "kexec", "link", "preset", "clean", "freeze"}
+                   "poweroff", "reboot", "halt", "kexec", "link", "preset", "clean", "freeze", "enable",
+                   "reenable", "unmask", "start"}
 SYSTEMCTL_OPTS_WITH_ARG = {"-H", "-M", "--host", "--machine", "-p", "--property", "-t", "--type", "-s", "--signal",
                            "--state", "-n", "--lines", "-o", "--output", "--root", "--kill-whom", "--what", "--job-mode"}
 SERVICE_GATED = {"stop", "restart", "reload", "force-reload", "try-restart", "condrestart"}
-PM2_GATED = {"stop", "delete", "del", "restart", "reload", "kill", "flush", "reset"}
-DOCKER_GATED = {"stop", "rm", "restart", "kill", "down", "update", "pause", "rmi", "prune"}
+PM2_GATED = {"stop", "delete", "del", "restart", "reload", "kill", "flush", "reset", "start", "scale", "resurrect"}
+DOCKER_GATED = {"stop", "rm", "restart", "kill", "down", "update", "pause", "rmi", "prune", "up", "run", "create",
+                "start", "unpause"}
 DELETE_CMDS = {"rm", "unlink", "shred", "rmdir", "srm", "trash", "trash-put", "gio"}
 MCP_OWN_SERVERS = re.compile(r"^(dashi-channel|gbrain-[\w-]+|agent-jobs)$")
 MCP_GATED_VERBS = {"update", "set", "delete", "remove", "disable", "enable", "configure", "edit", "patch", "toggle",
@@ -534,28 +554,46 @@ def _var_written(v: str, code: str) -> bool:
     v = re.escape(v)
     return bool(re.search(
         rf"\b{v}\s*\.\s*(write_text|write_bytes|unlink|rename|replace|rmdir|open\([^)]*['\"][wax+])"
-        rf"|open\(\s*{v}\s*,\s*['\"][wax+]|shutil\.\w+\([^)]*\b{v}\b|os\.(remove|replace|rename|unlink)\([^)]*\b{v}\b"
-        rf"|(writeFileSync|writeFile|appendFileSync|rmSync|unlinkSync|renameSync)\(\s*{v}\b", code))
+        rf"|open\(\s*{v}\s*,\s*['\"][wax+]|os\.(remove|replace|rename|unlink)\([^)]*\b{v}\b"
+        # copy: only the destination (2nd arg) is written; move/rmtree: either side changes
+        rf"|shutil\.(copy\w*)\([^,)]*,\s*{v}\b|shutil\.(move|rmtree)\([^)]*\b{v}\b"
+        rf"|(copyFileSync|copyFile|cpSync)\([^,)]*,\s*{v}\b"
+        rf"|(writeFileSync|writeFile|appendFileSync|rmSync|unlinkSync|renameSync|truncateSync)\(\s*{v}\b", code))
 
 
 def inline_reason(code: str, cwd: str | None) -> str | None:
     """Inline code (python -c, heredoc, node -e) writes a protected path or an existing file of the owner:
     the path literal on the same line as the write, or in a variable that is written."""
     for line in code.splitlines():
+        for m in INLINE_COPY.finditer(line):
+            moving = bool(re.search(r"move|rename|replace", m.group(0)))
+            dst, src = norm(m.group(7), cwd), norm(m.group(5), cwd)
+            if dst and re.search(r"copytree|cpSync|fs\.cp", m.group(0)):
+                r = tree_write_reason(dst)     # a tree lands INTO dst (dirs_exist_ok / recursive)
+                if r:
+                    return f"скрипт: {r}"
+            r = write_reason(dst) if dst else None
+            if not r and dst and os.path.isdir(dst) and src:
+                r = write_reason(os.path.join(dst, os.path.basename(src)))
+            if not r and moving and src:
+                r = delete_reason(src)
+            if r:
+                return f"скрипт: {r}"
+        line = INLINE_COPY.sub("", line)
         if INLINE_PATH.search(line) and INLINE_WRITE.search(line):
             return "скрипт пишет в правила/настройки/расписание агента"
         if INLINE_WRITE.search(line):
             for m in PATH_LIT.finditer(line):
                 p = norm(m.group(2), cwd)
-                r = (write_reason(p) or (delete_reason(p) if re.search(r"unlink|remove|rmtree|rmSync|fs\.rm", line)
-                                          else None)) if p else None
+                r = (write_reason(p) or (delete_reason(p) if INLINE_DELETE.search(line) else None)) if p else None
                 if r:
                     return f"скрипт: {r}"
     for m in PATH_ASSIGN.finditer(code):
         if not _var_written(m.group(1), code):
             continue
         p = norm(m.group(3), cwd)
-        r = write_reason(p) if p else None
+        # a dir held in a variable that is written to: whatever lands inside it is unknown, check the tree
+        r = (tree_write_reason(p) if os.path.isdir(p) else write_reason(p)) if p else None
         if r or (INLINE_PATH.search(m.group(3))):
             return f"скрипт: {r or 'пишет в правила/настройки агента'}"
     return None
@@ -655,8 +693,9 @@ def appends_only(tool: str, ti: dict, p: str) -> bool:
             after = after.replace(old, new, 1)
     else:
         return False
-    base = existing.rstrip("\n")
-    return after.startswith(base) and len(after) >= len(existing)
+    # the old text stays a prefix and the addition starts on a new line (no tail glued to the last rule)
+    return after.startswith(existing) and (existing == "" or existing.endswith("\n")
+                                           or after[len(existing):].startswith("\n") or after == existing)
 
 
 def mcp_reason(tool: str) -> str | None:
@@ -696,6 +735,7 @@ SECRET_RES = [
     (re.compile(r"(?<!\d)(\d{5,}):[A-Za-z0-9_-]{20,}"), r"\1:***"),
     (re.compile(r"(?i)(bearer\s+|basic\s+)[^\s'\"]+"), r"\1***"),
     (re.compile(r"(?i)((?:^|\s)(?:-u|--user|--proxy-user)(?:\s+|=)['\"]?)[^\s'\"]+"), r"\1***"),
+    (re.compile(r"((?:^|\s)['\"]?-u)(?![\s='\"])[^\s'\"]+"), r"\1***"),
     (re.compile(r"(?i)(://[^/\s:@'\"]+:)[^@\s/'\"]+@"), r"\1***@"),
     (re.compile(r"(?i)((?:api[_-]?key|token|secret|password|passwd|authorization)[\"']?\s*[:=]\s*[\"']?)[^\s\"'&]+"), r"\1***"),
     (re.compile(r"\b(sk|pk|rk|ghp|gho|xox[bp])[-_][A-Za-z0-9_-]{12,}"), r"\1-***"),
