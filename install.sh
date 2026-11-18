@@ -1407,9 +1407,13 @@ collect_auditor_input() {
 # value is never changed, a section that is not an object is left alone.
 # webhook on: the agents guard nudges through it and the fallback-reply Stop hook posts to it
 # (127.0.0.1 only, bearer TELEGRAM_WEBHOOK_TOKEN from channel.env).
+# permission_gate on: hooks/owner-gate.py asks the owner through it (Allow/Deny card, only the owner taps);
+# 180 s, the hook waits 170 s and is registered with a 200 s timeout.
 readonly CHANNEL_CONFIG_DEFAULTS=(
     "hud enabled false"
     "webhook enabled true"
+    "permission_gate enabled true"
+    "permission_gate timeout_ms 180000"
 )
 
 # _channel_config_merge <cfg> -- prints the merged JSON. rc 0 = changed,
@@ -3933,6 +3937,9 @@ _setup_plugin_hooks() {
             "^TELEGRAM_FALLBACK_REPLY_URL='http://127\\.0\\.0\\.1:[0-9]+/hooks/fallback-reply' $(_re_escape "${AGENT_HOME}/.bun/bin/bun") '$(_re_escape "${plugin_dir}/scripts/fallback-reply-hook.ts")'\$" || fail=1
         add_hook "$plugin_settings" SessionStart "" "python3 ${hooks}/learnings-engine.py ${ws} top" 10 || fail=1
         add_hook "$plugin_settings" PreCompact 'manual|auto' "bash ${hooks}/precompact-flush.sh ${agent}" 40 || fail=1
+        # The owner's bots, services, cron, files and the agent's own rules/settings: only after the owner's
+        # «Allow» tap (plugin permission_gate route). Waits up to 170 s, so the hook timeout is 200.
+        add_hook "$plugin_settings" PreToolUse 'Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*' "python3 ${hooks}/owner-gate.py ${agent}" 200 || fail=1
         # The owner's correction is recorded before the turn ends (correction-detector leaves the marker).
         add_hook "$plugin_settings" PostToolUse Bash "python3 ${hooks}/correction-closed.py clear ${ws}" 10 || fail=1
         add_hook "$plugin_settings" Stop "" "python3 ${hooks}/correction-closed.py stop ${ws}" 10 || fail=1

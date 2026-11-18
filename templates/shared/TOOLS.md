@@ -36,6 +36,7 @@ Restarting another agent's service is {{DOCTOR_NAME}}'s job. Your own service: `
 | `compact-open-items-reminder.py` | SessionStart | ~/.claude/settings.json |
 | `correction-detector.py`, `auto-recall.py`, `critical-check.py` | UserPromptSubmit | plugin/.claude/settings.json |
 | `fact-check-gate.py` | PreToolUse (reply, edit_message) | plugin/.claude/settings.json (main agent only) |
+| `owner-gate.py <agent>` | PreToolUse (Bash, Edit/Write, MCP) | plugin/.claude/settings.json: the owner's bots, services, cron, files and your own rules/settings wait for his «Allow» tap in Telegram |
 | `learnings-engine.py <ws> top` | SessionStart | plugin/.claude/settings.json |
 | `precompact-flush.sh <agent>` | PreCompact | plugin/.claude/settings.json |
 
