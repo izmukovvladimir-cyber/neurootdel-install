@@ -2011,7 +2011,14 @@ token = os.environ.get("CHANNEL_ENV_TOKEN", "").strip() or existing.get("TELEGRA
 if token and not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]{30,}", token):
     sys.exit("channel.env: TELEGRAM_BOT_TOKEN has an unexpected format")
 
-user_ids = csv(user_ids_new) or csv(existing.get("TELEGRAM_ALLOWED_USER_IDS", ""))
+old_ids = csv(existing.get("TELEGRAM_ALLOWED_USER_IDS", ""))
+new_ids_in = csv(user_ids_new)
+if new_ids_in and new_ids_in[0] in old_ids:
+    # Same owner re-running the installer (clean reinstall): keep everyone already
+    # allowed, owner first. A different owner id still replaces the list.
+    user_ids = new_ids_in + [u for u in old_ids if u not in new_ids_in]
+else:
+    user_ids = new_ids_in or old_ids
 for uid in user_ids:
     if not re.fullmatch(r"[0-9]+", uid):
         sys.exit(f"channel.env: user id {uid!r} is not a number")
