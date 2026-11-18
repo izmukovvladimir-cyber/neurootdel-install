@@ -122,6 +122,19 @@ at_paths_ok() {
     return 0
 }
 
+# solo_refs_ok <CLAUDE.md> <plugin dir> -- --solo: shared/team-rules.md exists and CLAUDE.md names it; learned
+# practices: the reference, when it is there, is named in CLAUDE.md by its path; without it the owner's copy
+# kept in rules/ (it loads every turn, no pointer needed).
+solo_refs_ok() {
+    local lp="${2}/.claude/learned-practices/learned-practices.md"
+    [[ -f "${H}/.claude-lab/shared/team-rules.md" ]] && grep -qF "shared/team-rules.md" "$1" 2>/dev/null || return 1
+    if [[ -f "$lp" ]]; then
+        grep -qF -e "${lp#"${H}/"}" -e "$lp" "$1" 2>/dev/null
+    else
+        [[ -f "${2}/.claude/rules/learned-practices.md" ]]
+    fi
+}
+
 # team_rules_linked <CLAUDE.md> -- a line of its own "@~/.claude-lab/shared/team-rules.md" (or the same
 # path written from the agent's home), outside fenced code blocks (an @ there is an example, not loaded). A CLAUDE.md "upgraded" by hand to an old template loses this line,
 # and with it rule zero, task closing and paid items; at_paths_ok cannot see a line that is gone.
@@ -223,12 +236,19 @@ check_channel_agent() {
     check "${label}: файлы по ссылкам @ из CLAUDE.md существуют (загружаются)" \
         "открой ${ws}/CLAUDE.md, найди строку с @ на несуществующий файл: верни файл или убери строку" \
         at_paths_ok "${ws}/CLAUDE.md"
-    check "${label}: правила команды подключены (@team-rules.md в CLAUDE.md)" \
-        "запусти установщик снова: он вернёт в ${ws}/CLAUDE.md строку @~/.claude-lab/shared/team-rules.md" \
-        team_rules_linked "${ws}/CLAUDE.md"
-    check "${label}: практики learned-practices подключены" \
-        "запусти установщик снова: он положит ${plugin}/.claude/rules/learned-practices.md" \
-        test -f "${plugin}/.claude/rules/learned-practices.md"
+    if [[ "${AGENT_MODE:-team}" == solo ]]; then
+        # --solo: team rules and learned practices are references (Read on demand), not loaded every turn.
+        check "${label}: справочники на месте (правила команды, learned-practices) и названы в CLAUDE.md" \
+            "запусти установщик снова с --solo: он положит справочники и строку-указатель в ${ws}/CLAUDE.md" \
+            solo_refs_ok "${ws}/CLAUDE.md" "$plugin"
+    else
+        check "${label}: правила команды подключены (@team-rules.md в CLAUDE.md)" \
+            "запусти установщик снова: он вернёт в ${ws}/CLAUDE.md строку @~/.claude-lab/shared/team-rules.md" \
+            team_rules_linked "${ws}/CLAUDE.md"
+        check "${label}: практики learned-practices подключены" \
+            "запусти установщик снова: он положит ${plugin}/.claude/rules/learned-practices.md" \
+            test -f "${plugin}/.claude/rules/learned-practices.md"
+    fi
     check "${label}: хуки включены (проверка фактов, ответ при сбое, сброс памяти перед сжатием)" \
         "запусти установщик снова: шаг хуков пишет ${plugin}/.claude/settings.json" \
         has_all "${plugin}/.claude/settings.json" fact-check-gate.py correction-detector.py fallback-reply-hook.ts precompact-flush.sh learnings-engine.py

@@ -2294,15 +2294,18 @@ _brief_line() {
     fi
 }
 
-# render_agent_claude_md <dst> -- the main agent's CLAUDE.md from the install data.
+# render_agent_claude_md <dst> -- the main agent's CLAUDE.md from the install data (--solo: the
+# solo template, no team and no code rules: the soul is the role).
 render_agent_claude_md() {
-    render_template "${TEMPLATES_DIR}/CLAUDE.md" "$1" \
+    local tpl="${TEMPLATES_DIR}/CLAUDE.md"
+    [[ "${SOLO:-0}" == "1" ]] && tpl="${TEMPLATES_DIR}/solo/CLAUDE.md"
+    render_template "$tpl" "$1" \
         AGENT_NAME "$MAIN_AGENT_NAME" \
         AGENT_ROLE "operator's daily AI assistant" \
         USER_NAME  "$OPERATOR_NAME" \
         LANGUAGE   "$OPERATOR_LANGUAGE" \
         TIMEZONE   "$OPERATOR_TIMEZONE" \
-        BRIEF_LINE "$(_brief_line)"
+        BRIEF_LINE "$([[ "${SOLO:-0}" == "1" && -z "$BRIEF_DIR" ]] || _brief_line)"
 }
 
 # _write_agent_workspace <wsroot> [jarvis|coder] -- lays down CLAUDE.md + core/ tree for
@@ -2396,7 +2399,12 @@ REOF
     printf '# MEMORY.md\n\nLong-term notes.\n' > "$stub_tmp"
     _write_if_absent "$stub_tmp" "${ws}/core/MEMORY.md" 0644
 
-    printf '# LEARNINGS.md\n\nOne line per correction.\n' > "$stub_tmp"
+    if [[ "$kind" != coder && "$SOLO" == "1" ]]; then
+        # One carrier for the owner's corrections in --solo: core/rules.md (owner-work rule 12).
+        printf '# LEARNINGS.md\n\nПоправки владельца сюда не пишутся: строкой в core/rules.md (правило 12).\n' > "$stub_tmp"
+    else
+        printf '# LEARNINGS.md\n\nOne line per correction.\n' > "$stub_tmp"
+    fi
     _write_if_absent "$stub_tmp" "${ws}/core/LEARNINGS.md" 0644
 
     printf '# recent.md -- full journal (NOT in @include)\n' > "$stub_tmp"
@@ -2532,6 +2540,9 @@ readonly STARTER_RULES_PROBE='Понял так'
 # supervisor = SUPERVISOR_TG_ID (empty -> its line is omitted). Ids are digits only.
 _starter_rules_block() {
     local src="${TEMPLATES_DIR}/AGENT-RULES-STARTER.md" owner="${TG_USER_ID:-}" sup="${SUPERVISOR_TG_ID:-}"
+    # --solo: rules 0 and 5-8 in the owner-work wording, no code rules 1-4 (a fresh file; an installed
+    # one is converted by _azv_fix starter).
+    [[ "${SOLO:-0}" == "1" ]] && src="${TEMPLATES_DIR}/solo/AGENT-RULES-STARTER.md"
     [[ -f "$src" ]] || die "Template not found: $src"
     [[ -z "$owner" || "$owner" =~ ^[0-9]+$ ]] || die "Telegram user ID must be a positive integer (got: ${owner})."
     [[ -z "$sup" || "$sup" =~ ^[0-9]+$ ]] || die "NEUROOTDEL_SUPERVISOR_TG_ID must be a positive integer (got: ${sup})."
@@ -2601,11 +2612,12 @@ _azv_fix() {
     local tpl="${TEMPLATES_DIR}/AGENT-RULES-OWNER-WORK.md"
     [[ -f "$tpl" ]] || die "Template not found: $tpl"
     python3 - "$1" "$2" "$3" "$tpl" "$STARTER_RULES_BEGIN" "$STARTER_RULES_END" \
-        "$OWNER_WORK_BEGIN" "$OWNER_WORK_END" "$OWNER_WORK_PROBE" "${TEMPLATES_DIR}/shared/team-rules.md" <<'PY3'
+        "$OWNER_WORK_BEGIN" "$OWNER_WORK_END" "$OWNER_WORK_PROBE" "${TEMPLATES_DIR}/shared/team-rules.md" \
+        "${TEMPLATES_DIR}/AGENT-RULES-STARTER.md" <<'PY3'
 import re
 import sys
 
-kind, inp, out, tpl, s_begin, s_end, o_begin, o_end, probe, team_tpl = sys.argv[1:11]
+kind, inp, out, tpl, s_begin, s_end, o_begin, o_end, probe, team_tpl, starter_tpl = sys.argv[1:12]
 with open(inp, encoding="utf-8", newline="") as fh:
     lines = fh.read().splitlines(keepends=True)
 
@@ -2628,6 +2640,22 @@ TEAM_ROUTE_NEW = [
 TEAM_CANCEL_PREFIX = "- Cancel: a new note with `--cancels <old slug>`"
 TEAM_SKILLS = "## Skills first"
 TEAM_CANCEL_NEW = "- Cancel: rewrite or delete that line in core/rules.md («отменяет X»).\n"
+# Rule 8 «Решаю сам» and the team «Thinking» line push the solo agent to decide and argue; the solo
+# texts say the same as rule 9: do what was asked, an idea is one line after the task.
+STARTER_R8 = "## 8. "
+SOLO_R8 = [
+    "## 8. Что решаешь сам\n",
+    "\n",
+    "- Внутри поручения сам решаешь, как его сделать: порядок шагов и как проверить. По таким мелочам\n",
+    "  владельца не дёргаешь.\n",
+    "- Что делать и что менять в его текстах и вещах, решает он (правило 9).\n",
+    "\n",
+]
+TEAM_THINK_FIRST = "- The owner's idea or plan: your own assessment, the better option, a factual argument. Agree only with a"
+TEAM_THINK_NEW = [
+    "- The owner's request: do exactly what was asked (rule 9). Your own idea is one line after the task,\n",
+    "  done only after «да».\n",
+]
 
 
 def eol(line: str) -> str:
@@ -2668,6 +2696,18 @@ if kind == "starter":
                 lines[i:i + 2] = [STARTER_TAIL[1] + eol(lines[i + 1])]
                 changed = True
                 break
+        # Rule 8 as the template wrote it (up to the «---» before the closing line) -> the solo rule 8.
+        with open(starter_tpl, encoding="utf-8") as fh:
+            st = fh.read().splitlines()
+        t8 = next((k for k, ln in enumerate(st) if ln.startswith(STARTER_R8)), None)
+        t8_end = None if t8 is None else next((k for k in range(t8 + 1, len(st)) if st[k] == "---"), None)
+        b, e = span(s_begin, s_end)
+        r8 = next((i for i in range(b + 1, e) if lines[i].startswith(STARTER_R8)), None)
+        if t8 is not None and t8_end is not None and r8 is not None:
+            part = st[t8:t8_end]
+            if r8 + len(part) < e and [bare(x) for x in lines[r8:r8 + len(part)]] == part:
+                lines[r8:r8 + len(part)] = SOLO_R8
+                changed = True
     text = "".join(lines)
     # Present = both markers, or pasted by hand: the rule-11 heading and every heading 9-13.
     marked = o_begin in text and o_end in text
@@ -2714,6 +2754,14 @@ elif kind == "team":
     skills = tpl_part(TEAM_SKILLS, lambda k, ln: ln.startswith("## "))
     route = tpl_part(TEAM_ROUTE_FIRST, lambda k, ln: bare(tl[k - 1]) == TEAM_ROUTE_LAST)
     cancel = tpl_part(TEAM_CANCEL_PREFIX, lambda k, ln: True)
+    think = tpl_part(TEAM_THINK_FIRST, lambda k, ln: not ln.startswith("  "))
+    t = next((i for i, ln in enumerate(lines) if bare(ln) == TEAM_THINK_FIRST), None)
+    if t is not None:
+        if exact_at(t, think):
+            lines[t:t + len(think)] = TEAM_THINK_NEW
+            changed = True
+        else:
+            print("team-rules: «Thinking» edited by the owner -- left as it is.", file=sys.stderr)
     h = next((i for i, ln in enumerate(lines) if bare(ln) == TEAM_SKILLS), None)
     if h is not None:
         if exact_at(h, skills):
@@ -3052,7 +3100,10 @@ SJEOF
         local tmp
         tmp=$(mktemp)
         TMPFILES+=("$tmp")
-        render_template "${TEMPLATES_DIR}/global-CLAUDE.md" "$tmp" \
+        local gtpl="${TEMPLATES_DIR}/global-CLAUDE.md"
+        # --solo: a short owner-work global; the team one stays on disk as a reference (install_team_refs).
+        [[ "$SOLO" == "1" ]] && gtpl="${TEMPLATES_DIR}/solo/global-CLAUDE.md"
+        render_template "$gtpl" "$tmp" \
             USER       "$AGENT_USER" \
             USER_NAME  "$OPERATOR_NAME" \
             TG_ID      "$TG_USER_ID" \
@@ -3684,6 +3735,16 @@ render_guard_conf() {
     fstyle=$(_gate_conf_pick "$existing" FACT_GATE_STYLE_BANNED)
     ftstd=$(_gate_conf_pick "$existing" FACT_GATE_TEXT_STANDARD)
     [[ -z "$ftstd" || "$ftstd" =~ ^[01]$ ]] || { warn "FACT_GATE_TEXT_STANDARD '${ftstd}' is not 0 or 1 -- left on."; ftstd=""; }
+    # --solo: one personal agent; the hooks read AGENT_MODE (lighter fact check, the read-whole-message line
+    # instead of «не соглашайся»). A solo server keeps it on a re-run without the flag. The text standard is
+    # off by default there: its checklist starts empty and no solo text tells the agent about it.
+    local amode=team
+    if [[ "$SOLO" == "1" || "$(_guard_conf_get "$existing" AGENT_MODE)" == solo ]]; then
+        amode=solo
+        if [[ -z "$ftstd" ]] && ! _env_is_set FACT_GATE_TEXT_STANDARD && ! _guard_conf_has "$existing" FACT_GATE_TEXT_STANDARD; then
+            ftstd=0
+        fi
+    fi
     # The stage never goes back: a workshop re-run on an intensive server keeps Coder and Auditor checked.
     stage="${STAGE:-workshop}"
     [[ "$(_guard_conf_get "$existing" INSTALL_STAGE)" == intensive ]] && stage=intensive
@@ -3720,8 +3781,10 @@ render_guard_conf() {
 #                ready-post exception off, the gate makes no network calls);
 #   CHIP_ENV     file with CHIP_API_TOKEN=... readable by the agent (needed with CHIP_URL);
 #   STYLE_BANNED optional comma-separated banned words, «word*» = stem (empty = no style check);
-#   TEXT_STANDARD 1 (default) = a finished text for people («Текст поста:» + the piece) is denied until
-#                checklists/text-standard.md was Read in the turn; 0 = off.
+#   TEXT_STANDARD 1 (default; --solo: 0) = a finished text for people («Текст поста:» + the piece) is denied
+#                until checklists/text-standard.md was Read in the turn; 0 = off.
+# AGENT_MODE: team, or solo (--solo, kept on re-run): fact-check-gate.py checks lighter, critical-check.py
+#   asks to read the whole message and do what was asked instead of «не соглашайся».
 # INSTALL_STAGE: workshop (Jarvis + Richard) or intensive (+ Coder + Auditor), what verify-stage.sh checks;
 # SKILLS_EXPECTED: skills the installer gives each channel agent (verify-stage.sh counts them).
 # CORRECTION_GROUP_CHAT_IDS: groups (-100...) where the owner's messages are caught as corrections by
@@ -3755,6 +3818,7 @@ FACT_GATE_CHIP_URL="$(_guard_conf_value "$furl")"
 FACT_GATE_CHIP_ENV="$(_guard_conf_value "$fenv")"
 FACT_GATE_STYLE_BANNED="$(_guard_conf_value "$fstyle")"
 FACT_GATE_TEXT_STANDARD="${ftstd:-1}"
+AGENT_MODE="${amode}"
 INSTALL_STAGE="${stage}"
 SKILLS_EXPECTED="$(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))"
 CORRECTION_GROUP_CHAT_IDS="$(_guard_conf_value "$cgroups")"
@@ -4440,14 +4504,46 @@ PY2
 # Written only when missing: the owner's edits survive every re-run. Richard is not covered: his
 # claude runs in the home dir, whose .claude/rules is ~/.claude/rules, loaded by every agent of
 # this user, so a copy there would load twice into Jarvis and Coder.
+# --solo: the main file is a reference too (learned-practices/learned-practices.md, Read on demand, the
+# pointer is in the agent's CLAUDE.md): it is written for agents that code and work in a team. A copy an
+# earlier install put into rules/ is moved there when it is still the template; an edited one stays.
 _install_learned_practices() {
-    local base="${1}/.claude" tdir="${TEMPLATES_DIR}" fail=0
+    local base="${1}/.claude" tdir="${TEMPLATES_DIR}" fail=0 main
     as_agent mkdir -p "${base}/rules" "${base}/learned-practices" \
         || { warn "Could not create ${base}/rules as ${AGENT_USER}."; return 1; }
-    _agent_write "${tdir}/rules/learned-practices.md" "${base}/rules/learned-practices.md" 0644 1 || fail=1
+    main="${base}/rules/learned-practices.md"
+    if [[ "$SOLO" == "1" ]]; then
+        main="${base}/learned-practices/learned-practices.md"
+        _retire_solo_rules_copy "${base}/rules/learned-practices.md" "${tdir}/rules/learned-practices.md" "$main"
+        # The owner's edited copy stayed in rules/: it is the one in use, no second copy next to it.
+        [[ -e "${base}/rules/learned-practices.md" || -L "${base}/rules/learned-practices.md" ]] && main=""
+    fi
+    if [[ -n "$main" ]]; then
+        _agent_write "${tdir}/rules/learned-practices.md" "$main" 0644 1 || fail=1
+    fi
     _agent_write "${tdir}/learned-practices/learned-practices-more.md" \
         "${base}/learned-practices/learned-practices-more.md" 0644 1 || fail=1
     return "$fail"
+}
+
+# _retire_solo_rules_copy <loaded copy> <template> <reference path> -- --solo: a file an earlier install
+# put where every turn loads it moves to its reference path, only when it is still the template and the
+# reference name is free. Anything else stays (warning, no failure): the owner's text is never dropped.
+_retire_solo_rules_copy() {
+    local src=$1 tpl=$2 dst=$3
+    [[ -e "$src" || -L "$src" ]] || return 0
+    if [[ -L "$src" ]] || ! cmp -s "$src" "$tpl"; then
+        warn "${src} differs from the template (owner's) -- left in place; it loads on every turn."
+        return 0
+    fi
+    if [[ -e "$dst" || -L "$dst" ]]; then
+        warn "${dst} already exists -- ${src} left in place."
+        return 0
+    fi
+    if ! as_agent mv -n -- "$src" "$dst" || [[ -e "$src" ]]; then
+        warn "Could not move ${src} to ${dst} -- it still loads on every turn."
+    fi
+    return 0
 }
 
 # _install_code_rules <plugin_dir> -- code style rules (bash/python/typescript.md) as project rules
@@ -4503,7 +4599,9 @@ _install_memory_layout() {
         || { warn "lessons-index-tools.md missing or empty -- memory layout skipped."; return 1; }
     tmp=$(mktemp) || return 1
     TMPFILES+=("$tmp")
-    render_template "${tdir}/memory/MEMORY.md" "$tmp" TAG "$INSTALL_TAG" \
+    local mem_tpl="${tdir}/memory/MEMORY.md"
+    [[ "$SOLO" == "1" ]] && mem_tpl="${tdir}/solo/MEMORY.md"
+    render_template "$mem_tpl" "$tmp" TAG "$INSTALL_TAG" \
         && _agent_write "$tmp" "${mem}/MEMORY.md" 0644 1 || fail=1
     for f in index-work index-people index-content; do
         _agent_write "${tdir}/memory/${f}.md" "${mem}/${f}.md" 0644 1 || fail=1
@@ -4514,8 +4612,34 @@ _install_memory_layout() {
         [[ -f "$f" ]] || continue
         _agent_write "$f" "${mem}/${f##*/}" 0644 1 || fail=1
     done
-    _ensure_marked_block "${mem}/MEMORY.md" memory-lessons "$idx" || fail=1
+    if [[ "$SOLO" == "1" ]]; then
+        # --solo: the starter lessons are developers' experience; their index goes to index-infra.md (read on
+        # demand, named in MEMORY.md), the block in MEMORY.md (every turn) stays empty.
+        _ensure_marked_block "${mem}/MEMORY.md" memory-lessons "" || fail=1
+        _ensure_marked_block "${mem}/index-infra.md" memory-lessons "$idx" || fail=1
+    else
+        _ensure_marked_block "${mem}/MEMORY.md" memory-lessons "$idx" || fail=1
+    fi
     _ensure_marked_block "${mem}/index-infra.md" memory-lessons-tools "$tidx" || fail=1
+    return "$fail"
+}
+
+# _install_solo_refs <shared dir> -- --solo: the team global stays on disk as a reference
+# (shared/GLOBAL-TEAM-RULES.md, written when missing, its first line says it yields to the solo texts);
+# the pointer to it is in the team-rules block of the agent's CLAUDE.md.
+_install_solo_refs() {
+    local shared=$1 tmp body ref="${1}/GLOBAL-TEAM-RULES.md" fail=0
+    tmp=$(mktemp)
+    body=$(mktemp)
+    TMPFILES+=("$tmp" "$body")
+    render_template "${TEMPLATES_DIR}/global-CLAUDE.md" "$body" \
+        USER "$AGENT_USER" USER_NAME "$OPERATOR_NAME" TG_ID "$TG_USER_ID" \
+        LANGUAGE "$OPERATOR_LANGUAGE" TIMEZONE "$OPERATOR_TIMEZONE"
+    {
+        printf '%s\n\n' "> Справочник, каждым ходом не грузится. Где он спорит с ~/.claude/CLAUDE.md (правила 9-13) или с душой агента, правы они; поправки владельца пишутся в core/rules.md."
+        cat -- "$body"
+    } > "$tmp" || fail=1
+    _agent_write "$tmp" "$ref" 0644 1 || fail=1
     return "$fail"
 }
 
@@ -4564,7 +4688,29 @@ install_team_refs() {
     _install_memory_layout "$mem_dir" || fail=1
     _agent_write "${tdir}/memory/library-INDEX.md" "${ws}/library/INDEX.md" 0644 1 || fail=1
 
-    _ensure_marked_block "${ws}/CLAUDE.md" team-rules "@~/.claude-lab/shared/team-rules.md" || fail=1
+    # --solo: one agent and no programmers; the team rules, the root request memo and the team global are
+    # references (Read on demand), one pointer line each in the agent's CLAUDE.md, never an @ (every turn).
+    local team_line="@~/.claude-lab/shared/team-rules.md"
+    local root_line="@~/.claude-lab/shared/TOOLS-root-requests.md"
+    if [[ "$SOLO" == "1" ]]; then
+        # Laid down first: the pointer names the reference only when it is there (an owner-edited copy kept
+        # in rules/ loads every turn and needs no pointer).
+        _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+        local lp_line=""
+        if [[ -f "${ws}/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md" ]]; then
+            # shellcheck disable=SC2088  # a path for the agent to read, ~ stays literal
+            lp_line=$'\n'"- опыт других агентов: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"
+        fi
+        # shellcheck disable=SC2088  # paths for the agent to read, ~ stays literal
+        team_line="Справочники (Read, когда задача про это):
+- код, git, сервер: ~/.claude-lab/shared/GLOBAL-TEAM-RULES.md${lp_line}
+- команда агентов (если появится второй): ~/.claude-lab/shared/team-rules.md"
+        root_line="- заявка на действие с правами root: ~/.claude-lab/shared/TOOLS-root-requests.md"
+    fi
+    if [[ "$SOLO" == "1" ]]; then
+        _install_solo_refs "$shared" || fail=1
+    fi
+    _ensure_marked_block "${ws}/CLAUDE.md" team-rules "$team_line" || fail=1
     _dedup_red_secrets_rule "${ws}/CLAUDE.md" || fail=1
 
     # Root request carrier memo (managed): how to ask for a privileged action, @ in each channel agent.
@@ -4572,7 +4718,7 @@ install_team_refs() {
     TMPFILES+=("$tmp")
     render_template "${tdir}/shared/TOOLS-root-requests.md" "$tmp" LIB "$GUARD_LIB_DIR" USER "$AGENT_USER"
     _agent_write "$tmp" "${shared}/TOOLS-root-requests.md" 0644 0 || fail=1
-    _ensure_marked_block "${ws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
+    _ensure_marked_block "${ws}/CLAUDE.md" root-requests "$root_line" || fail=1
 
     # Editorial loop (codex-check skill + text-critics.sh): settings OFF until the owner logs into
     # Codex, and an empty text standard. Both written only when missing: the owner's from then on.
@@ -4599,7 +4745,9 @@ install_team_refs() {
         _ensure_marked_block "${cws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
     fi
 
-    _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+    if [[ "$SOLO" != "1" ]]; then
+        _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+    fi
     if [[ "$CODER_INSTALLED" == "1" ]]; then
         _install_learned_practices "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1
         _install_code_rules "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1
@@ -4781,8 +4929,14 @@ report_claude_plan() {
     plan=${plan//[^A-Za-z0-9_.-]/}
     case "${plan,,}" in
         pro)
-            warn "Claude account plan: pro -- too small for agents that work all day: the usage limit"
-            warn "  stops them for hours. Use Max (max) for this server." ;;
+            if [[ "${SOLO:-0}" == "1" ]]; then
+                # One personal agent («Агент за вечер») is sold for Pro: no «too small», only when to move up.
+                ok "Claude account plan: pro -- enough for one personal agent on a normal day; if the limit"
+                ok "  stops it often, move to Max."
+            else
+                warn "Claude account plan: pro -- too small for agents that work all day: the usage limit"
+                warn "  stops them for hours. Use Max (max) for this server."
+            fi ;;
         "")
             warn "Claude account plan: unknown" ;;
         *)
@@ -4904,7 +5058,7 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         sudo -u ${AGENT_USER} -i bash -lc 'claude auth login'
 
       Credentials land in ${AGENT_HOME}/.claude/ and are shared by both agents.
-      Check the plan (must not be "pro"): sudo -u ${AGENT_USER} jq -r .claudeAiOauth.subscriptionType ${AGENT_HOME}/.claude/.credentials.json
+      Check the plan$([[ "$SOLO" == "1" ]] && echo " (pro is enough for one agent; Max if the limit stops it often)" || echo ' (must not be "pro")'): sudo -u ${AGENT_USER} jq -r .claudeAiOauth.subscriptionType ${AGENT_HOME}/.claude/.credentials.json
 
   $(printf '%b' "$C_YELLOW")2.$(printf '%b' "$C_NC") If tokens were skipped during install, fill them now and restart:
 

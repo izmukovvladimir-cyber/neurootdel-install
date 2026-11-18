@@ -347,6 +347,54 @@ def conf_cases() -> list[tuple[str, bool]]:
     ]
 
 
+def solo_cases() -> list[tuple[str, bool]]:
+    """guard.conf AGENT_MODE=solo: lighter fact check; the team gate (g) is unchanged on the same input."""
+    solo = load(BASE_CONF + 'AGENT_MODE="solo"\n')
+    os.environ["NEUROOTDEL_GUARD_CONF"] = "/nonexistent/guard.conf"
+
+    def run(mod, text: str, build) -> str | None:
+        d = Path(tempfile.mkdtemp())
+        t = Transcript(d)
+        build(t)
+        return mod.decide(payload(text, OWNER, t.save()), 0, d / "s")
+
+    def read_first(t: Transcript) -> None:
+        t.prompt_msg("p1").call("Read", {"file_path": "/x/core/USER.md"}, "Встреча с Анной в 15:00")
+
+    def read_earlier_turn(t: Transcript) -> None:
+        t.prompt_msg("p0").call("Read", {"file_path": "/x/core/USER.md"}, "Встреча с Анной в 15:00")
+        t.prompt_msg("p1")
+
+    def no_read(t: Transcript) -> None:
+        t.prompt_msg("p1")
+
+    def timed(build) -> str:
+        t = Timed(Path(tempfile.mkdtemp()))
+        build(t)
+        return t.save()
+
+    long_plain = "Записал в правила: пишу коротко, без эмодзи и без длинных вступлений, как ты просила. " * 4
+    denied = lambda r: r is not None and g.FACT_MARK in r  # noqa: E731
+    return [
+        ("solo: mode read from guard.conf", solo.SOLO and not g.SOLO),
+        ("solo: a status word alone is not a fact text", run(solo, "Готово, записал в правила.", no_read) is None),
+        ("team: the same status word is still checked", denied(run(g, "Готово, записал в правила.", no_read))),
+        ("solo: length alone is not a fact text", run(solo, long_plain, no_read) is None),
+        ("team: the same long text is still checked", denied(run(g, long_plain, no_read))),
+        ("solo: a digit with no read in the turn is denied", denied(run(solo, "Встреча в 15:00.", no_read))),
+        ("solo: a read in this turn before the first attempt counts",
+         run(solo, "Встреча в 15:00.", read_first) is None),
+        ("team: a read before the first attempt still does not count",
+         denied(run(g, "Встреча в 15:00.", read_first))),
+        ("solo: a read in the previous turn does not count",
+         denied(run(solo, "Встреча в 15:00.", read_earlier_turn))),
+        ("solo: a news claim is still checked", denied(run(solo, NEWS, no_read))),
+        ("solo: a read in the previous turn inside the time window does not count",
+         denied(solo.decide(payload("Встреча в 15:00.", OWNER, timed(lambda t: t.incoming("p0", 0).call(
+             10, "Read", {"file_path": "/x/core/USER.md"}).incoming("p1", 40))), at(45), Path(tempfile.mkdtemp())))),
+    ]
+
+
 def run() -> int:
     fails = 0
     base = Path(tempfile.mkdtemp())
@@ -881,6 +929,7 @@ def run() -> int:
                                                                     "Варианты заголовка:" + STD_LIST[STD_LIST.index("\n\n"):]))),
     ]
     cases += conf_cases()
+    cases += solo_cases()
     for name, ok in cases:
         print(("ok  " if ok else "FAIL") + " " + name)
         fails += not ok
