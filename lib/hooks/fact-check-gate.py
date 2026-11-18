@@ -33,6 +33,11 @@ accounts), FACT_GATE_CHIP_URL + FACT_GATE_CHIP_ENV (optional Telegram user-accou
    touched. No transcript: no deny (the gate never wedges a reply). Known limit: a piece sent bare, without an intro,
    is not seen.
 
+guard.conf AGENT_MODE=solo («Агент за вечер», one personal agent): the fact check is lighter, the rest is as above.
+A reply is a fact text only by a digit, a news claim or a «can't» claim (status words and length alone do not
+count), and a source read in this turn BEFORE the first attempt counts too: an agent that looked first is not sent
+round again. Without the key (the team install) nothing changes.
+
 An edit (chat_id, message_id, text) is checked exactly like a reply, and a deny of a reply or of an edit with the
 same chat+text is the same deny (the hash ignores the tool).
 
@@ -104,6 +109,8 @@ CHIP_URL = _chip_url(_RAW.get("FACT_GATE_CHIP_URL", ""))
 CHIP_ENV = _chip_env(_RAW.get("FACT_GATE_CHIP_ENV", ""))
 STYLE_RE = build_style_re(_RAW.get("FACT_GATE_STYLE_BANNED", ""))
 TEXT_STD_ON = _RAW.get("FACT_GATE_TEXT_STANDARD", "1").strip() != "0"
+SOLO = _RAW.get("AGENT_MODE", "").strip() == "solo"
+DIGIT_RE = re.compile(r"\d")
 LOG_TZ = _CONF.owner_timezone
 
 FALLBACK_SEC = 1800
@@ -688,6 +695,47 @@ def turn_state(entries: list[dict], chat: str, h: str, text: str = "",
     [now - WINDOW_SEC, now] (an incoming message does not wipe a deny and the read after it). Without `now`, or
     for a line without a timestamp, only the current promptId counts.
     """
+    calls = _turn_calls(entries, now)
+    if calls is None:
+        return None
+    uses, results = calls
+    last_deny = None
+    last_chat_deny = None
+    for i_res, uid, err, c in results:
+        u = uses.get(uid)
+        if not u or not err or FACT_MARK not in c or not u[1].startswith("mcp__dashi-channel__"):
+            continue
+        if str(u[2].get("chat_id", "")) != chat:
+            continue
+        if similar(text, str(u[2].get("text", ""))):
+            last_chat_deny = i_res if last_chat_deny is None else max(last_chat_deny, i_res)
+        if text_hash(chat, str(u[2].get("text", ""))) == h:
+            last_deny = i_res if last_deny is None else max(last_deny, i_res)
+
+    return (last_deny is not None, _read_after(uses, results, last_deny),
+            _read_after(uses, results, last_chat_deny))
+
+
+def _read_after(uses: dict, results: list, idx: int | None) -> bool:
+    """A successful source read whose tool_use comes after transcript line idx (None = never)."""
+    if idx is None:
+        return False
+    for _, uid, err, c in results:
+        u = uses.get(uid)
+        if u and not err and u[0] > idx and is_read_call(u[1], u[2]) and read_succeeded(u[1], u[2], c):
+            return True
+    return False
+
+
+def read_in_turn(entries: list[dict]) -> bool:
+    """Solo: a source was read anywhere in the current turn (its promptId only, not the WINDOW_SEC tail of the
+    previous one), before the first attempt too."""
+    calls = _turn_calls(entries, None)
+    return calls is not None and _read_after(calls[0], calls[1], -1)
+
+
+def _turn_calls(entries: list[dict], now: float | None) -> tuple[dict, list] | None:
+    """The tool_use calls of the transcript and the tool results of the current turn, None if no turn."""
     prompt_id = None
     for d in reversed(entries):
         if d.get("type") == "user" and d.get("promptId"):
@@ -718,29 +766,7 @@ def turn_state(entries: list[dict], chat: str, h: str, text: str = "",
                 if isinstance(c, list):
                     c = " ".join(str(x.get("text", "")) for x in c if isinstance(x, dict))
                 results.append((i, str(b.get("tool_use_id")), bool(b.get("is_error")), str(c)))
-    last_deny = None
-    last_chat_deny = None
-    for i_res, uid, err, c in results:
-        u = uses.get(uid)
-        if not u or not err or FACT_MARK not in c or not u[1].startswith("mcp__dashi-channel__"):
-            continue
-        if str(u[2].get("chat_id", "")) != chat:
-            continue
-        if similar(text, str(u[2].get("text", ""))):
-            last_chat_deny = i_res if last_chat_deny is None else max(last_chat_deny, i_res)
-        if text_hash(chat, str(u[2].get("text", ""))) == h:
-            last_deny = i_res if last_deny is None else max(last_deny, i_res)
-
-    def read_after(idx: int | None) -> bool:
-        if idx is None:
-            return False
-        for _, uid, err, c in results:
-            u = uses.get(uid)
-            if u and not err and u[0] > idx and is_read_call(u[1], u[2]) and read_succeeded(u[1], u[2], c):
-                return True
-        return False
-
-    return (last_deny is not None, read_after(last_deny), read_after(last_chat_deny))
+    return uses, results
 
 
 def fallback_decide(state_dir: Path, session: str, chat: str, h: str, now: float) -> str | None:
@@ -774,8 +800,11 @@ def fact_decide(payload: dict, now: float, state_dir: Path,
     if chat != OWNER_CHAT and not chat.startswith("-"):
         return None, "fact:skip-chat"
     text = str(args.get("text", ""))
-    if not (STATUS_RE.search(text) or CANT_RE.search(text) or NEWS_RE.search(text)
-            or len(text.strip()) >= LONG_FACT_CHARS):
+    if SOLO:
+        if not (DIGIT_RE.search(text) or CANT_RE.search(text) or NEWS_RE.search(text)):
+            return None, "fact:no-fact"
+    elif not (STATUS_RE.search(text) or CANT_RE.search(text) or NEWS_RE.search(text)
+              or len(text.strip()) >= LONG_FACT_CHARS):
         return None, "fact:no-fact"
     h = text_hash(chat, text)
     tp = payload.get("transcript_path")
@@ -797,6 +826,8 @@ def fact_decide(payload: dict, now: float, state_dir: Path,
         return REPEAT_REASON, "fact:deny-repeat-unread"
     if read_after_chat_deny:
         return None, "fact:pass-changed-after-read"
+    if SOLO and read_in_turn(entries):
+        return None, "fact:pass-solo-read-in-turn"
     return FACT_REASON, "fact:deny-new"
 
 
