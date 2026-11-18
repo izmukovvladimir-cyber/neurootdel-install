@@ -312,6 +312,32 @@ check "held: cd into the owner's dir, then python" held "$(bash_p "cd ${H}/bots/
 check "pass: python relative write in work"      passes "$(bash_p "cd ${WS}/work && python3 -c \"open('out.txt','w').write('x')\"")"
 check "pass: python encoding literal is no path" passes "$(bash_p "python3 -c \"open('/tmp/x.txt','w', encoding='utf-8').write('x')\"" "${H}/bots/admin")"
 
+# --- Codex r4: cp -t, tree copies into the owner's dirs or over a nested CLAUDE.md, every interpreter run --
+mkdir -p "${WS}/work/project"; printf 'x\n' >"${WS}/work/project/CLAUDE.md"
+check "held: cp -a -t workspace"                 held "$(bash_p "cp -a -t ${WS} ${TDIR}/restore/.")"
+check "held: cp --target-directory= workspace"   held "$(bash_p "cp -r --target-directory=${WS} ${TDIR}/restore/.")"
+check "held: cp -a contents into the owner's bot dir" held "$(bash_p "cp -a ${TDIR}/restore/. ${H}/bots/admin/")"
+check "held: cp -r over a nested CLAUDE.md in work" held "$(bash_p "cp -r ${TDIR}/restore/. ${WS}/work/project/")"
+check "pass: cp -t into a work subdir"           passes "$(bash_p "cp -t ${WS}/work/sub ${TDIR}/restore/sub")"
+check "held: second python after cd"             held "$(bash_p "python3 -c 'print(1)'
+cd ${H}/bots/admin
+python3 -c \"open('config.py','w').write('AI=False')\"")"
+
+# --- Codex r5: cp -T, removing a parent of a nested CLAUDE.md, links to the owner's dirs, incomplete scans --
+check "held: cp -aT over a dir with nested CLAUDE.md" held "$(bash_p "cp -aT ${TDIR}/restore ${WS}/work/project")"
+check "held: rm -rf of a dir with nested CLAUDE.md"  held "$(bash_p "rm -rf ${WS}/work/project")"
+check "held: mv away a dir with nested CLAUDE.md"    held "$(bash_p "mv ${WS}/work/project /tmp/archive")"
+ln -sfn "${H}/bots/admin" "${WS}/work/admin-link"
+check "held: cp -a into a link to the owner's dir"   held "$(bash_p "cp -a ${TDIR}/restore/. ${WS}/work/admin-link/")"
+mkdir -p "${WS}/work/linkhost"; ln -sfn "${H}/bots/admin" "${WS}/work/linkhost/inner"
+check "held: cp -r over a tree holding such a link"  held "$(bash_p "cp -r ${TDIR}/restore/. ${WS}/work/linkhost/")"
+mkdir -p "${WS}/work/big"; python3 -c "import os,sys; [open(os.path.join(sys.argv[1], f'f{i}'), 'w').close() for i in range(50010)]" "${WS}/work/big"
+check "held: tree too big to check fully"            held "$(bash_p "cp -r ${TDIR}/restore/. ${WS}/work/big/")"
+rm -rf "${WS:?}/work/big"
+mkdir -p "${WS}/work/nm/node_modules/x"; printf 'x\n' >"${WS}/work/nm/node_modules/x/CLAUDE.md"
+check "pass: rm -rf of a build tree (node_modules skipped)" passes "$(bash_p "rm -rf ${WS}/work/nm")"
+check "pass: rm -rf of a plain work subdir still free" passes "$(bash_p "rm -rf ${WS}/work/sub")"
+
 # CLAUDE_CONFIG_DIR: the agent's config dir under another name is the same as ~/.claude
 CCD="${H}/.claude-alt"; mkdir -p "${CCD}/projects/p/memory"
 gate_ccd() { local r=0; printf '%s' "$1" | CLAUDE_CONFIG_DIR="$CCD" python3 "$GATE" jarvis >/dev/null 2>&1 || r=$?; echo "$r"; }

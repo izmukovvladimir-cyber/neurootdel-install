@@ -223,6 +223,57 @@ def protected_paths() -> list[str]:
     return [x for x in out if os.path.lexists(x)]
 
 
+TREE_SCAN_LIMIT = 50000
+# never hold rules or settings the agent loads; skipped so a big build tree does not exhaust the scan
+TREE_SKIP_DIRS = {"node_modules", ".git", ".venv", "venv", "__pycache__", ".cache", "dist", "build", ".next"}
+
+
+def scan_tree(root: str, writing: bool) -> str | None:
+    """Walk an existing dir that a recursive copy/remove/move touches. Held: a protected file anywhere below
+    (also a nested CLAUDE.md); for a write also a link whose real target is protected or outside the work
+    dirs. An incomplete walk (too big, unreadable) is held too: unchecked is not allowed."""
+    errors: list[OSError] = []
+    seen = 0
+    for cur, dirs, files in os.walk(root, onerror=errors.append):
+        dirs[:] = [d for d in dirs if d not in TREE_SKIP_DIRS]
+        for name in dirs + files:
+            seen += 1
+            path = os.path.join(cur, name)
+            r = file_reason(path)
+            if r:
+                return f"каталог, в котором {r}"
+            if writing and os.path.islink(path):
+                real = os.path.realpath(path)
+                r = file_reason(real)
+                if r:
+                    return f"каталог со ссылкой на {r}"
+                if not in_work_dir(real) and os.path.exists(real):
+                    return f"каталог со ссылкой на папку владельца вне рабочей папки ({real})"
+        if seen > TREE_SCAN_LIMIT:
+            return f"каталог слишком большой для проверки ({root})"
+    if errors:
+        return f"каталог не удалось проверить целиком ({root})"
+    return None
+
+
+def tree_write_reason(land: str) -> str | None:
+    """A tree copied into `land` may overwrite anything inside it: protected files anywhere below
+    (also a nested CLAUDE.md), or, outside the agent's work dirs, the owner's existing files."""
+    for prot in protected_paths():
+        if under(prot, land):
+            return f"запись поверх каталога, в котором {file_reason(prot) or 'свои настройки'}"
+    real = os.path.realpath(land)
+    r = file_reason(land) or file_reason(real)
+    if r:
+        return f"запись в {r}"
+    if not os.path.isdir(real):
+        return write_reason(land)
+    if not in_work_dir(land) or not in_work_dir(real):
+        return f"запись поверх папки владельца вне рабочей папки ({real})"
+    r = scan_tree(real, writing=True)
+    return f"запись поверх: {r}" if r else None
+
+
 def delete_reason(p: str) -> str | None:
     r = file_reason(p) or file_reason(bd.via_links(p))
     if r:
@@ -233,6 +284,11 @@ def delete_reason(p: str) -> str | None:
             return f"удаление каталога, в котором {r}"
     if not in_work_dir(p):
         return f"удаление файлов владельца вне рабочей папки ({p})"
+    # a nested CLAUDE.md / settings in a dir of HOME (the only place the agent loads them from)
+    if under(p, HOME) and os.path.isdir(p) and not os.path.islink(p):
+        r = scan_tree(p, writing=False)
+        if r:
+            return f"удаление: {r}"
     return None
 
 
@@ -410,11 +466,23 @@ def simple_reason(words: list[str], cwd: str | None) -> str | None:
         elif base == "dd":
             targets = [(a[3:], False) for a in args if a.startswith("of=")]
         elif base in {"mv", "cp", "install", "ln", "rsync"}:
+            tdir = None
+            for k, a in enumerate(args):
+                if a in {"-t", "--target-directory"} and k + 1 < len(args):
+                    tdir = args[k + 1]
+                elif a.startswith("--target-directory="):
+                    tdir = a.split("=", 1)[1]
+                elif re.fullmatch(r"-[a-zA-Z]*t.+", a) and base != "rsync":
+                    tdir = a[a.index("t") + 1:]
+            if tdir is not None:
+                ops = [o for o in ops if o != tdir] + [tdir.rstrip("/") + "/"]
             if ops:
                 dest = ops[-1]
                 targets.append((dest, False))
                 pd = norm(dest, cwd)
-                into_dir = pd is not None and (dest.endswith("/") or os.path.isdir(pd))
+                no_target_dir = any(a in {"-T", "--no-target-directory"} or re.fullmatch(r"-[a-zA-Z]*T[a-zA-Z]*", a)
+                                    for a in args) and base != "rsync"
+                into_dir = pd is not None and not no_target_dir and (dest.endswith("/") or os.path.isdir(pd))
                 if into_dir:
                     for src in ops[:-1]:
                         targets.append((os.path.join(pd, os.path.basename(src.rstrip("/"))), False))
@@ -426,9 +494,9 @@ def simple_reason(words: list[str], cwd: str | None) -> str | None:
                         pd if base == "rsync" or src.endswith(("/", "/.")) else
                         os.path.join(pd, os.path.basename(src.rstrip("/"))) for src in ops[:-1]]
                     for land in lands:
-                        for prot in protected_paths():
-                            if under(prot, land):
-                                return f"запись поверх каталога, в котором {file_reason(prot) or 'свои настройки'}"
+                        r = tree_write_reason(land)
+                        if r:
+                            return r
                 if base == "mv":
                     for src in ops[:-1]:
                         p = norm(src, cwd)
@@ -512,7 +580,6 @@ def bash_reason(cmd: str, cwd: str | None, depth: int = 0) -> str | None:
     if tokens is None:
         tokens = cmd.split()
     names = {os.path.basename(t) for t in tokens}
-    inline_done = not names & INTERPRETERS
     i, n = 0, len(tokens)
     cur = cwd
     while i < n:
@@ -525,9 +592,8 @@ def bash_reason(cmd: str, cwd: str | None, depth: int = 0) -> str | None:
             if os.path.basename(c) == "cd":
                 dest = next((x for x in a if not x.startswith("-")), HOME)
                 cur = norm(dest, cur) or cur
-            elif not inline_done and os.path.basename(c) in INTERPRETERS:
-                # the inline code (python -c, heredoc) runs in the directory reached by the cd's before it
-                inline_done = True
+            elif os.path.basename(c) in INTERPRETERS:
+                # each interpreter run is checked in the directory reached by the cd's before it
                 r = inline_reason(cmd, cur)
                 if r:
                     return r
