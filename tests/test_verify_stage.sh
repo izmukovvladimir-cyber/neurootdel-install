@@ -190,6 +190,22 @@ check "team-rules @-line by full path: ✅"      out_has "✅ Jarvis: прави
 build; sed -i '/team-rules.md/d' "$H/.claude-lab/jarvis/.claude/CLAUDE.md"; printf '```markdown\n@~/.claude-lab/shared/team-rules.md\n```\n' >>"$H/.claude-lab/jarvis/.claude/CLAUDE.md"; run
 check "team-rules @-line only in a code block: ❌" fails_with "Jarvis: правила команды подключены"
 J_MD="$H/.claude-lab/jarvis/.claude/CLAUDE.md"
+# --solo (AGENT_MODE=solo): team rules and learned practices are references with a pointer, not loaded every turn.
+solo_layout() {
+    local pl="$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude"
+    printf 'AGENT_MODE="solo"\n' >>"${LIB}/guard.conf"
+    sed -i 's|^@~/.claude-lab/shared/team-rules.md$|- команда агентов: ~/.claude-lab/shared/team-rules.md|' "$J_MD"
+    mkdir -p "${pl}/learned-practices"
+    mv "${pl}/rules/learned-practices.md" "${pl}/learned-practices/learned-practices.md"
+}
+build; solo_layout; run
+check "solo: references ✅"                     out_has "✅ Jarvis: справочники на месте (правила команды, learned-practices) и названы в CLAUDE.md"
+check "solo: no @team-rules demanded"           not out_has "правила команды подключены (@team-rules.md"
+check "solo: exit 0"                            test "$RC" -eq 0
+build; solo_layout; sed -i '/team-rules.md/d' "$J_MD"; run
+check "solo: pointer dropped -> ❌"             fails_with "Jarvis: справочники на месте"
+build; solo_layout; rm "$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"; run
+check "solo: learned-practices gone -> ❌"      fails_with "Jarvis: справочники на месте"
 build; sed -i '/team-rules.md/d' "$J_MD"; printf '```\nexample\n```\n@~/.claude-lab/shared/team-rules.md\n' >>"$J_MD"; run
 check "team-rules @-line after a closed code block: ✅" out_has "✅ Jarvis: правила команды подключены"
 build; sed -i '/team-rules.md/d' "$J_MD"; printf '````md\n```\n@~/.claude-lab/shared/team-rules.md\n````\n' >>"$J_MD"; run
