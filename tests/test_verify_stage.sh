@@ -190,6 +190,32 @@ check "team-rules @-line by full path: ✅"      out_has "✅ Jarvis: прави
 build; sed -i '/team-rules.md/d' "$H/.claude-lab/jarvis/.claude/CLAUDE.md"; printf '```markdown\n@~/.claude-lab/shared/team-rules.md\n```\n' >>"$H/.claude-lab/jarvis/.claude/CLAUDE.md"; run
 check "team-rules @-line only in a code block: ❌" fails_with "Jarvis: правила команды подключены"
 J_MD="$H/.claude-lab/jarvis/.claude/CLAUDE.md"
+# --solo (AGENT_MODE=solo): team rules and learned practices are references with a pointer, not loaded every turn.
+solo_layout() {
+    local pl="$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude"
+    printf 'AGENT_MODE="solo"\n' >>"${LIB}/guard.conf"
+    sed -i 's|^@~/.claude-lab/shared/team-rules.md$|- команда агентов: ~/.claude-lab/shared/team-rules.md|' "$J_MD"
+    mkdir -p "${pl}/learned-practices"
+    mv "${pl}/rules/learned-practices.md" "${pl}/learned-practices/learned-practices.md"
+    printf -- '- опыт: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md\n' >>"$J_MD"
+}
+build; solo_layout; run
+check "solo: references ✅"                     out_has "✅ Jarvis: справочники на месте (правила команды, learned-practices) и названы в CLAUDE.md"
+check "solo: no @team-rules demanded"           not out_has "правила команды подключены (@team-rules.md"
+check "solo: exit 0"                            test "$RC" -eq 0
+build; solo_layout; sed -i '/team-rules.md/d' "$J_MD"; run
+check "solo: pointer dropped -> ❌"             fails_with "Jarvis: справочники на месте"
+build; solo_layout; rm "$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"; run
+check "solo: learned-practices gone -> ❌"      fails_with "Jarvis: справочники на месте"
+build; solo_layout; sed -i '/learned-practices.md$/d' "$J_MD"; run
+check "solo: learned-practices pointer dropped -> ❌" fails_with "Jarvis: справочники на месте"
+build; solo_layout; sed -i 's|plugin/.claude/learned-practices/learned-practices.md$|plugin/.claude/lp-wrong.md|' "$J_MD"; run
+check "solo: wrong learned-practices pointer -> ❌" fails_with "Jarvis: справочники на месте"
+build; solo_layout; sed -i '/learned-practices.md$/d' "$J_MD"; P_LP="$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude"
+mv "${P_LP}/learned-practices/learned-practices.md" "${P_LP}/rules/learned-practices.md"; run
+check "solo: owner copy kept in rules/, no pointer -> ✅" out_has "✅ Jarvis: справочники на месте"
+build; solo_layout; sed -i '/learned-practices.md$/d' "$J_MD"; echo lp >"${P_LP}/rules/learned-practices.md"; run
+check "solo: both copies, reference not named -> ❌" fails_with "Jarvis: справочники на месте"
 build; sed -i '/team-rules.md/d' "$J_MD"; printf '```\nexample\n```\n@~/.claude-lab/shared/team-rules.md\n' >>"$J_MD"; run
 check "team-rules @-line after a closed code block: ✅" out_has "✅ Jarvis: правила команды подключены"
 build; sed -i '/team-rules.md/d' "$J_MD"; printf '````md\n```\n@~/.claude-lab/shared/team-rules.md\n````\n' >>"$J_MD"; run
@@ -287,6 +313,42 @@ check "editorial on, skill missing: ❌"        fails_with "Редакционн
 build; printf 'EDITORIAL_ENABLED=1\nCODEX_CHECK_BIN=~/cc.sh\n' >"$H/.claude-lab/shared/editorial.conf"; echo x >"$H/cc.sh"
 mkdir -p "$H/.local/bin"; printf '#!/bin/sh\n' >"$H/.local/bin/codex"; chmod +x "$H/.local/bin/codex"; run
 check "editorial on, skill + codex: ✅"         out_has "✅ Редакционный контур: Codex установлен"
+
+# --- before the first meeting: core/TONE_OF_VOICE.md is not there yet -> ⚠, not ❌ (#1920) -----------
+tov_layout() {
+    printf '@core/TONE_OF_VOICE.md\n' >>"$J_MD"
+    printf '# USER\n<!-- onboarding:installer-default -->\n' >"$H/.claude-lab/jarvis/.claude/core/USER.md"
+}
+build; tov_layout; run
+check "tone: before the meeting -> ⚠ line"      out_has "⚠ Jarvis: core/TONE_OF_VOICE.md появится после знакомства"
+check "tone: before the meeting -> @ check ✅"  out_has "✅ Jarvis: файлы по ссылкам @ из CLAUDE.md существуют"
+check "tone: before the meeting -> exit 0"     test "$RC" -eq 0
+check "tone: total names the ⚠"                out_has "1 ⚠"
+build; tov_layout; sed -i '/onboarding:installer-default/d' "$H/.claude-lab/jarvis/.claude/core/USER.md"; run
+check "tone: after the meeting, file gone -> ❌" fails_with "Jarvis: файлы по ссылкам @ из CLAUDE.md существуют"
+check "tone: after the meeting -> no ⚠"         not out_has "⚠ Jarvis: core/TONE_OF_VOICE.md"
+build; tov_layout; echo tone >"$H/.claude-lab/jarvis/.claude/core/TONE_OF_VOICE.md"; run
+check "tone: file there -> no ⚠, exit 0"        bash -c '! grep -qF "⚠" "$0" && [[ "$1" -eq 0 ]]' "${TDIR}/out" "$RC"
+build; tov_layout; printf '@core/missing.md\n' >>"$J_MD"; run
+check "tone: another @ file missing -> still ❌" fails_with "Jarvis: файлы по ссылкам @ из CLAUDE.md существуют"
+
+# --- --solo without Richard's bot: ⚠ «не ставился», not ❌ (#1920) ----------------------------------
+build; solo_layout; printf 'ALLOWED_USERS=%s\n' "$OWNER" >"${R}/opt/richard/.env"; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "richard skipped (solo, no token): ⚠"    out_has "⚠ Richard не ставился (соло без токена)"
+check "richard skipped: no ❌ for Richard"      not out_has "❌ Richard"
+check "richard skipped: global CLAUDE.md still checked" out_has "✅ Общий CLAUDE.md на месте"
+check "richard skipped: exit 0"                test "$RC" -eq 0
+build; solo_layout; rm -f "${R}/opt/richard/.env"; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "richard skipped (no env file): ⚠"       out_has "⚠ Richard не ставился"
+build; solo_layout; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "solo with Richard's token, service down: ❌" fails_with "Richard: сервис claude-richard работает"
+build; printf 'ALLOWED_USERS=%s\n' "$OWNER" >"${R}/opt/richard/.env"; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "team without Richard's token: ❌, no ⚠"  bash -c 'grep -qF "❌ Richard: свой бот" "$0" && ! grep -qF "⚠ Richard" "$0"' "${TDIR}/out"
+if [[ "$(id -u)" -ne 0 ]]; then
+    build; solo_layout; printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN_R" >"${R}/opt/richard/.env"; chmod 000 "${R}/opt/richard/.env"
+    printf 'channel-jarvis\n' >"${TDIR}/active"; run; chmod 600 "${R}/opt/richard/.env"
+    check "richard env unreadable: no ⚠ (proves nothing)" not out_has "⚠ Richard не ставился"
+fi
 
 # --- no guard.conf ---------------------------------------------------------------------------------
 OUT=$(PATH="${BIN}:${PATH}" NEUROOTDEL_GUARD_CONF="${TDIR}/none" bash "$V" 2>&1) && RC=0 || RC=$?

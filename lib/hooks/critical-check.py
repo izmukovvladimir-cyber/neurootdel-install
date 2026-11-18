@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """UserPromptSubmit hook (critical thinking): when the owner sends an idea, plan or text (typed or voice)
 and not a short «ок/да/Б», put ONE line into the context so the agent does not agree right away.
+guard.conf AGENT_MODE=solo («Агент за вечер», one personal agent): the line asks the opposite, to read the whole
+message before acting, list several requests in one line, ask one question when unclear and do exactly what was
+asked (owner-work rule 9); a solo owner complained of an agent that reads one line, acts and argues.
 Installed by neurootdel-install; the owner id is guard.conf OWNER_TG_ID.
 Only the owner's own Telegram message counts (source="telegram", user_id=owner); webhooks, swarm and others skip.
 Never blocks: any error or unknown input prints nothing and exits 0.
@@ -18,8 +21,12 @@ import guard_conf  # noqa: E402  (lives one level up, next to guard.conf)
 
 _CONF = guard_conf.load()
 OWNER_ID = _CONF.owner_tg_id
+SOLO = guard_conf.read_raw().get("AGENT_MODE", "").strip() == "solo"
 RULE = ("ПРАВИЛО (критическое мышление): не соглашайся сразу. До ответа: своя оценка, лучший вариант, "
         "аргумент фактами. Согласие только с причиной.")
+SOLO_RULE = ("ПРАВИЛО (сообщение владельца): прочитай его целиком до первого действия. Несколько просьб: перечисли "
+             "их одной строкой и сделай все. Неясно: один вопрос до работы. Делаешь ровно то, о чём просили; своя "
+             "идея одной строкой после задачи, делаешь после «да».")
 # A missed idea is the failure that matters; an extra line costs nothing, so the bias is toward firing (Codex r2).
 MIN_CHARS = 25                      # shorter than this is an ack, a choice or a quick question...
 IDEA_MIN_CHARS = 8                  # ...unless it reads as a proposal («Убери меню»)
@@ -110,7 +117,7 @@ def main() -> int:
     except (ValueError, AttributeError):
         return 0
     if OWNER_ID and any(is_idea(t) for t in owner_texts(prompt)):
-        print(RULE)
+        print(SOLO_RULE if SOLO else RULE)
     return 0
 
 

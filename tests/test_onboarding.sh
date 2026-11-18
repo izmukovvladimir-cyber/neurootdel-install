@@ -44,6 +44,7 @@ check "skill: no tone-stub trigger"      bash -c "! grep -n 'TONE_OF_VOICE' '$SK
 check "skill: existing tone kept"        has "$SK" "Если файл уже есть (в любом режиме"
 check "skill: resumable statuses"        bash -c "grep -qF 'in-progress | paused | declined | done' '$SK'"
 check "skill: one question at a time"    has "$SK" "Один вопрос за сообщение"
+check "skill: greets with own name"      has "$SK" "Первое сообщение знакомства начинаешь со своего имени"
 for b in "### (а) Кто владелец" "### (б) Моя роль" "### (в) Тон голоса" "### (г) Сервисы и ключи" "### (д) Отчёты"; do
     check "skill: block ${b}"            has "$SK" "$b"
 done

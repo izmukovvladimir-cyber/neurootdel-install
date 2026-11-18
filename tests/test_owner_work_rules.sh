@@ -74,6 +74,8 @@ rules_of() { grep -oE '^## [0-9]+\. ' "$1" | grep -oE '[0-9]+' | tr '\n' ' ' | s
 SOLO_HEAD='Правила закрывают места, где агент обычно тупит.'
 SOLO_TAIL='Правила работают, если: меньше переделок, агент не трогает лишнего и помнит сказанное с первого раза.'
 reset_home() { rm -rf "${FAKE_HOME:?}/.claude"; mkdir -p "${FAKE_HOME}/.claude"; }
+# An install made before the solo templates: the full starter block (rules 0-8).
+old_starter() { SOLO=0 _starter_rules_block; }
 
 # --- source file: nothing private leaks into the public installer ---------------
 check "source: exists"                    test -s "$SRC"
@@ -109,7 +111,7 @@ check "solo fresh: no 'Понял так'"        no_line "$GMD" "Понял т�
 check "solo fresh: starter markers kept"  count_is "$GMD" "$STARTER_RULES_BEGIN" 1
 check "solo fresh: block after starter"   test "$(grep -nF "$BEGIN" "$GMD" | cut -d: -f1)" -gt "$(grep -nF "$STARTER_RULES_END" "$GMD" | cut -d: -f1)"
 check "solo fresh: RED block kept"        count_is "$GMD" "$RED_SECRETS_BEGIN" 1
-check "solo fresh: template rendered"     grep -qF "**Name:** Tester" "$GMD"
+check "solo fresh: template rendered"     grep -qF "**Имя:** Tester" "$GMD"
 check "solo fresh: no backup"             test "$(baks)" -eq 0
 check "solo fresh: solo header"           grep -qxF "$SOLO_HEAD" "$GMD"
 check "solo fresh: solo closing"          grep -qxF "$SOLO_TAIL" "$GMD"
@@ -124,7 +126,7 @@ check "solo re-run: no backup"            test "$(baks)" -eq 0
 reset_home
 {
     printf '# My own rules\n\nOwner line that must survive.\n'
-    _starter_rules_block
+    old_starter
     cat "${REPO}/templates/RED-SECRETS-RULE.md"
     printf 'last owner line'     # no final newline
 } >"$GMD"
@@ -144,10 +146,15 @@ BAK="$(find "${FAKE_HOME}/.claude" -maxdepth 1 -name 'CLAUDE.md.bak-*-owner-work
 check "old: backup == original"           cmp -s "$BAK" "${TDIR}/old.copy"
 check "old: mode kept"                    test "$(stat -c %a "$GMD")" = "640"
 # Nothing but rules 1-4 removed and the block added: the rest is the original, byte for byte.
-check "old: only 1-4 and block differ"    python3 - "${TDIR}/old.copy" "$GMD" "$BEGIN" "$END" <<'PY'
+check "old: only 1-4, 8 and block differ" python3 - "${TDIR}/old.copy" "$GMD" "$BEGIN" "$END" "${REPO}/templates/solo/AGENT-RULES-STARTER.md" <<'PY'
 import sys
 old = open(sys.argv[1], encoding="utf-8").read()
 new = open(sys.argv[2], encoding="utf-8").read()
+solo = open(sys.argv[5], encoding="utf-8").read()
+r8 = lambda t: (t.index("\n## 8. ") + 1, t.index("\n---\n", t.index("\n## 8. ")) + 1)
+a, z = r8(old)
+sa, sz = r8(solo)
+old = old[:a] + solo[sa:sz] + old[z:]
 i, j = old.index("\n## 1. ") + 1, old.index("\n## 5. ") + 1
 old = old.replace("Правила закрывают девять мест, где ИИ-агент обычно тупит.",
                   "Правила закрывают места, где агент обычно тупит.")
@@ -164,9 +171,33 @@ ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "old repeat: unchanged"             cmp -s "$GMD" "${TDIR}/old2.copy"
 check "old repeat: still one backup"      test "$(baks)" -eq 1
 
+# --- old --solo install from before #1920: rule 8 with «тремя вещами» -> solo rule 8 ------
+reset_home
+old_starter | python3 -c '
+import re, sys
+t = sys.stdin.read()
+t2 = re.sub(r"^- К владельцу идёшь только с .*?(?=\n\n)",
+            "- К владельцу идёшь только с тремя вещами: деньги, доступы, обещания клиентам и людям.", t, count=1,
+            flags=re.M | re.S)
+assert t2 != t
+sys.stdout.write(t2)' >"$GMD"
+check "legacy r8: fixture has «тремя вещами»" grep -qF "только с тремя вещами" "$GMD"
+ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
+check "legacy r8: converted to solo rule 8" grep -qxF "## 8. Что решаешь сам" "$GMD"
+check "legacy r8: «Решаю сам» gone"        no_line "$GMD" "Решаю сам"
+check "legacy r8: «тремя вещами» gone"     no_line "$GMD" "тремя вещами"
+
+# --- install of the #1920 hooks branch: rule 8 without the correction-line exception -> solo rule 8 ------
+reset_home
+old_starter | grep -vxF "  Новую строку с его поправкой в core/rules.md пишешь без вопроса." >"$GMD"
+check "hooks r8: fixture has the list, no exception" bash -c 'grep -qF "изменения из пункта ниже" "$0" && ! grep -qF "пишешь без вопроса" "$0"' "$GMD"
+ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
+check "hooks r8: converted to solo rule 8"  grep -qxF "## 8. Что решаешь сам" "$GMD"
+check "hooks r8: «Решаю сам» gone"          no_line "$GMD" "Решаю сам"
+
 # --- pasted by hand without markers: not added again, 1-4 still cut ---------------
 reset_home
-{ _starter_rules_block; printf '\nowner text\n'; cat "$SRC"; } >"$GMD"
+{ old_starter; printf '\nowner text\n'; cat "$SRC"; } >"$GMD"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "manual: probe still once"          count_is "$GMD" "$PROBE" 1
 check "manual: no marker added"           no_line "$GMD" "$BEGIN"
@@ -177,21 +208,21 @@ check "manual repeat: unchanged"          cmp -s "$GMD" "${TDIR}/manual.copy"
 
 # --- the phrase alone in owner notes is not the block: block still added ---------
 reset_home
-{ _starter_rules_block; printf '\nmy note: Тест глазами живого человека later\n'; } >"$GMD"
+{ old_starter; printf '\nmy note: Тест глазами живого человека later\n'; } >"$GMD"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "phrase only: block added"          count_is "$GMD" "$BEGIN" 1
 check "phrase only: 0,5-8 + 9-13"         test "$(rules_of "$GMD")" = "0 5 6 7 8 9 10 11 12 13"
 
 # --- begin marker without end: block added whole ----------------------------------
 reset_home
-{ _starter_rules_block; printf '%s\n' "$BEGIN"; } >"$GMD"
+{ old_starter; printf '%s\n' "$BEGIN"; } >"$GMD"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "half marker: end marker added"     count_is "$GMD" "$END" 1
 check "half marker: rules 9-13 present"   test "$(rules_of "$GMD")" = "0 5 6 7 8 9 10 11 12 13"
 
 # --- the file is read through as_agent, never by root directly -------------------
 reset_home
-_starter_rules_block >"$GMD"
+old_starter >"$GMD"
 : >"$AS_AGENT_LOG"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "read: CLAUDE.md via as_agent cat"  grep -qxF "cat -- ${GMD}" "$AS_AGENT_LOG"
@@ -200,7 +231,7 @@ check "write: CLAUDE.md as the agent"     grep -qF " write ${GMD} " "$AS_AGENT_L
 check "write: backup as the agent"        grep -qE " write ${GMD}\.bak-[0-9-]+-owner-work " "$AS_AGENT_LOG"
 # A read the agent user cannot do stops the change (the case of a swap to a root-only file).
 reset_home
-_starter_rules_block >"$GMD"
+old_starter >"$GMD"
 cp "$GMD" "${TDIR}/unread.copy"
 ( as_agent() { return 1; }; ensure_azv_owner_rules "$GMD" ) >/dev/null 2>&1; rc=$?
 check "unreadable: stops"                 test "$rc" -ne 0
@@ -227,7 +258,7 @@ check "no starter: rules 9-13"            test "$(rules_of "$GMD")" = "9 10 11 1
 
 # --- backup name planted as a symlink: stops, its target never written ------------
 reset_home
-_starter_rules_block >"$GMD"
+old_starter >"$GMD"
 VICTIM="${TDIR}/victim"
 printf 'victim\n' >"$VICTIM"
 PLANT="${GMD}.bak-20260101-000000-owner-work"
@@ -241,7 +272,7 @@ check "plant: CLAUDE.md not changed"      test "$(rules_of "$GMD")" = "0 1 2 3 4
 # --- symlinked CLAUDE.md: target updated, link kept ------------------------------
 reset_home
 REAL="${TDIR}/real-CLAUDE.md"
-_starter_rules_block >"$REAL"
+old_starter >"$REAL"
 ln -s "$REAL" "$GMD"
 ensure_azv_owner_rules "$GMD" >/dev/null 2>&1
 check "symlink: link kept"                test -L "$GMD"
@@ -299,7 +330,7 @@ ln -s "${TDIR}/real-settings.json" "$SETTINGS"
 disable_superpowers >/dev/null 2>&1; rc=$?
 check "sp: symlinked settings -> rc 1"    test "$rc" -eq 1
 check "sp: symlink target untouched"      test "$(jq -r '.enabledPlugins["superpowers@spm"]' "${TDIR}/real-settings.json")" = "true"
-out=$( { mkdir -p "$AZV_AGENT_DIR"; _starter_rules_block >"$GMD"; azv_owner_rules_only; } 2>&1 )
+out=$( { mkdir -p "$AZV_AGENT_DIR"; old_starter >"$GMD"; azv_owner_rules_only; } 2>&1 )
 check "sp: not off -> not reported off"   bash -c '! grep -qF "Superpowers выключен." <<<"$0"' "$out"
 rm -f "${SETTINGS:?}"
 
@@ -327,10 +358,12 @@ h = old.index("## Skills first")
 m = old.index("## Memory")
 f = next(i for i, ln in enumerate(old) if ln.startswith("- The owner's correction has ONE route."))
 c = next(i for i, ln in enumerate(old) if ln.startswith("- Cancel: a new note"))
-keep = old[:h] + old[m:f] + old[c + 1:]
+t = next(i for i, ln in enumerate(old) if ln.startswith("- The owner's idea or plan:"))
+keep = old[:t] + old[t + 2:h] + old[m:f] + old[c + 1:]
+nt = next(i for i, ln in enumerate(new) if ln.startswith("- The owner's request: do exactly what was asked"))
 nf = next(i for i, ln in enumerate(new) if ln.startswith("- The owner's correction has ONE route."))
 nc = next(i for i, ln in enumerate(new) if ln.startswith("- Cancel: rewrite"))
-sys.exit(0 if new[:nf] + new[nc + 1:] == keep else 1)
+sys.exit(0 if new[:nt] + new[nt + 2:nf] + new[nc + 1:] == keep else 1)
 PY
 _azv_fix team "$TS" "${TDIR}/team.twice" >/dev/null 2>&1; rc=$?
 check "team: second pass rc 1"            test "$rc" -eq 1
@@ -341,12 +374,13 @@ t = open(sys.argv[1], encoding="utf-8").read()
 t = t.replace("  Fields: area (where it applies)", "  Fields (owner edit): area (where it applies)")
 t = t.replace("the old note and its line are deleted.", "the old note and its line are deleted. OWNER ADDITION.")
 t = t.replace("No fitting skill: skill-finder.", "No fitting skill: ask me.")
+t = t.replace("Agree only with a\n  reason; argue once.", "Agree only with a\n  reason; argue twice.")
 open(sys.argv[2], "w", encoding="utf-8").write(t)
 PY
 _azv_fix team "${TDIR}/team.edited" "${TDIR}/team.edited.out" >/dev/null 2>&1; rc=$?
 check "team edited: nothing replaced"     test "$rc" -eq 1
 why=$(_azv_fix team "${TDIR}/team.edited" "${TDIR}/team.edited.out" 2>&1 >/dev/null)
-check "team edited: says why (2 parts)"   test "$(grep -c "edited by the owner" <<<"$why")" -eq 2
+check "team edited: says why (3 parts)"   test "$(grep -c "edited by the owner" <<<"$why")" -eq 3
 # only the route edited: the untouched «Cancel» stays too (they move together); Skills still cut
 python3 - "$TEAM_SRC" "${TDIR}/team.route" <<'PY'
 import sys
@@ -446,7 +480,7 @@ AZV_OWNER_RULES_ONLY=0
 parse_args --solo >/dev/null 2>&1
 check "flag: off without it"              test "$AZV_OWNER_RULES_ONLY" = "0"
 
-_starter_rules_block >"$GMD"
+old_starter >"$GMD"
 rm -rf "${AZV_AGENT_DIR:?}"
 ( azv_owner_rules_only ) >/dev/null 2>&1; rc=$?
 check "only: not an AZV server -> stops"  test "$rc" -ne 0
@@ -457,7 +491,7 @@ rm -f "${GMD:?}"
 check "only: no CLAUDE.md -> stops"       test "$rc" -ne 0
 check "only: no CLAUDE.md -> none made"   test ! -e "$GMD"
 
-{ printf '# owner\n'; _starter_rules_block; } >"$GMD"
+{ printf '# owner\n'; old_starter; } >"$GMD"
 SH_TEAM="${FAKE_HOME}/.claude-lab/shared/team-rules.md"
 J_RULES="${FAKE_HOME}/.claude-lab/jarvis/.claude/core/rules.md"
 mkdir -p "$(dirname "$SH_TEAM")" "$(dirname "$J_RULES")"
