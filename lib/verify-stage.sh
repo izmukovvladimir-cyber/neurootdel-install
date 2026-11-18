@@ -123,10 +123,16 @@ at_paths_ok() {
 }
 
 # solo_refs_ok <CLAUDE.md> <plugin dir> -- --solo: shared/team-rules.md exists and CLAUDE.md names it; learned
-# practices are there as the reference (or the owner's copy kept in rules/).
+# practices: the reference, when it is there, is named in CLAUDE.md by its path; without it the owner's copy
+# kept in rules/ (it loads every turn, no pointer needed).
 solo_refs_ok() {
-    [[ -f "${H}/.claude-lab/shared/team-rules.md" ]] && grep -qF "shared/team-rules.md" "$1" 2>/dev/null \
-        && { [[ -f "${2}/.claude/learned-practices/learned-practices.md" ]] || [[ -f "${2}/.claude/rules/learned-practices.md" ]]; }
+    local lp="${2}/.claude/learned-practices/learned-practices.md"
+    [[ -f "${H}/.claude-lab/shared/team-rules.md" ]] && grep -qF "shared/team-rules.md" "$1" 2>/dev/null || return 1
+    if [[ -f "$lp" ]]; then
+        grep -qF -e "${lp#"${H}/"}" -e "$lp" "$1" 2>/dev/null
+    else
+        [[ -f "${2}/.claude/rules/learned-practices.md" ]]
+    fi
 }
 
 # team_rules_linked <CLAUDE.md> -- a line of its own "@~/.claude-lab/shared/team-rules.md" (or the same

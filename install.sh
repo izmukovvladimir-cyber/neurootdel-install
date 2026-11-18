@@ -4686,10 +4686,17 @@ install_team_refs() {
     local team_line="@~/.claude-lab/shared/team-rules.md"
     local root_line="@~/.claude-lab/shared/TOOLS-root-requests.md"
     if [[ "$SOLO" == "1" ]]; then
+        # Laid down first: the pointer names the reference only when it is there (an owner-edited copy kept
+        # in rules/ loads every turn and needs no pointer).
+        _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+        local lp_line=""
+        if [[ -f "${ws}/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md" ]]; then
+            # shellcheck disable=SC2088  # a path for the agent to read, ~ stays literal
+            lp_line=$'\n'"- опыт других агентов: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"
+        fi
         # shellcheck disable=SC2088  # paths for the agent to read, ~ stays literal
         team_line="Справочники (Read, когда задача про это):
-- код, git, сервер: ~/.claude-lab/shared/GLOBAL-TEAM-RULES.md
-- опыт других агентов: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md
+- код, git, сервер: ~/.claude-lab/shared/GLOBAL-TEAM-RULES.md${lp_line}
 - команда агентов (если появится второй): ~/.claude-lab/shared/team-rules.md"
         root_line="- заявка на действие с правами root: ~/.claude-lab/shared/TOOLS-root-requests.md"
     fi
@@ -4731,7 +4738,9 @@ install_team_refs() {
         _ensure_marked_block "${cws}/CLAUDE.md" root-requests "@~/.claude-lab/shared/TOOLS-root-requests.md" || fail=1
     fi
 
-    _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+    if [[ "$SOLO" != "1" ]]; then
+        _install_learned_practices "${ws}/dashi-plugin-claude-code/plugin" || fail=1
+    fi
     if [[ "$CODER_INSTALLED" == "1" ]]; then
         _install_learned_practices "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1
         _install_code_rules "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code/plugin" || fail=1

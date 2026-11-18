@@ -197,6 +197,7 @@ solo_layout() {
     sed -i 's|^@~/.claude-lab/shared/team-rules.md$|- команда агентов: ~/.claude-lab/shared/team-rules.md|' "$J_MD"
     mkdir -p "${pl}/learned-practices"
     mv "${pl}/rules/learned-practices.md" "${pl}/learned-practices/learned-practices.md"
+    printf -- '- опыт: ~/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md\n' >>"$J_MD"
 }
 build; solo_layout; run
 check "solo: references ✅"                     out_has "✅ Jarvis: справочники на месте (правила команды, learned-practices) и названы в CLAUDE.md"
@@ -206,6 +207,15 @@ build; solo_layout; sed -i '/team-rules.md/d' "$J_MD"; run
 check "solo: pointer dropped -> ❌"             fails_with "Jarvis: справочники на месте"
 build; solo_layout; rm "$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude/learned-practices/learned-practices.md"; run
 check "solo: learned-practices gone -> ❌"      fails_with "Jarvis: справочники на месте"
+build; solo_layout; sed -i '/learned-practices.md$/d' "$J_MD"; run
+check "solo: learned-practices pointer dropped -> ❌" fails_with "Jarvis: справочники на месте"
+build; solo_layout; sed -i 's|plugin/.claude/learned-practices/learned-practices.md$|plugin/.claude/lp-wrong.md|' "$J_MD"; run
+check "solo: wrong learned-practices pointer -> ❌" fails_with "Jarvis: справочники на месте"
+build; solo_layout; sed -i '/learned-practices.md$/d' "$J_MD"; P_LP="$H/.claude-lab/jarvis/.claude/dashi-plugin-claude-code/plugin/.claude"
+mv "${P_LP}/learned-practices/learned-practices.md" "${P_LP}/rules/learned-practices.md"; run
+check "solo: owner copy kept in rules/, no pointer -> ✅" out_has "✅ Jarvis: справочники на месте"
+build; solo_layout; sed -i '/learned-practices.md$/d' "$J_MD"; echo lp >"${P_LP}/rules/learned-practices.md"; run
+check "solo: both copies, reference not named -> ❌" fails_with "Jarvis: справочники на месте"
 build; sed -i '/team-rules.md/d' "$J_MD"; printf '```\nexample\n```\n@~/.claude-lab/shared/team-rules.md\n' >>"$J_MD"; run
 check "team-rules @-line after a closed code block: ✅" out_has "✅ Jarvis: правила команды подключены"
 build; sed -i '/team-rules.md/d' "$J_MD"; printf '````md\n```\n@~/.claude-lab/shared/team-rules.md\n````\n' >>"$J_MD"; run

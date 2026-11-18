@@ -149,12 +149,12 @@ check "re-run: lessons in index-infra"       grep -qE "BEGIN [a-z-]+: memory-les
 printf 'owner edit\n' >>"${RPL}/learned-practices/learned-practices.md"
 mv "${RPL}/learned-practices/learned-practices.md" "${RPL}/rules/learned-practices.md"
 cp "${RPL}/rules/learned-practices.md" "${TDIR}/lp.edited"
-cp "${RWS}/CLAUDE.md" "${TDIR}/claude.before"
 install_team_refs >/dev/null 2>&1; rc=$?
 check "re-run 2: rc 0"                       test "$rc" -eq 0
 check "re-run 2: edited copy left as is"     cmp -s "${TDIR}/lp.edited" "${RPL}/rules/learned-practices.md"
 check "re-run 2: no reference copy made"     test ! -e "${RPL}/learned-practices/learned-practices.md"
-check "re-run 2: CLAUDE.md unchanged"        cmp -s "${TDIR}/claude.before" "${RWS}/CLAUDE.md"
+check "re-run 2: no pointer to a missing reference" bash -c '! grep -qF "learned-practices/learned-practices.md" "$0"' "${RWS}/CLAUDE.md"
+check "re-run 2: other pointers kept"        grep -qF "~/.claude-lab/shared/team-rules.md" "${RWS}/CLAUDE.md"
 
 # --- guard.conf AGENT_MODE and the hooks ---------------------------------------------------
 DOCTOR_NAME=D
