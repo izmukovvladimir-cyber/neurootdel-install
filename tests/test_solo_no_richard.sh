@@ -118,10 +118,11 @@ check "with Richard: smoke-check names claude-richard" grep -q 'systemctl is-act
 check "with Richard: student messages Richard"  grep -q 'student messages Richard:  @rich_bot' <<<"$OUT"
 check "with Richard: his .env line"             grep -q 'Richard: .*/richard/.env -- TELEGRAM_BOT_TOKEN' <<<"$OUT"
 
-# --- --solo without the Jarvis token: still a stop (the one agent needs its bot) --------------------
+# --- --solo without the Jarvis token either: no stop since #1920 a (tests/test_solo_no_jarvis.sh) -----
 OUT=$(NEUROOTDEL_JARVIS_BOT_TOKEN="" NEUROOTDEL_RICHARD_BOT_TOKEN="" run_main --solo)
-check "solo, no Jarvis token: stop"             grep -qx 'rc=1' <<<"$OUT"
-check "solo, no Jarvis token: says Jarvis"      grep -q 'Jarvis needs its own bot' <<<"$OUT"
+check "solo, no Jarvis token: rc 0"             grep -qx 'rc=0' <<<"$OUT"
+check "solo, no Jarvis token: no stop"          not grep -q 'Jarvis needs its own bot' <<<"$OUT"
+check "solo, no Jarvis token: Richard skipped"  grep -q 'Richard skipped: --solo without his bot token' <<<"$OUT"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

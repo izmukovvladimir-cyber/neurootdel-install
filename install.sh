@@ -1057,6 +1057,8 @@ RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
 # --solo without a Richard bot (decision #1902): his step is skipped, the install goes on.
 RICHARD_SKIPPED=0
+# --solo with no tty and no Jarvis token anywhere (#1920 a): Jarvis is installed, channel-jarvis stays off.
+JARVIS_SKIPPED=0
 # Coder bot (third bot), required at the intensive stage. Empty = kept from this server or not this stage.
 CODER_BOT_TOKEN=""
 CODER_BOT_USERNAME=""
@@ -1178,7 +1180,11 @@ collect_bot_token() {
             kept=1
         fi
         if [[ -z "$tok" && "$optional" == optional ]]; then
-            warn "${label}: no bot token -- ${label} is skipped. Add later: sudo NEUROOTDEL_${up}_BOT_TOKEN=<token> bash install.sh --solo"
+            if [[ "$agent" == jarvis ]]; then
+                warn "${label}: no bot token -- installed without its bot, ${JARVIS_UNIT} stays off until the token is in ${JARVIS_ENV_DIR}/channel.env (final notes)."
+            else
+                warn "${label}: no bot token -- ${label} is skipped. Add later: sudo NEUROOTDEL_${up}_BOT_TOKEN=<token> bash install.sh --solo"
+            fi
             return 1
         elif [[ -z "$tok" ]]; then
             why="${label} needs its own bot: create it in @BotFather (docs/lesson-create-bots.md) and give its token (NEUROOTDEL_${up}_BOT_TOKEN without a tty)."
@@ -1332,7 +1338,12 @@ BRIEF
     prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "${saved_lang:-Russian}"
     prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "${saved_tz:-Europe/Moscow}"
 
-    collect_bot_token jarvis
+    if [[ "$SOLO" == "1" ]] && is_noninteractive; then
+        # The guide runs --solo through «!» in Claude Code (no tty) before the bot exists (ch. 8).
+        collect_bot_token jarvis optional || JARVIS_SKIPPED=1
+    else
+        collect_bot_token jarvis
+    fi
     if [[ "$SOLO" == "1" ]]; then
         collect_bot_token richard optional || RICHARD_SKIPPED=1
     else
@@ -4836,6 +4847,16 @@ _richard_unit_word() {
     return 0
 }
 
+# _jarvis_no_bot_notes -- the Russian how-to when --solo ran without the Jarvis bot (#1920 a); else nothing.
+_jarvis_no_bot_notes() {
+    [[ "$JARVIS_SKIPPED" == "1" ]] || return 0
+    printf '\n\n%bJarvis: бот пока не подключён, служба %s не включена.%b Создай бота у @BotFather (/newbot),\n' \
+        "$C_YELLOW" "$JARVIS_UNIT" "$C_NC"
+    printf '  впиши его строкой TELEGRAM_BOT_TOKEN=<токен> в %s/channel.env\n' "$JARVIS_ENV_DIR"
+    printf '  (свой id из @userinfobot в TELEGRAM_ALLOWED_USER_IDS и TELEGRAM_ALLOWED_CHAT_IDS), затем:\n'
+    printf '      systemctl enable --now %s\n' "$JARVIS_UNIT"
+}
+
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
@@ -4867,7 +4888,7 @@ Installed on this VPS:
                  (stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP)${sp_plugin_line}
   - Sudoers:   ${SUDOERS_FILE}  (narrow, 0440)
 
-$(printf '%b' "$C_BOLD")Tokens filled during install:$(printf '%b' "$C_NC") ${tokens_filled}
+$(printf '%b' "$C_BOLD")Tokens filled during install:$(printf '%b' "$C_NC") ${tokens_filled}$(_jarvis_no_bot_notes)
 
 $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not the student:$(printf '%b' "$C_NC")
 
