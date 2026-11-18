@@ -148,6 +148,14 @@ check "perm: exactly one perm line"     test "$(grep -c '^TELEGRAM_PERMISSION_AL
 ENV7="${TDIR}/env7"
 CHANNEL_ENV_TOKEN="" render_channel_env "$TEAM" "999" "" /st /ws >"$ENV7"
 check "perm: owner answer overrides pin" has "$ENV7" "TELEGRAM_PERMISSION_ALLOWED_USER_IDS=999"
+ENV12="${TDIR}/env12"
+CHANNEL_ENV_TOKEN="" render_channel_env "$TEAM" "555" "" /st /ws >"$ENV12"
+check "reinstall same owner: team kept"   has "$ENV12" "TELEGRAM_ALLOWED_USER_IDS=555,777"
+check "reinstall same owner: perm owner"  has "$ENV12" "TELEGRAM_PERMISSION_ALLOWED_USER_IDS=555"
+ENV13="${TDIR}/env13"
+CHANNEL_ENV_TOKEN="" render_channel_env "$TEAM" "777" "" /st /ws >"$ENV13"
+check "reinstall listed id: owner first, rest kept" has "$ENV13" "TELEGRAM_ALLOWED_USER_IDS=777,555"
+check "new owner id: list replaced"      has "$ENV7" "TELEGRAM_ALLOWED_USER_IDS=999"
 
 # --- channel.env: groq key from file -------------------------------------------
 printf 'gsk_test123\n' >"${TDIR}/groq"

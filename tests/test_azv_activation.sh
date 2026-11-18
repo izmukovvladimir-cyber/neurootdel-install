@@ -242,7 +242,7 @@ check "no machine-id: non-zero exit" test "$rc" != 0
 STEPS=(banner preflight install_apt_deps require_step_packages install_node ensure_agent_user
        check_node_for_agent install_claude_cli install_bun collect_inputs resolve_role_settings install_jarvis install_coder
        install_richard setup_global_claude install_skills install_superpowers install_sudoers
-       install_memory_cron install_guard install_group_watch install_auditor setup_agent_hooks install_team_refs enable_services report_claude_plan final_instructions run_stage_verify azv_activate azv_install_payload)
+       install_memory_cron install_guard install_group_watch install_auditor setup_agent_hooks install_team_refs enable_services report_claude_plan final_instructions run_stage_verify azv_activate azv_install_payload disable_superpowers)
 trace_main() {
     (
         # shellcheck disable=SC1091
@@ -261,7 +261,11 @@ check "no --solo: activation never runs" test "${plain/azv_/}" = "$plain"
 check "--solo: activation right after preflight" \
     test "${solo:0:40}" = "banner preflight azv_activate install_ap"
 check "--solo: payload installed after skills" \
-    grep -qF "install_skills azv_install_payload install_superpowers" <<<"$solo"
+    grep -qF "install_skills azv_install_payload disable_superpowers install_sudoers" <<<"$solo"
+check "--solo: Superpowers not installed" \
+    bash -c '! grep -qw install_superpowers <<<"$0"' "$solo"
+check "no --solo: Superpowers never switched off" \
+    bash -c '! grep -qw disable_superpowers <<<"$0"' "$plain"
 
 printf '\nPASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

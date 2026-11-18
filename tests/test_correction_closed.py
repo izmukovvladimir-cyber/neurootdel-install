@@ -94,5 +94,47 @@ r = run(CLOSER, ["stop", str(WS)], "not json")
 check("bad input: exit 0, silent", r.returncode == 0 and r.stdout == "", r)
 check("events logged without message text", "переделай" not in (STATE / "events.jsonl").read_text(encoding="utf-8"))
 
+# --- «Агент за вечер» (--solo, <ws>/azv): the correction goes to core/rules.md -------------------------
+import time  # noqa: E402
+
+def detect(text: str, session: str) -> str:
+    return run(DETECTOR, [str(WS)], {"prompt": f'<channel source="telegram" chat_id="{OWNER}" user_id="{OWNER}">'
+                                               f'{text}</channel>', "session_id": session}).stdout
+
+full_hint = detect("так не пиши, переделай", "f1")
+check("full: hint = feedback note", "feedback-note.py" in full_hint and "never core/rules.md" in full_hint, full_hint)
+(WS / "azv").mkdir()
+solo_hint = detect("так не пиши, переделай", "z1")
+check("solo: hint = one line in core/rules.md", "one short line in core/rules.md" in solo_hint
+      and "«Записал в правила»" in solo_hint, solo_hint)
+check("solo: hint has no feedback-note", "feedback-note" not in solo_hint and "never core/rules.md" not in solo_hint,
+      solo_hint)
+check("solo: marker left", (STATE / "pending-z1.json").is_file())
+out = stop("z1")
+check("solo: nothing written -> blocked once", '"decision": "block"' in out and "core/rules.md" in out
+      and "feedback-note" not in out, out)
+check("solo: second stop lets go", stop("z1", active=True) == "")
+for i, rel in enumerate(["core/rules.md", "core/USER.md", "core/warm/decisions.md"]):
+    sess = f"z2{i}"
+    f = WS / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("old\n", encoding="utf-8")
+    old = time.time() - 600
+    os.utime(f, (old, old))
+    for other in ["core/rules.md", "core/USER.md", "core/warm/decisions.md"]:
+        if (WS / other).exists():
+            os.utime(WS / other, (old, old))
+    detect("так не пиши, переделай", sess)
+    check(f"solo: {rel} untouched -> still blocked", '"decision": "block"' in stop(sess))
+    detect("так не пиши, переделай", sess + "b")
+    f.write_text("old\n- не ставить эмодзи\n", encoding="utf-8")
+    check(f"solo: {rel} written after the marker -> closed", stop(sess + "b") == ""
+          and not (STATE / f"pending-{sess}b.json").exists())
+check("solo: recorded_file logged", '"recorded_file"' in (STATE / "events.jsonl").read_text(encoding="utf-8"))
+(WS / "azv").rmdir()
+detect("так не пиши, переделай", "f2")
+(WS / "core" / "rules.md").write_text("new line\n", encoding="utf-8")
+check("full: core/rules.md does not close it", '"decision": "block"' in stop("f2"))
+
 print(f"FAILS: {len(FAILS)}")
 sys.exit(1 if FAILS else 0)

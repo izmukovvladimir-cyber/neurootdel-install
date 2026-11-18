@@ -24,6 +24,7 @@
 #                                  # (or NEUROOTDEL_AZV_KEY=...), stops without a valid one
 #   sudo bash /root/neurootdel-install.sh --stage workshop    # stage 1: Jarvis + Richard
 #   sudo bash /root/neurootdel-install.sh --stage intensive   # stage 2: adds Coder + Auditor
+#   sudo bash /root/neurootdel-install.sh --azv-owner-rules   # installed «Агент за вечер»: rules 1-4 -> 9-13, Superpowers off
 #   sudo neurootdel-verify                                    # end-of-stage check, any time
 #
 # Every agent has its OWN Telegram bot, and within a stage every bot is required: the installer asks
@@ -1054,6 +1055,10 @@ JARVIS_BOT_TOKEN=""
 JARVIS_BOT_USERNAME=""
 RICHARD_BOT_TOKEN=""
 RICHARD_BOT_USERNAME=""
+# --solo without a Richard bot (decision #1902): his step is skipped, the install goes on.
+RICHARD_SKIPPED=0
+# --solo with no tty and no Jarvis token anywhere (#1920 a): Jarvis is installed, channel-jarvis stays off.
+JARVIS_SKIPPED=0
 # Coder bot (third bot), required at the intensive stage. Empty = kept from this server or not this stage.
 CODER_BOT_TOKEN=""
 CODER_BOT_USERNAME=""
@@ -1070,6 +1075,8 @@ OPERATOR_TIMEZONE=""
 # Install stage: workshop = Jarvis + Richard, intensive = + Coder + Auditor. Set by resolve_stage.
 STAGE=""
 STAGE_ARG=""
+# --azv-owner-rules: only the --solo rules swap + Superpowers off in an installed «Агент за вечер».
+AZV_OWNER_RULES_ONLY=0
 # Where the bot and stage questions read answers from (tests point it at a file). Opened once
 # (TTY_FD), so a question asked again reads the NEXT answer.
 TTY_IN="/dev/tty"
@@ -1144,8 +1151,10 @@ _bot_clash() {
 # after the same three checks: a revoked or shared bot is not kept silently.
 # With a tty the question repeats until a token passes; a token from env, or a run without a tty,
 # stops the installer instead (nobody is there to answer again). The token is never printed.
+# collect_bot_token <agent> optional -- no token at all (no env, none on this server, empty answer
+# or no tty) returns 1 with a warning instead of a stop; a token that is given is checked as above.
 collect_bot_token() {
-    local agent=$1 label up tok resp why from_env=0 have_old=0 kept prompt
+    local agent=$1 optional=${2:-} label up tok resp why from_env=0 have_old=0 kept prompt
     label=$(_bot_label "$agent")
     up="${agent^^}"
     local -n tok_out="${up}_BOT_TOKEN"
@@ -1170,7 +1179,14 @@ collect_bot_token() {
             tok=$(_bot_existing_token "$agent")
             kept=1
         fi
-        if [[ -z "$tok" ]]; then
+        if [[ -z "$tok" && "$optional" == optional ]]; then
+            if [[ "$agent" == jarvis ]]; then
+                warn "${label}: no bot token -- installed without its bot, ${JARVIS_UNIT} stays off until the token is in ${JARVIS_ENV_DIR}/channel.env (final notes)."
+            else
+                warn "${label}: no bot token -- ${label} is skipped. Add later: sudo NEUROOTDEL_${up}_BOT_TOKEN=<token> bash install.sh --solo"
+            fi
+            return 1
+        elif [[ -z "$tok" ]]; then
             why="${label} needs its own bot: create it in @BotFather (docs/lesson-create-bots.md) and give its token (NEUROOTDEL_${up}_BOT_TOKEN without a tty)."
         elif ! validate_tg_token "$tok"; then
             why="${label} token format invalid (expected '<digits>:<30+ chars>')."
@@ -1322,8 +1338,17 @@ BRIEF
     prompt_or_env OPERATOR_LANGUAGE NEUROOTDEL_LANGUAGE   "Язык общения (English / Russian / ...)" "${saved_lang:-Russian}"
     prompt_or_env OPERATOR_TIMEZONE NEUROOTDEL_TIMEZONE   "Таймзона (IANA: Europe/Moscow, Asia/Bangkok, ...)" "${saved_tz:-Europe/Moscow}"
 
-    collect_bot_token jarvis
-    collect_bot_token richard
+    if [[ "$SOLO" == "1" ]] && is_noninteractive; then
+        # The guide runs --solo through «!» in Claude Code (no tty) before the bot exists (ch. 8).
+        collect_bot_token jarvis optional || JARVIS_SKIPPED=1
+    else
+        collect_bot_token jarvis
+    fi
+    if [[ "$SOLO" == "1" ]]; then
+        collect_bot_token richard optional || RICHARD_SKIPPED=1
+    else
+        collect_bot_token richard
+    fi
     prompt_or_env TG_USER_ID        NEUROOTDEL_TG_USER_ID \
         "Ваш Telegram numeric user ID (from @userinfobot)" \
         "$saved_id"
@@ -1986,7 +2011,14 @@ token = os.environ.get("CHANNEL_ENV_TOKEN", "").strip() or existing.get("TELEGRA
 if token and not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]{30,}", token):
     sys.exit("channel.env: TELEGRAM_BOT_TOKEN has an unexpected format")
 
-user_ids = csv(user_ids_new) or csv(existing.get("TELEGRAM_ALLOWED_USER_IDS", ""))
+old_ids = csv(existing.get("TELEGRAM_ALLOWED_USER_IDS", ""))
+new_ids_in = csv(user_ids_new)
+if new_ids_in and new_ids_in[0] in old_ids:
+    # Same owner re-running the installer (clean reinstall): keep everyone already
+    # allowed, owner first. A different owner id still replaces the list.
+    user_ids = new_ids_in + [u for u in old_ids if u not in new_ids_in]
+else:
+    user_ids = new_ids_in or old_ids
 for uid in user_ids:
     if not re.fullmatch(r"[0-9]+", uid):
         sys.exit(f"channel.env: user id {uid!r} is not a number")
@@ -2348,7 +2380,13 @@ REOF
             TIMEZONE "$OPERATOR_TIMEZONE" \
             USER     "$AGENT_USER"
     fi
+    if [[ "$kind" != coder && "$SOLO" == "1" ]]; then
+        _azv_fix_tmp rules "$rules_tmp"
+    fi
     _write_if_absent "$rules_tmp" "${ws}/core/rules.md" 0644
+    if [[ "$kind" != coder && "$SOLO" == "1" ]]; then
+        _azv_fix_file rules "${ws}/core/rules.md"
+    fi
 
     # Stub cold memory + hot/warm files so @includes in CLAUDE.md resolve.
     local stub_tmp
@@ -2400,6 +2438,10 @@ render_doctor_role() {
 
 install_richard() {
     step 7 "Installing Richard (claude-code-telegram)"
+    if [[ "$RICHARD_SKIPPED" == "1" ]]; then
+        warn "Richard skipped: --solo without his bot token."
+        return 0
+    fi
 
     install -d -m 0755 -o "$AGENT_USER" -g "$AGENT_USER" "$RICHARD_HOME"
 
@@ -2537,6 +2579,216 @@ ensure_starter_rules() {
     mode=$(stat -c '%a' -- "$dst")
     write_as_user "$tmp" "$dst" "$mode"
     ok "Starter rules appended to ${dst} (backup: ${bak})."
+}
+
+# «Агент за вечер» (--solo): one agent-bot and no programmers. The solo texts differ from the full
+# install in three files, all changed in place by _azv_fix (the full install keeps them as they are):
+#   starter  global CLAUDE.md: code rules 1-4 of the starter block cut, rules 0 and 5-8 stay, its
+#            header and closing line in the solo wording, the owner-work rules 9-13
+#            (templates/AGENT-RULES-OWNER-WORK.md, their own markers) right after the block;
+#   team     shared/team-rules.md: no «Skills first» (Superpowers is not installed), the owner's
+#            correction goes as one line into core/rules.md (rule 12), not into auto memory;
+#   rules    core/rules.md stub: its correction line points here, at core/rules.md.
+readonly OWNER_WORK_BEGIN='<!-- agent-rules-owner-work:begin -->'
+readonly OWNER_WORK_END='<!-- agent-rules-owner-work:end -->'
+# Heading of rule 11; a file that already has it carries the block, pasted by hand.
+readonly OWNER_WORK_PROBE='Тест глазами живого человека'
+
+# _azv_fix <starter|team|rules> <in> <out> -- writes <in> with the solo texts into <out>. Only
+# exact known lines are replaced; a line the owner edited stays as it is. rc 0 = written,
+# 1 = nothing to change, other = error.
+_azv_fix() {
+    local tpl="${TEMPLATES_DIR}/AGENT-RULES-OWNER-WORK.md"
+    [[ -f "$tpl" ]] || die "Template not found: $tpl"
+    python3 - "$1" "$2" "$3" "$tpl" "$STARTER_RULES_BEGIN" "$STARTER_RULES_END" \
+        "$OWNER_WORK_BEGIN" "$OWNER_WORK_END" "$OWNER_WORK_PROBE" "${TEMPLATES_DIR}/shared/team-rules.md" <<'PY3'
+import re
+import sys
+
+kind, inp, out, tpl, s_begin, s_end, o_begin, o_end, probe, team_tpl = sys.argv[1:11]
+with open(inp, encoding="utf-8", newline="") as fh:
+    lines = fh.read().splitlines(keepends=True)
+
+STARTER_HEAD = ("Правила закрывают девять мест, где ИИ-агент обычно тупит.",
+                "Правила закрывают места, где агент обычно тупит.")
+STARTER_TAIL = (("**Правила работают, если:** в диффах меньше лишних изменений, реже приходится переписывать",
+                 "переусложнённое, и вопросы задаются до работы, а не после переделки."),
+                "Правила работают, если: меньше переделок, агент не трогает лишнего и помнит сказанное с первого раза.")
+RULES_OLD = ("- On each correction of the owner: one feedback note in auto memory + one line in MEMORY.md "
+             "(route and command: ~/.claude-lab/shared/team-rules.md, «Memory»). Not here, not in LEARNINGS.md.")
+RULES_NEW = ("- On each correction of the owner: one line here, in this file, in the same turn "
+             "(route: ~/.claude-lab/shared/team-rules.md, «Memory»). Not in auto memory, not in LEARNINGS.md.")
+TEAM_ROUTE_FIRST = "- The owner's correction has ONE route. Fix it, then: a feedback note in your auto memory + one line in"
+TEAM_ROUTE_LAST = "  Not into core/rules.md, CLAUDE.md, LEARNINGS.md or a lessons file: one rule, one carrier."
+TEAM_ROUTE_NEW = [
+    "- The owner's correction has ONE route. Fix it, then, in the same turn: one short line in core/rules.md\n",
+    "  (what to do from now on, in the owner's words) and answer «Записал в правила».\n",
+    "  Not into auto memory, CLAUDE.md, LEARNINGS.md or a lessons file: one rule, one carrier.\n",
+]
+TEAM_CANCEL_PREFIX = "- Cancel: a new note with `--cancels <old slug>`"
+TEAM_SKILLS = "## Skills first"
+TEAM_CANCEL_NEW = "- Cancel: rewrite or delete that line in core/rules.md («отменяет X»).\n"
+
+
+def eol(line: str) -> str:
+    return line[len(line.rstrip("\r\n")):] or "\n"
+
+
+def bare(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def span(begin: str, end: str) -> tuple[int, int] | None:
+    bs = [i for i, ln in enumerate(lines) if bare(ln) == begin]
+    es = [i for i, ln in enumerate(lines) if bare(ln) == end]
+    if len(bs) == 1 and len(es) == 1 and bs[0] < es[0]:
+        return bs[0], es[0]
+    return None
+
+
+changed = False
+
+if kind == "starter":
+    sp = span(s_begin, s_end)
+    if sp is not None:
+        b, e = sp
+        one = next((i for i in range(b + 1, e) if lines[i].startswith("## 1. ")), None)
+        five = None if one is None else next(
+            (i for i in range(one + 1, e) if lines[i].startswith("## 5. ")), None)
+        if one is not None and five is not None:
+            del lines[one:five]
+            changed = True
+        b, e = span(s_begin, s_end)
+        for i in range(b + 1, e):
+            if bare(lines[i]) == STARTER_HEAD[0]:
+                lines[i] = STARTER_HEAD[1] + eol(lines[i])
+                changed = True
+        for i in range(b + 1, e - 1):
+            if bare(lines[i]) == STARTER_TAIL[0][0] and bare(lines[i + 1]) == STARTER_TAIL[0][1]:
+                lines[i:i + 2] = [STARTER_TAIL[1] + eol(lines[i + 1])]
+                changed = True
+                break
+    text = "".join(lines)
+    # Present = both markers, or pasted by hand: the rule-11 heading and every heading 9-13.
+    marked = o_begin in text and o_end in text
+    pasted = probe in text and all(
+        any(ln.startswith(f"## {n}. ") for ln in lines) for n in range(9, 14))
+    if not marked and not pasted:
+        with open(tpl, encoding="utf-8", newline="") as fh:
+            block = fh.read()
+        if not block.endswith("\n"):
+            block += "\n"
+        owner = ["\n", o_begin + "\n", block, o_end + "\n"]
+        sp = span(s_begin, s_end)
+        if sp is not None:
+            lines[sp[1] + 1:sp[1] + 1] = owner
+        else:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines += owner
+        changed = True
+elif kind == "rules":
+    for i, ln in enumerate(lines):
+        if bare(ln) == RULES_OLD:
+            lines[i] = RULES_NEW + eol(ln)
+            changed = True
+elif kind == "team":
+    # Only text exactly as the installer wrote it (template lines, {{X}} = any value) is replaced;
+    # a part the owner edited stays as it is.
+    with open(team_tpl, encoding="utf-8") as fh:
+        tl = fh.read().splitlines()
+
+    def tpl_part(first: str, stop) -> list[str]:
+        i = next(k for k, ln in enumerate(tl) if ln.startswith(first))
+        j = next(k for k in range(i + 1, len(tl) + 1) if k == len(tl) or stop(k, tl[k]))
+        return tl[i:j]
+
+    def pattern(t: str) -> re.Pattern[str]:
+        parts = re.split(r"\{\{[A-Z_]+\}\}", t)
+        return re.compile(".+?".join(re.escape(x) for x in parts) + r"\Z")
+
+    def exact_at(i: int, part: list[str]) -> bool:
+        return i + len(part) <= len(lines) and all(
+            pattern(t).match(bare(lines[i + k])) for k, t in enumerate(part))
+
+    skills = tpl_part(TEAM_SKILLS, lambda k, ln: ln.startswith("## "))
+    route = tpl_part(TEAM_ROUTE_FIRST, lambda k, ln: bare(tl[k - 1]) == TEAM_ROUTE_LAST)
+    cancel = tpl_part(TEAM_CANCEL_PREFIX, lambda k, ln: True)
+    h = next((i for i, ln in enumerate(lines) if bare(ln) == TEAM_SKILLS), None)
+    if h is not None:
+        if exact_at(h, skills):
+            del lines[h:h + len(skills)]
+            changed = True
+        else:
+            print("team-rules: «Skills first» edited by the owner -- left as it is.", file=sys.stderr)
+    # The route and its «Cancel» line move together: both as written, or both left as they are.
+    f = next((i for i, ln in enumerate(lines) if bare(ln) == TEAM_ROUTE_FIRST), None)
+    c = next((i for i, ln in enumerate(lines) if ln.startswith(TEAM_CANCEL_PREFIX)), None)
+    if f is not None or c is not None:
+        if f is not None and c is not None and c > f and exact_at(f, route) and exact_at(c, cancel):
+            lines[c] = TEAM_CANCEL_NEW
+            lines[f:f + len(route)] = TEAM_ROUTE_NEW
+            changed = True
+        else:
+            print("team-rules: the correction route or its «Cancel» line was edited by the owner -- "
+                  "both left as they are.", file=sys.stderr)
+else:
+    sys.exit(2)
+
+if not changed:
+    sys.exit(1)
+with open(out, "w", encoding="utf-8", newline="") as fh:
+    fh.write("".join(lines))
+PY3
+}
+
+# _azv_fix_tmp <kind> <file> -- the solo texts applied to a file the installer is about to write
+# (fresh render, root's tmp); rc 0 also when there was nothing to change.
+_azv_fix_tmp() {
+    local out rc=0
+    out=$(mktemp)
+    TMPFILES+=("$out")
+    _azv_fix "$1" "$2" "$out" || rc=$?
+    [[ "$rc" -eq 1 ]] && return 0
+    [[ "$rc" -eq 0 ]] || die "Cannot lay down the --solo texts (${1}) in ${2}."
+    cat -- "$out" > "$2"
+}
+
+# _azv_fix_file <kind> <file> -- the solo texts in an installed file: read once as the agent
+# user, backup next to it (.bak-<date>-owner-work), both written as the agent user, the rest of
+# the text kept.
+# A missing file is skipped; someone else's file (a link to /etc/...) stops. Idempotent.
+_azv_fix_file() {
+    local kind=$1 dst
+    dst=$(readlink -f -- "$2") || return 0
+    [[ -f "$dst" ]] || return 0
+    # A link the agent user planted to someone else's file (/etc/...) is never rewritten as root.
+    [[ "$(stat -c %U -- "$dst")" == "$AGENT_USER" ]] \
+        || die "${dst} is not owned by ${AGENT_USER}; --solo texts not changed."
+
+    local tmp bak_tmp bak mode rc=0
+    tmp=$(mktemp)
+    bak_tmp=$(mktemp)
+    TMPFILES+=("$tmp" "$bak_tmp")
+    # Read once, as the agent user: a file swapped for a link to a root-only file after the
+    # check above is unreadable here, so no secret lands in the result or the backup.
+    as_agent cat -- "$dst" > "$bak_tmp" || die "Cannot read ${dst} as ${AGENT_USER}; --solo texts not changed."
+    _azv_fix "$kind" "$bak_tmp" "$tmp" || rc=$?
+    [[ "$rc" -eq 1 ]] && return 0
+    [[ "$rc" -eq 0 ]] || die "Cannot update ${dst} (rc=${rc}); file left as it was."
+
+    # Backup and file are written AS THE AGENT USER (_agent_write): a symlink planted at either
+    # name or a swapped parent dir can only point the write at the agent's own files.
+    bak="${dst}.bak-$(date +%Y%m%d-%H%M%S)-owner-work"
+    mode=$(stat -c '%a' -- "$dst")
+    _agent_write "$bak_tmp" "$bak" "$mode" || die "Cannot back up ${dst}; --solo texts not changed."
+    _agent_write "$tmp" "$dst" "$mode" || die "Cannot write ${dst} (backup: ${bak})."
+    ok "--solo texts (${kind}) in ${dst} (backup: ${bak})."
+}
+
+# ensure_azv_owner_rules FILE -- the starter part of the above for an installed global CLAUDE.md.
+ensure_azv_owner_rules() {
+    _azv_fix_file starter "$1"
 }
 
 # RED secrets rule: passwords, keys, access and internal details go out only by
@@ -2807,9 +3059,15 @@ SJEOF
             LANGUAGE   "$OPERATOR_LANGUAGE" \
             TIMEZONE   "$OPERATOR_TIMEZONE"
         _starter_rules_block >> "$tmp"
+        if [[ "$SOLO" == "1" ]]; then
+            _azv_fix_tmp starter "$tmp"
+        fi
         write_as_user "$tmp" "$global_claude_md" 0644
     else
         ensure_starter_rules "$global_claude_md"
+        if [[ "$SOLO" == "1" ]]; then
+            ensure_azv_owner_rules "$global_claude_md"
+        fi
     fi
     ensure_red_secrets_rule "$global_claude_md"
 
@@ -3066,6 +3324,66 @@ install_superpowers() {
 
     fix_owner "$plugins_dir"
     ok "Superpowers installed at ${sp_dir}"
+}
+
+# disable_superpowers -- --solo: «Агент за вечер» runs without Superpowers (its brainstorm/plan
+# skills make a single owner-facing agent propose its own ideas and redo work). Switches it off
+# where install_superpowers switched it on: enabledPlugins "<name>@..." true -> false in
+# ~/.claude/settings.json and plugins.superpowers.enabled true -> false in plugins/config.json.
+# Reversible (set back to true), nothing deleted, each changed file backed up next to it first
+# (.bak-<date>-superpowers-off). Idempotent; a missing file is skipped; rc 1 when a file that is
+# a symlink, someone else's or broken JSON was left as it is (warned).
+disable_superpowers() {
+    local settings="${AGENT_HOME}/.claude/settings.json"
+    local cfg="${AGENT_HOME}/.claude/plugins/config.json"
+    local manifest="${AGENT_HOME}/.claude/plugins/superpowers/.claude-plugin/marketplace.json"
+    local pname="" f filter tmp mode bak_tmp bak left=0
+
+    pname=$(jq -er '.plugins[0].name' "$manifest" 2>/dev/null) || pname=""
+    [[ "$pname" =~ ^[A-Za-z0-9._-]+$ ]] || pname="superpowers"
+
+    for f in "$settings" "$cfg"; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        if [[ -L "$f" || ! -f "$f" || "$(stat -c %U -- "$f")" != "$AGENT_USER" ]]; then
+            warn "${f} is a symlink, not a file or not owned by ${AGENT_USER} -- left as it is, Superpowers not switched off there."
+            left=1
+            continue
+        fi
+        tmp=$(mktemp)
+        bak_tmp=$(mktemp)
+        TMPFILES+=("$tmp" "$bak_tmp")
+        # Read once, as the agent user (a swap to a root-only file after the check stays unread).
+        as_agent cat -- "$f" > "$bak_tmp" || {
+            warn "Cannot read ${f} as ${AGENT_USER} -- left as it is, Superpowers not switched off there."
+            left=1
+            continue
+        }
+        jq -s -e 'length == 1 and (.[0] | type) == "object"' "$bak_tmp" >/dev/null 2>&1 || {
+            warn "${f} is not one JSON object -- left as it is, Superpowers not switched off there."
+            left=1
+            continue
+        }
+        if [[ "$f" == "$settings" ]]; then
+            filter='if (.enabledPlugins | type) == "object" then .enabledPlugins |= with_entries(
+                        if (.key | startswith($n + "@")) and .value == true then .value = false else . end)
+                    else . end'
+        else
+            filter='if (.plugins.superpowers? | type) == "object" and .plugins.superpowers.enabled == true
+                    then .plugins.superpowers.enabled = false else . end'
+        fi
+        jq --arg n "$pname" "$filter" "$bak_tmp" > "$tmp" 2>/dev/null || { warn "jq failed on ${f} -- left as it is."; left=1; continue; }
+        jq -e -n --slurpfile a "$bak_tmp" --slurpfile b "$tmp" '$a == $b' >/dev/null 2>&1 && continue
+        bak="${f}.bak-$(date +%Y%m%d-%H%M%S)-superpowers-off"
+        mode=$(stat -c '%a' -- "$f")
+        _agent_write "$bak_tmp" "$bak" "$mode" || die "Cannot back up ${f}; Superpowers not switched off."
+        if ! _agent_write "$tmp" "$f" "$mode"; then
+            warn "Cannot write ${f} -- Superpowers not switched off there (backup: ${bak})."
+            left=1
+            continue
+        fi
+        ok "Superpowers switched off in ${f} (backup: ${bak})."
+    done
+    return "$left"
 }
 
 # =============================================================================
@@ -4231,6 +4549,9 @@ install_team_refs() {
             USER_NAME "$OPERATOR_NAME" LIB "$GUARD_LIB_DIR" CONFIG_ROOT "$CONFIG_ROOT" USER "$AGENT_USER" \
             AGENT_NAME "$MAIN_AGENT_NAME" DOCTOR_NAME "$DOCTOR_NAME"
         if [[ "$f" == team-rules ]]; then
+            if [[ "$SOLO" == "1" ]]; then
+                _azv_fix_tmp team "$tmp"
+            fi
             _agent_write "$tmp" "${shared}/${f}.md" 0644 0 || fail=1
         else
             _agent_write "$tmp" "${shared}/${f}.md" 0644 1 || fail=1
@@ -4527,10 +4848,31 @@ _coder_unit_word() {
     return 0
 }
 
+# _richard_unit_word -- " claude-richard" unless --solo skipped Richard (no unit on this server).
+_richard_unit_word() {
+    [[ "$RICHARD_SKIPPED" == "1" ]] || printf ' %s' claude-richard
+    return 0
+}
+
+# _jarvis_no_bot_notes -- the Russian how-to when --solo ran without the Jarvis bot (#1920 a); else nothing.
+_jarvis_no_bot_notes() {
+    [[ "$JARVIS_SKIPPED" == "1" ]] || return 0
+    printf '\n\n%bJarvis: бот пока не подключён, служба %s не включена.%b Создай бота у @BotFather (/newbot),\n' \
+        "$C_YELLOW" "$JARVIS_UNIT" "$C_NC"
+    printf '  впиши его строкой TELEGRAM_BOT_TOKEN=<токен> в %s/channel.env\n' "$JARVIS_ENV_DIR"
+    printf '  (свой id из @userinfobot в TELEGRAM_ALLOWED_USER_IDS и TELEGRAM_ALLOWED_CHAT_IDS), затем:\n'
+    printf '      systemctl enable --now %s\n' "$JARVIS_UNIT"
+}
+
 final_instructions() {
     local jarvis_label="@${JARVIS_BOT_USERNAME:-<fill-in>}"
     local richard_label="@${RICHARD_BOT_USERNAME:-<fill-in>}"
-    local tokens_filled
+    local tokens_filled sp_plugin_line="" sp_check_line=""
+    # --solo installs no Superpowers: no lines about it.
+    if [[ "$SOLO" != "1" ]]; then
+        sp_plugin_line=$'\n'"  - Plugin:    ${AGENT_HOME}/.claude/plugins/superpowers/"
+        sp_check_line=$'\n'"        ls ${AGENT_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l"
+    fi
     tokens_filled="Jarvis token: $([[ -n "$JARVIS_BOT_TOKEN" ]] && echo yes || echo no), Richard token: $([[ -n "$RICHARD_BOT_TOKEN" ]] && echo yes || echo no), your user ID: $([[ -n "$TG_USER_ID" ]] && echo yes || echo no)"
 
     cat <<EOF
@@ -4546,15 +4888,14 @@ Installed on this VPS:
   - Jarvis:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/  (systemd: ${JARVIS_UNIT})
                env: ${JARVIS_ENV_DIR}/channel.env
   - Coder:     $([[ "$CODER_INSTALLED" == "1" ]] && echo "${AGENT_HOME}/.claude-lab/coder/.claude/  (systemd: ${CODER_UNIT}, env: ${CODER_ENV_DIR}/channel.env, bot: @${CODER_BOT_USERNAME:-<fill-in>})" || echo "not installed: intensive stage (its own bot): sudo bash install.sh --stage intensive")
-  - Richard:   ${RICHARD_HOME}                       (systemd: claude-richard)
+  - Richard:   $([[ "$RICHARD_SKIPPED" == "1" ]] && echo "not installed: --solo without his bot (add: sudo NEUROOTDEL_RICHARD_BOT_TOKEN=<token> bash install.sh --solo)" || echo "${RICHARD_HOME}                       (systemd: claude-richard)")
   - Auditor:   $([[ "$AUDITOR_INSTALLED" == "1" ]] && echo "$(auditor_hermes_home)/  (Hermes on GPT, systemd: ${AUDITOR_UNIT} + ${AUDITOR_BRIDGE_UNIT}, bot: @${AUDITOR_BOT_USERNAME:-<fill-in>}, role: $(auditor_hermes_home)/SOUL.md)" || echo "not installed: intensive stage (its own bot): sudo bash install.sh --stage intensive")
   - Skills:    ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/  ($(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} )) skills)
   - Login watch: hourly, the agent's own bot tells you when Claude login is lost
-                 (stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP)
-  - Plugin:    ${AGENT_HOME}/.claude/plugins/superpowers/
+                 (stop: touch /var/lib/${AGENT_USER}-auth-watch/STOP)${sp_plugin_line}
   - Sudoers:   ${SUDOERS_FILE}  (narrow, 0440)
 
-$(printf '%b' "$C_BOLD")Tokens filled during install:$(printf '%b' "$C_NC") ${tokens_filled}
+$(printf '%b' "$C_BOLD")Tokens filled during install:$(printf '%b' "$C_NC") ${tokens_filled}$(_jarvis_no_bot_notes)
 
 $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not the student:$(printf '%b' "$C_NC")
 
@@ -4571,11 +4912,11 @@ $(printf '%b' "$C_BOLD")NEXT STEPS -- these are for the root-Claude agent, not t
         #   TELEGRAM_BOT_TOKEN=<token>, and your id in BOTH
         #   TELEGRAM_ALLOWED_USER_IDS=<id> and TELEGRAM_ALLOWED_CHAT_IDS=<id>
         #   Permission prompts ("allow this command?") go only to TELEGRAM_ALLOWED_USER_IDS
-        # Richard: ${RICHARD_HOME}/.env -- TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>
+        # Richard: $([[ "$RICHARD_SKIPPED" == "1" ]] && echo "not installed -- sudo NEUROOTDEL_RICHARD_BOT_TOKEN=<token> bash install.sh --solo" || echo "${RICHARD_HOME}/.env -- TELEGRAM_BOT_TOKEN=..., ALLOWED_USERS=<id>")
 
-        sudo systemctl enable ${JARVIS_UNIT}$(_coder_unit_word) claude-richard
-        sudo systemctl restart ${JARVIS_UNIT}$(_coder_unit_word) claude-richard
-        sudo systemctl status  ${JARVIS_UNIT}$(_coder_unit_word) claude-richard --no-pager
+        sudo systemctl enable ${JARVIS_UNIT}$(_coder_unit_word)$(_richard_unit_word)
+        sudo systemctl restart ${JARVIS_UNIT}$(_coder_unit_word)$(_richard_unit_word)
+        sudo systemctl status  ${JARVIS_UNIT}$(_coder_unit_word)$(_richard_unit_word) --no-pager
         sudo journalctl -u ${JARVIS_UNIT} -f       # Jarvis logs
         sudo -u ${AGENT_USER} tmux -L ${JARVIS_UNIT} capture-pane -p -t ${JARVIS_UNIT} | tail -30   # Jarvis screen
 
@@ -4593,10 +4934,9 @@ $(_offsite_final_notes)
         sudo -u ${AGENT_USER} bash -lc 'which claude'         # ${AGENT_HOME}/.local/bin/claude
         ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/          # CLAUDE.md, core/, skills/
         systemctl is-active ${JARVIS_UNIT}                       # active (after steps 1+2)
-        systemctl is-active claude-richard                      # active (after steps 1+2)$([[ "$CODER_INSTALLED" == "1" ]] && printf '\n        systemctl is-active %s                       # active (after steps 1+2)' "$CODER_UNIT")
+$([[ "$RICHARD_SKIPPED" == "1" ]] || printf '\n        systemctl is-active claude-richard                      # active (after steps 1+2)')$([[ "$CODER_INSTALLED" == "1" ]] && printf '\n        systemctl is-active %s                       # active (after steps 1+2)' "$CODER_UNIT")
         ls -la ${SUDOERS_FILE}                    # exists, 0440
-        ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # $(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))
-        ls ${AGENT_HOME}/.claude/plugins/superpowers/skills/ 2>/dev/null | wc -l
+        ls ${AGENT_HOME}/.claude-lab/jarvis/.claude/skills/ | wc -l   # $(( ${#SKILLS_FROM_TEMPLATE[@]} + ${#SKILLS_FROM_INSTALLER[@]} ))${sp_check_line}
 
   $(printf '%b' "$C_YELLOW")4.$(printf '%b' "$C_NC") Group watch (status: ${GROUP_WATCH_STATUS:-off}). Jarvis does not see group messages by itself;
       with a Telegram user-account chip on this server, turn it on for a group (its id also goes into
@@ -4607,7 +4947,7 @@ $(_offsite_final_notes)
         # stop: sudo touch /var/lib/${AGENT_USER}-group-watch/main/STOP && sudo systemctl disable --now ${AGENT_USER}-group-watch@main
 
   $(printf '%b' "$C_YELLOW")5.$(printf '%b' "$C_NC") Student talks to Jarvis in Telegram: ${jarvis_label}
-      If Jarvis dies, the student messages Richard:  ${richard_label}
+$([[ "$RICHARD_SKIPPED" == "1" ]] || printf '      If Jarvis dies, the student messages Richard:  %s\n' "$richard_label")
 
   $(printf '%b' "$C_YELLOW")6.$(printf '%b' "$C_NC") End-of-stage check (stage: ${STAGE:-workshop}), runs below now and any time later,
       after the logins of steps 1-2 run it again, every line must be ✅:
@@ -4621,11 +4961,12 @@ EOF
 # MAIN
 # =============================================================================
 
-# parse_args <args...> -- --solo, --stage workshop|intensive (or --stage=...). A wrong stage stops here.
+# parse_args <args...> -- --solo, --azv-owner-rules, --stage workshop|intensive (or --stage=...). A wrong stage stops here.
 parse_args() {
     while (($#)); do
         case "$1" in
             --solo) SOLO=1 ;;
+            --azv-owner-rules) AZV_OWNER_RULES_ONLY=1 ;;
             --stage)
                 [[ $# -ge 2 ]] || die "--stage needs a value: workshop or intensive."
                 STAGE_ARG="$2"; shift ;;
@@ -4636,6 +4977,64 @@ parse_args() {
     done
     [[ -z "$STAGE_ARG" || "$STAGE_ARG" == workshop || "$STAGE_ARG" == intensive ]] \
         || die "--stage must be workshop or intensive (got: ${STAGE_ARG:-<empty>})."
+}
+
+# azv_refresh_correction_hooks -- installed «Агент за вечер»: the two correction hooks of this
+# installer (their solo branch sends the owner's correction to core/rules.md) into the root-owned
+# lib dir, the previous copy kept as .bak-<date>-owner-work. A file already current, a hook not on
+# this install, or one an old guard_conf.py could not run is left alone.
+azv_refresh_correction_hooks() {
+    local n src dst left=0
+    if [[ ! -d "${GUARD_LIB_DIR}/hooks" || -L "${GUARD_LIB_DIR}" || -L "${GUARD_LIB_DIR}/hooks" ]]; then
+        warn "${GUARD_LIB_DIR}/hooks missing -- correction hooks not updated."
+        return 1
+    fi
+    for n in correction-detector.py correction-closed.py; do
+        src="${INSTALLER_ROOT}/lib/hooks/${n}"
+        dst="${GUARD_LIB_DIR}/hooks/${n}"
+        [[ -f "$src" ]] || { warn "${src} missing -- ${n} not updated."; left=1; continue; }
+        # Not there = not registered on this install: nothing to update. A guard_conf.py older than
+        # the hooks (no correction_group_chat_ids, before 05.11) would break them: left as they are.
+        [[ -f "$dst" ]] || continue
+        if ! grep -qF correction_group_chat_ids "${GUARD_LIB_DIR}/guard_conf.py" 2>/dev/null; then
+            warn "${GUARD_LIB_DIR}/guard_conf.py is older than the correction hooks -- ${n} not updated (full re-run with --solo needed)."
+            left=1
+            continue
+        fi
+        cmp -s -- "$src" "$dst" && continue
+        if [[ -f "$dst" ]]; then
+            cp -p -- "$dst" "${dst}.bak-$(date +%Y%m%d-%H%M%S)-owner-work" \
+                || { warn "Cannot back up ${dst} -- not updated."; left=1; continue; }
+        fi
+        install -m 0755 -o root -g root "$src" "$dst" || { warn "Cannot write ${dst}."; left=1; continue; }
+        ok "Correction hook updated: ${dst}."
+    done
+    return "$left"
+}
+
+# azv_owner_rules_only -- --azv-owner-rules: on an installed «Агент за вечер» swaps the starter
+# rules 1-4 for the owner-work rules 9-13 in the global CLAUDE.md, puts the solo texts into
+# shared/team-rules.md and core/rules.md (_azv_fix), switches Superpowers off, updates the
+# correction hooks (azv_refresh_correction_hooks) and
+# does nothing else (no packages, questions, key, services). Stops on a server without --solo
+# materials.
+azv_owner_rules_only() {
+    local f="${AGENT_HOME}/.claude/CLAUDE.md" real
+    [[ -d "$AZV_AGENT_DIR" ]] \
+        || die "Не найдено ${AZV_AGENT_DIR}: эта команда только для установленного «Агента за вечер»."
+    real=$(readlink -f -- "$f") && [[ -f "$real" ]] \
+        || die "Не найден файл ${f}: агент на этом сервере ещё не установлен."
+    ensure_azv_owner_rules "$f"
+    _azv_fix_file team "${AGENT_HOME}/.claude-lab/shared/team-rules.md"
+    _azv_fix_file rules "${AGENT_HOME}/.claude-lab/jarvis/.claude/core/rules.md"
+    ok "Правила работы с владельцем (9-13) стоят в ${f}, правки владельца пишутся в core/rules.md."
+    if disable_superpowers; then
+        ok "Superpowers выключен."
+    else
+        warn "Superpowers выключен не везде, причина выше. Напиши куратору."
+    fi
+    azv_refresh_correction_hooks || warn "Хуки поправок обновлены не все, причина выше. Напиши куратору."
+    ok "Агент подхватит изменения с новой сессии (ночной сброс или перезапуск)."
 }
 
 # run_stage_verify -- the end-of-stage check (verify-stage.sh): what was taught and installed, ✅/❌.
@@ -4661,6 +5060,11 @@ main() {
         return 0
     fi
     parse_args "$@"
+    if [[ "$AZV_OWNER_RULES_ONLY" == "1" ]]; then
+        preflight
+        azv_owner_rules_only
+        return 0
+    fi
 
     banner
     preflight
@@ -4684,7 +5088,11 @@ main() {
     if [[ "$SOLO" == "1" ]]; then
         azv_install_payload
     fi
-    install_superpowers
+    if [[ "$SOLO" == "1" ]]; then
+        disable_superpowers || warn "Superpowers is not switched off everywhere -- see the warnings above."
+    else
+        install_superpowers
+    fi
     install_sudoers
     install_memory_cron
     install_guard
