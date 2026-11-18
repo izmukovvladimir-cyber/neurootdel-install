@@ -314,6 +314,42 @@ build; printf 'EDITORIAL_ENABLED=1\nCODEX_CHECK_BIN=~/cc.sh\n' >"$H/.claude-lab/
 mkdir -p "$H/.local/bin"; printf '#!/bin/sh\n' >"$H/.local/bin/codex"; chmod +x "$H/.local/bin/codex"; run
 check "editorial on, skill + codex: ✅"         out_has "✅ Редакционный контур: Codex установлен"
 
+# --- before the first meeting: core/TONE_OF_VOICE.md is not there yet -> ⚠, not ❌ (#1920) -----------
+tov_layout() {
+    printf '@core/TONE_OF_VOICE.md\n' >>"$J_MD"
+    printf '# USER\n<!-- onboarding:installer-default -->\n' >"$H/.claude-lab/jarvis/.claude/core/USER.md"
+}
+build; tov_layout; run
+check "tone: before the meeting -> ⚠ line"      out_has "⚠ Jarvis: core/TONE_OF_VOICE.md появится после знакомства"
+check "tone: before the meeting -> @ check ✅"  out_has "✅ Jarvis: файлы по ссылкам @ из CLAUDE.md существуют"
+check "tone: before the meeting -> exit 0"     test "$RC" -eq 0
+check "tone: total names the ⚠"                out_has "1 ⚠"
+build; tov_layout; sed -i '/onboarding:installer-default/d' "$H/.claude-lab/jarvis/.claude/core/USER.md"; run
+check "tone: after the meeting, file gone -> ❌" fails_with "Jarvis: файлы по ссылкам @ из CLAUDE.md существуют"
+check "tone: after the meeting -> no ⚠"         not out_has "⚠ Jarvis: core/TONE_OF_VOICE.md"
+build; tov_layout; echo tone >"$H/.claude-lab/jarvis/.claude/core/TONE_OF_VOICE.md"; run
+check "tone: file there -> no ⚠, exit 0"        bash -c '! grep -qF "⚠" "$0" && [[ "$1" -eq 0 ]]' "${TDIR}/out" "$RC"
+build; tov_layout; printf '@core/missing.md\n' >>"$J_MD"; run
+check "tone: another @ file missing -> still ❌" fails_with "Jarvis: файлы по ссылкам @ из CLAUDE.md существуют"
+
+# --- --solo without Richard's bot: ⚠ «не ставился», not ❌ (#1920) ----------------------------------
+build; solo_layout; printf 'ALLOWED_USERS=%s\n' "$OWNER" >"${R}/opt/richard/.env"; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "richard skipped (solo, no token): ⚠"    out_has "⚠ Richard не ставился (соло без токена)"
+check "richard skipped: no ❌ for Richard"      not out_has "❌ Richard"
+check "richard skipped: global CLAUDE.md still checked" out_has "✅ Общий CLAUDE.md на месте"
+check "richard skipped: exit 0"                test "$RC" -eq 0
+build; solo_layout; rm -f "${R}/opt/richard/.env"; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "richard skipped (no env file): ⚠"       out_has "⚠ Richard не ставился"
+build; solo_layout; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "solo with Richard's token, service down: ❌" fails_with "Richard: сервис claude-richard работает"
+build; printf 'ALLOWED_USERS=%s\n' "$OWNER" >"${R}/opt/richard/.env"; printf 'channel-jarvis\n' >"${TDIR}/active"; run
+check "team without Richard's token: ❌, no ⚠"  bash -c 'grep -qF "❌ Richard: свой бот" "$0" && ! grep -qF "⚠ Richard" "$0"' "${TDIR}/out"
+if [[ "$(id -u)" -ne 0 ]]; then
+    build; solo_layout; printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TOKEN_R" >"${R}/opt/richard/.env"; chmod 000 "${R}/opt/richard/.env"
+    printf 'channel-jarvis\n' >"${TDIR}/active"; run; chmod 600 "${R}/opt/richard/.env"
+    check "richard env unreadable: no ⚠ (proves nothing)" not out_has "⚠ Richard не ставился"
+fi
+
 # --- no guard.conf ---------------------------------------------------------------------------------
 OUT=$(PATH="${BIN}:${PATH}" NEUROOTDEL_GUARD_CONF="${TDIR}/none" bash "$V" 2>&1) && RC=0 || RC=$?
 check "no guard.conf: exit 2"                  test "$RC" -eq 2

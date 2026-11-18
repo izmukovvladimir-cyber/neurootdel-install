@@ -50,8 +50,11 @@ HERMES_HOME="${H}/.hermes"
 
 PASS=0
 FAIL=0
+WARN=0
 yes_() { PASS=$((PASS + 1)); printf '✅ %s\n' "$1"; }
 no_()  { FAIL=$((FAIL + 1)); printf '❌ %s\n   как починить: %s\n' "$1" "$2"; }
+# warn_ <text> -- not a failure: a thing that comes later by itself or was left out on purpose.
+warn_() { WARN=$((WARN + 1)); printf '⚠ %s\n' "$1"; }
 # check <text> <fix hint> <command...> -- one line of the checklist.
 check() {
     local text=$1 hint=$2; shift 2
@@ -102,16 +105,19 @@ bots_unique() {
     return 0
 }
 
-# at_paths_ok <CLAUDE.md> -- every "@path" line of the file points at an existing file
-# (~ = the agent's home, a relative path is taken from the file's dir).
+# at_paths_ok <CLAUDE.md> [skip...] -- every "@path" line of the file points at an existing file
+# (~ = the agent's home, a relative path is taken from the file's dir); a path written exactly as one
+# of <skip> is not checked.
 at_paths_ok() {
-    local f=$1 dir p
+    local f=$1 dir p s
+    shift
     [[ -f "$f" ]] || return 1
     dir=$(dirname "$f")
     while IFS= read -r p; do
         p="${p#@}"
         p="${p%%[[:space:]]*}"
         [[ -n "$p" ]] || continue
+        for s in "$@"; do [[ "$p" == "$s" ]] && continue 2; done
         case "$p" in
             "~/"*) p="${H}/${p#\~/}" ;;
             /*) ;;
@@ -233,9 +239,19 @@ check_channel_agent() {
     check "${label}: рабочая папка, CLAUDE.md и правила на месте" \
         "запусти установщик снова: он допишет недостающие файлы в ${ws}, твои не тронет" \
         ws_files_ok "$ws"
+    # core/TONE_OF_VOICE.md is written by the first meeting (onboarding); before it (USER.md still holds the
+    # installer's marker) its absence is expected, a ⚠ instead of a ❌.
+    local later=()
+    if [[ ! -e "${ws}/core/TONE_OF_VOICE.md" ]] && grep -qxF "@core/TONE_OF_VOICE.md" "${ws}/CLAUDE.md" 2>/dev/null \
+        && grep -qF "onboarding:installer-default" "${ws}/core/USER.md" 2>/dev/null; then
+        later=(core/TONE_OF_VOICE.md)
+    fi
     check "${label}: файлы по ссылкам @ из CLAUDE.md существуют (загружаются)" \
         "открой ${ws}/CLAUDE.md, найди строку с @ на несуществующий файл: верни файл или убери строку" \
-        at_paths_ok "${ws}/CLAUDE.md"
+        at_paths_ok "${ws}/CLAUDE.md" "${later[@]}"
+    if ((${#later[@]})); then
+        warn_ "${label}: core/TONE_OF_VOICE.md появится после знакомства (агент спросит о тоне в первом разговоре)"
+    fi
     if [[ "${AGENT_MODE:-team}" == solo ]]; then
         # --solo: team rules and learned practices are references (Read on demand), not loaded every turn.
         check "${label}: справочники на месте (правила команды, learned-practices) и названы в CLAUDE.md" \
@@ -339,9 +355,24 @@ samples_line() {
     fi
 }
 
+# richard_skipped <env> <unit> -- --solo without Richard's bot: no token in his env file (missing or
+# readable and empty; an unreadable one proves nothing) and his service not running.
+richard_skipped() {
+    [[ "${AGENT_MODE:-team}" == solo ]] || return 1
+    [[ ! -e "$1" || -r "$1" ]] || return 1
+    [[ -z "$(env_get "$1" TELEGRAM_BOT_TOKEN)" ]] && ! unit_active "$2"
+}
+
 check_richard() {
     local env="${RICHARD_ENV:-/opt/richard/.env}" unit="${RICHARD_UNIT:-claude-richard}"
     section "Richard"
+    if richard_skipped "$env" "$unit"; then
+        warn_ "Richard не ставился (соло без токена). Добавить позже: sudo NEUROOTDEL_RICHARD_BOT_TOKEN=<токен> bash install.sh --solo"
+        check "Общий CLAUDE.md на месте, файлы по ссылкам @ существуют" \
+            "запусти установщик снова: он восстановит ${H}/.claude/CLAUDE.md" \
+            at_paths_ok "${H}/.claude/CLAUDE.md"
+        return 0
+    fi
     BOT_FILES+=("Richard=${env}")
     check "Richard: сервис ${unit} работает" \
         "после входа в Claude: sudo systemctl restart ${unit}; причина: sudo journalctl -u ${unit} -n 50" \
@@ -421,7 +452,7 @@ fi
 section_server
 check_editorial
 
-printf '\nИтог: %s ✅, %s ❌\n' "$PASS" "$FAIL"
+printf '\nИтог: %s ✅, %s ❌%s\n' "$PASS" "$FAIL" "$( ((WARN)) && printf ', %s ⚠' "$WARN")"
 if [[ "$FAIL" -gt 0 ]]; then
     printf 'Почини строки с ❌ по подсказкам и запусти снова: sudo neurootdel-verify\n'
     exit 1
