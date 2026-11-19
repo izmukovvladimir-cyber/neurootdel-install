@@ -57,6 +57,8 @@ PROTECTED_ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_IDS", "TELEGR
 PLACEHOLDER_RE = re.compile(r"\\\{\\\{[A-Z0-9_]+\\\}\\\}")
 VAR_RE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}?")
 MIN_LITERAL = 12
+# crontab(1) rewrites its own header line with the install time on every write: never owner text
+CRON_STAMP_RE = re.compile(r"^# \(.* installed on .*\)$")
 
 
 def sha256_file(path: Path) -> str:
@@ -366,7 +368,7 @@ def cmd_check(config_path: str) -> int:
             outside_old = _outside_blocks(old_lines, begin_re)
             lost = Counter(outside_old) - Counter(_outside_blocks(new_lines, begin_re))
             for text in lost:
-                if not text.strip() or known.knows(text):
+                if not text.strip() or known.knows(text) or CRON_STAMP_RE.match(text):
                     continue
                 # where, never what: a removed line may hold anything the owner wrote
                 num = next((i for i, x in enumerate(old_lines, 1) if x == text), 0)
