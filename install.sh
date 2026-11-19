@@ -5252,8 +5252,10 @@ UPDATE_REQUIRE_ROOT=1   # tests: 0
 UPDATE_RICHARD_DIR="${RICHARD_HOME}"
 
 # _update_units -- the agent units this install may have.
+# cron too: its memory jobs (rotate, trim) and the guard must not write or restart anything between
+# the two snapshots (crontab(1) itself works without the daemon).
 _update_units() {
-    printf '%s\n' "$JARVIS_UNIT" "$CODER_UNIT" claude-richard "$AUDITOR_UNIT" "$AUDITOR_BRIDGE_UNIT"
+    printf '%s\n' "$JARVIS_UNIT" "$CODER_UNIT" claude-richard "$AUDITOR_UNIT" "$AUDITOR_BRIDGE_UNIT" cron
 }
 
 # _update_roots -- every place the installer writes for the agent (existing ones only), one per line.
@@ -5389,6 +5391,13 @@ _update_start_units() {
 # changes.json + manifest-after.json for the rollback, report.txt, UPDATE_CHECK_LINE for update_finish.
 UPDATE_CHECK_LINE=""
 update_check() {
+    local u
+    # The install steps start cron again (enable --now): stopped once more for the after snapshot.
+    while IFS= read -r u; do
+        if systemctl is-active --quiet "$u" 2>/dev/null; then
+            systemctl stop "$u" 2>/dev/null || warn "Не удалось остановить ${u} перед проверкой."
+        fi
+    done < <(_update_units)
     _update_config "${UPDATE_DIR}/config.json"
     UPDATE_CHECK_LINE=$(python3 "${UPDATE_DIR}/azv-update.py" check "${UPDATE_DIR}/config.json") || UPDATE_CHECK_LINE=""
     chmod 0600 "${UPDATE_DIR}"/*

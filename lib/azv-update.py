@@ -154,6 +154,8 @@ def cmd_verify(manifest_json: str, tgz: str) -> int:
             mem = members.get(path)
             if mem is None:
                 bad += 1
+            elif [mem.mode & 0o7777, mem.uid, mem.gid] != [entry[3], entry[4], entry[5]] and entry[0] == "F":
+                bad += 1   # the rollback applies these as root: they must be what the manifest saw
             elif entry[0] == "L":
                 bad += 0 if mem.issym() and mem.linkname == entry[1] else 1
             elif not mem.isfile():
@@ -172,7 +174,7 @@ def _lines(data: bytes) -> list[str] | None:
     if b"\0" in data[:8192]:
         return None
     try:
-        return [x.rstrip() for x in data.decode("utf-8").splitlines()]
+        return data.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         return None
 
@@ -335,6 +337,9 @@ def cmd_check(config_path: str) -> int:
             if any(rx.search(path) for rx in strict):
                 problems.append(f"STRICT {what}: {path}")
                 continue
+            if new_kind and new_kind != old_kind:
+                problems.append(f"TYPE {path}: {old_kind} -> {new_kind}")
+                continue
             if stage_dir and _under(path, [stage_dir]):
                 # payload file: replaced by the new payload; an owner's edit of it is kept in the backup
                 old = _member(tar, path)
@@ -345,14 +350,14 @@ def cmd_check(config_path: str) -> int:
             if _under(path, managed):
                 report.append(f"managed: {path}")
                 continue
-            if new_kind and new_kind != old_kind:
-                problems.append(f"TYPE {path}: {old_kind} -> {new_kind}")
-                continue
             if old_kind != "F":
                 report.append(f"{what} ({'link' if old_kind == 'L' else 'not in copy'}): {path}")
                 continue
             old = _member(tar, path)
-            old_lines = _lines(old) if old is not None and len(old) <= TEXT_LIMIT else None
+            if old is not None and len(old) > TEXT_LIMIT:
+                problems.append(f"UNCHECKED {what} (over {TEXT_LIMIT // 1024 // 1024} MB, lines not compared): {path}")
+                continue
+            old_lines = _lines(old) if old is not None else None
             if old_lines is None:
                 report.append(f"{what} (binary): {path}")
                 continue
@@ -439,11 +444,13 @@ def cmd_rollback(bdir_s: str) -> int:
             unsafe.append(p)
         elif now.get(p) != after.get(p):
             conflicts.append(p)   # changed again after the update: the newer copy stays
-        elif before[p][0] not in ("F", "L"):
-            conflicts.append(p)   # not in the copy (skipped): nothing to put back
+        elif before[p][0] not in ("F", "L") or (now.get(p) or ["F"])[0] == "S":
+            conflicts.append(p)   # not in the copy, or no hash to prove it is as the update left it
         else:
             restore.append(p)
-    drop = [p for p, entry in d["added"].items() if now.get(p) == entry and _safe_target(p, roots)]
+    # only a file or link with a hash or target proving it is still the update's own is removed
+    drop = [p for p, entry in d["added"].items()
+            if entry[0] in ("F", "L") and now.get(p) == entry and _safe_target(p, roots)]
     kept_new = [p for p in d["added"] if p in now and p not in drop]
     ts = time.strftime("%Y%m%d-%H%M%S")
     with tarfile.open(bdir / f"rolled-back-{ts}.tgz", "w:gz") as out:
@@ -471,22 +478,35 @@ def cmd_rollback(bdir_s: str) -> int:
                 unsafe.append(p)
                 continue
             _make_parents(p, tar, before)
-            if os.path.lexists(p) and (os.path.islink(p) or not os.path.isdir(p)):
-                os.unlink(p)
-            if m.issym():
-                os.symlink(m.linkname, p)
-                if os.geteuid() == 0:
-                    os.lchown(p, m.uid, m.gid)
-            else:
-                # bytes from the copy into a new file (no link of any kind is followed or kept)
-                src = tar.extractfile(m)
-                fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-                with os.fdopen(fd, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+            if os.path.isdir(p) and not os.path.islink(p):
+                conflicts.append(p)   # a directory stands there now: left as it is
+                continue
+            # the old version is built next to the target, then renamed over it in one step:
+            # a full disk or a kill leaves the current file whole, and a retry sees it unchanged
+            tmp = os.path.join(os.path.dirname(p), f".{os.path.basename(p)}.azv-rollback-{os.getpid()}")
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+            try:
+                if m.issym():
+                    os.symlink(m.linkname, tmp)
                     if os.geteuid() == 0:
-                        os.fchown(dst.fileno(), m.uid, m.gid)
-                    os.fchmod(dst.fileno(), m.mode & 0o7777)
-                os.utime(p, (m.mtime, m.mtime), follow_symlinks=False)
+                        os.lchown(tmp, m.uid, m.gid)
+                else:
+                    src = tar.extractfile(m)
+                    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    with os.fdopen(fd, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                        if os.geteuid() == 0:
+                            os.fchown(dst.fileno(), m.uid, m.gid)
+                        os.fchmod(dst.fileno(), m.mode & 0o7777)
+                    os.utime(tmp, (m.mtime, m.mtime), follow_symlinks=False)
+                os.replace(tmp, p)
+            except OSError:
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+                raise
             done_restore.append(p)
     with (bdir / f"rollback-{ts}.txt").open("w", encoding="utf-8") as fh:
         for tag, items in (("restored", done_restore), ("removed_added", done_drop), ("conflict_kept_newer", conflicts),
