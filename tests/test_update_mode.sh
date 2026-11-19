@@ -70,7 +70,10 @@ UPDATE_CRON_DIR="$SB/crond"; UPDATE_CRONTAB_DIR="$SB/crontabs"; UPDATE_REQUIRE_R
 systemctl() {   # remembers which units run: $SB/active (channel-jarvis runs at first)
     printf 'systemctl %s\n' "$*" >> "$SB/systemctl.log"
     case "$1" in
-        is-active) grep -qx "$3" "$SB/active" 2>/dev/null ;;
+        is-active) if [[ "$2" == --quiet ]]; then grep -qx "$3" "$SB/active" 2>/dev/null
+                   elif grep -qx "$2" "$SB/active" 2>/dev/null; then echo active
+                   elif grep -qx "$2" "$SB/activating" 2>/dev/null; then echo activating
+                   else echo inactive; return 3; fi ;;
         stop) sed -i "/^$2\$/d" "$SB/active" ;;
         start|restart) grep -qx "$2" "$SB/active" || printf '%s\n' "$2" >> "$SB/active" ;;
         *) return 0 ;;
@@ -111,6 +114,15 @@ out=$(run "$SB1" 'parse_args --update; echo "U=$UPDATE_MODE S=$SOLO"')
 check "--update sets update mode and --solo" grep -q 'U=1 S=1' <<<"$out"
 out=$(run "$SB1" 'update_rollback() { echo "RB:$1"; }; main --update-rollback /x/y')
 check "--update-rollback <dir> goes to the rollback, nothing else" grep -qx 'RB:/x/y' <<<"$out"
+
+# --- 1b. a unit still starting (activating) counts as running ---------------------------------------
+SB10="${TDIR}/s10"; make_server "$SB10"; : > "${SB10}/active"; printf 'channel-jarvis\n' > "${SB10}/activating"
+out=$(NEUROOTDEL_AZV_KEY=AZV-TEST-0000-0000-0001 run "$SB10" 'update_prepare')
+check "activating unit recorded in was-active (started again after)" grep -qx channel-jarvis "$(cat "${SB10}/state/last-update")/was-active"
+SB11="${TDIR}/s11"; make_server "$SB11"; printf 'channel-jarvis\ncron\n' > "${SB11}/active"
+out=$(NEUROOTDEL_AZV_KEY=AZV-TEST-0000-0000-0001 run "$SB11" 'update_prepare')
+check "cron stopped for the snapshots and recorded to start again" \
+    bash -c "grep -qx cron '$(cat "${SB11}/state/last-update")/was-active' && grep -qx 'systemctl stop cron' '${SB11}/systemctl.log'"
 
 # --- 2. refusals ----------------------------------------------------------------------------------
 out=$(run "$SB1" 'update_prepare' || true)

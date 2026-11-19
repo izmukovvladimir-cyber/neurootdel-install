@@ -5258,6 +5258,14 @@ _update_units() {
     printf '%s\n' "$JARVIS_UNIT" "$CODER_UNIT" claude-richard "$AUDITOR_UNIT" "$AUDITOR_BRIDGE_UNIT" cron
 }
 
+# _update_unit_running <unit> -- active, or on its way (activating / reloading) = running.
+_update_unit_running() {
+    case "$(systemctl is-active "$1" 2>/dev/null)" in
+        active|activating|reloading) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # _update_roots -- every place the installer writes for the agent (existing ones only), one per line.
 _update_roots() {
     local p u
@@ -5286,7 +5294,8 @@ _update_config() {
     UPD_ROOTS="$roots_json" UPD_DIR="$UPDATE_DIR" UPD_STAGE="$AZV_STAGE_DIR" UPD_AZV="$AZV_AGENT_DIR" \
     UPD_MANAGED="$(printf '%s\n' "$GUARD_LIB_DIR" "$AZV_STAGE_DIR" "${ws}/dashi-plugin-claude-code" \
         "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code" "${AGENT_HOME}/.claude/plugins" \
-        "${AGENT_HOME}/.claude.json" "$APT_WRAPPER_BIN" "$VERIFY_BIN" "$OFFSITE_SETUP_BIN")" \
+        "${AGENT_HOME}/.claude.json" "$APT_WRAPPER_BIN" "$VERIFY_BIN" "$OFFSITE_SETUP_BIN" \
+        "${AGENT_HOME}/.claude-lab/shared/state/agents-reset")" \
     UPD_TAG="$INSTALL_TAG" UPD_SOURCES="$(printf '%s\n' "${src[@]}")" python3 - "$1" <<'PY'
 import json, os, sys
 lines = lambda k: [x for x in os.environ[k].split("\n") if x]
@@ -5352,7 +5361,7 @@ update_prepare() {
     # Agent stopped: nothing writes its memory while it is copied and checked; enable_services starts it.
     : > "${UPDATE_DIR}/was-active"
     while IFS= read -r u; do
-        if systemctl is-active --quiet "$u" 2>/dev/null; then
+        if _update_unit_running "$u"; then
             printf '%s\n' "$u" >> "${UPDATE_DIR}/was-active"
             systemctl stop "$u" 2>/dev/null || { _update_start_units; die "Не удалось остановить ${u}, обновление не начинал."; }
         fi
@@ -5382,7 +5391,7 @@ _update_start_units() {
     [[ -n "$dir" && -f "${dir}/was-active" ]] || return 0
     while IFS= read -r u; do
         [[ -n "$u" ]] || continue
-        systemctl is-active --quiet "$u" 2>/dev/null || systemctl start "$u" 2>/dev/null \
+        _update_unit_running "$u" || systemctl start "$u" 2>/dev/null \
             || warn "Не стартовал ${u}: journalctl -u ${u}"
     done < "${dir}/was-active"
 }
@@ -5394,7 +5403,7 @@ update_check() {
     local u
     # The install steps start cron again (enable --now): stopped once more for the after snapshot.
     while IFS= read -r u; do
-        if systemctl is-active --quiet "$u" 2>/dev/null; then
+        if _update_unit_running "$u"; then
             systemctl stop "$u" 2>/dev/null || warn "Не удалось остановить ${u} перед проверкой."
         fi
     done < <(_update_units)
@@ -5461,7 +5470,7 @@ update_rollback() {
     _update_lock
     # Nothing is touched while an agent could still write: a unit that does not stop = no rollback.
     while IFS= read -r u; do
-        if systemctl is-active --quiet "$u" 2>/dev/null && ! systemctl stop "$u" 2>/dev/null; then
+        if _update_unit_running "$u" && ! systemctl stop "$u" 2>/dev/null; then
             _update_start_units "$dir"
             die "Не удалось остановить ${u}, откат не начинал. Напиши куратору."
         fi
@@ -5541,6 +5550,10 @@ main() {
     install_sudoers
     install_memory_cron
     install_guard
+    if [[ "$UPDATE_MODE" == "1" ]]; then
+        # both steps start cron (enable --now); its memory jobs must not write between the snapshots
+        systemctl stop cron 2>/dev/null || true
+    fi
     install_group_watch
     install_auditor
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
