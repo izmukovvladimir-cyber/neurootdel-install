@@ -3602,7 +3602,8 @@ install_memory_cron() {
 
     # Ensure cron service is enabled + running. On minimal Ubuntu images
     # (LXC, cloud) the cron package is installed but not auto-started.
-    systemctl enable --now cron 2>/dev/null \
+    # --update: enabled only; cron stays stopped until the after snapshot (update_finish starts it).
+    systemctl enable $([[ "$UPDATE_MODE" == "1" ]] || echo --now) cron 2>/dev/null \
         || warn "cron service not started -- memory rotation will run after next reboot."
 
     # Merge cron lines with the agent user's existing crontab without clobbering it.
@@ -4154,7 +4155,7 @@ install_guard() {
     as_agent chmod 0700 "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
         "${AGENT_HOME}/backups" "${AGENT_HOME}/backups/memory" "${AGENT_HOME}/backups/offsite" || true
 
-    systemctl enable --now cron 2>/dev/null \
+    systemctl enable $([[ "$UPDATE_MODE" == "1" ]] || echo --now) cron 2>/dev/null \
         || warn "cron service not started -- guard jobs will run after next reboot."
 
     local reset_state="${shared_state}/agents-reset"
@@ -5401,10 +5402,13 @@ _update_start_units() {
 UPDATE_CHECK_LINE=""
 update_check() {
     local u
-    # The install steps start cron again (enable --now): stopped once more for the after snapshot.
+    # Anything an install step started (a unit, cron) is stopped again: the after snapshot is taken
+    # with nothing else writing, or not at all (update_finish then reports the check as failed).
+    UPDATE_CHECK_LINE=""
     while IFS= read -r u; do
-        if _update_unit_running "$u"; then
-            systemctl stop "$u" 2>/dev/null || warn "Не удалось остановить ${u} перед проверкой."
+        if _update_unit_running "$u" && ! systemctl stop "$u" 2>/dev/null; then
+            warn "Не удалось остановить ${u} перед проверкой."
+            return 0
         fi
     done < <(_update_units)
     _update_config "${UPDATE_DIR}/config.json"
@@ -5550,10 +5554,6 @@ main() {
     install_sudoers
     install_memory_cron
     install_guard
-    if [[ "$UPDATE_MODE" == "1" ]]; then
-        # both steps start cron (enable --now); its memory jobs must not write between the snapshots
-        systemctl stop cron 2>/dev/null || true
-    fi
     install_group_watch
     install_auditor
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."

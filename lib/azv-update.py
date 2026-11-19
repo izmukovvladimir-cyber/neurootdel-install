@@ -154,7 +154,7 @@ def cmd_verify(manifest_json: str, tgz: str) -> int:
             mem = members.get(path)
             if mem is None:
                 bad += 1
-            elif [mem.mode & 0o7777, mem.uid, mem.gid] != [entry[3], entry[4], entry[5]] and entry[0] == "F":
+            elif [mem.uid, mem.gid] != [entry[4], entry[5]] or (entry[0] == "F" and mem.mode & 0o7777 != entry[3]):
                 bad += 1   # the rollback applies these as root: they must be what the manifest saw
             elif entry[0] == "L":
                 bad += 0 if mem.issym() and mem.linkname == entry[1] else 1
@@ -350,6 +350,9 @@ def cmd_check(config_path: str) -> int:
             if _under(path, managed):
                 report.append(f"managed: {path}")
                 continue
+            if old_kind == "S":
+                problems.append(f"UNCHECKED {what} (not in the copy, over 50 MB or a transcript): {path}")
+                continue
             if old_kind != "F":
                 report.append(f"{what} ({'link' if old_kind == 'L' else 'not in copy'}): {path}")
                 continue
@@ -405,6 +408,18 @@ def _safe_target(path: str, roots: list[str]) -> bool:
     while parent and not os.path.lexists(parent):
         parent = os.path.dirname(parent)
     return os.path.realpath(parent) == os.path.normpath(parent)
+
+
+def _fresh_name(dirname: str, create) -> str:
+    """A short new name in dirname, made by create(path) (which fails on an existing one); never reuses."""
+    for _ in range(50):
+        t = os.path.join(dirname, f".azvrb-{os.urandom(6).hex()}")
+        try:
+            create(t)
+            return t
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"no free temporary name in {dirname}")
 
 
 def _make_parents(path: str, tar: tarfile.TarFile, before: dict) -> None:
@@ -483,17 +498,18 @@ def cmd_rollback(bdir_s: str) -> int:
                 continue
             # the old version is built next to the target, then renamed over it in one step:
             # a full disk or a kill leaves the current file whole, and a retry sees it unchanged
-            tmp = os.path.join(os.path.dirname(p), f".{os.path.basename(p)}.azv-rollback-{os.getpid()}")
-            if os.path.lexists(tmp):
-                os.unlink(tmp)
+            tmp = ""
             try:
                 if m.issym():
-                    os.symlink(m.linkname, tmp)
+                    tmp = _fresh_name(os.path.dirname(p), lambda t: os.symlink(m.linkname, t))
                     if os.geteuid() == 0:
                         os.lchown(tmp, m.uid, m.gid)
                 else:
                     src = tar.extractfile(m)
-                    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    fds: list[int] = []
+                    tmp = _fresh_name(os.path.dirname(p), lambda t: fds.append(
+                        os.open(t, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)))
+                    fd = fds[0]
                     with os.fdopen(fd, "wb") as dst:
                         shutil.copyfileobj(src, dst)
                         dst.flush()
@@ -504,7 +520,7 @@ def cmd_rollback(bdir_s: str) -> int:
                     os.utime(tmp, (m.mtime, m.mtime), follow_symlinks=False)
                 os.replace(tmp, p)
             except OSError:
-                if os.path.lexists(tmp):
+                if tmp and os.path.lexists(tmp):
                     os.unlink(tmp)
                 raise
             done_restore.append(p)

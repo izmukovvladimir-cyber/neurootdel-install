@@ -124,6 +124,10 @@ out=$(NEUROOTDEL_AZV_KEY=AZV-TEST-0000-0000-0001 run "$SB11" 'update_prepare')
 check "cron stopped for the snapshots and recorded to start again" \
     bash -c "grep -qx cron '$(cat "${SB11}/state/last-update")/was-active' && grep -qx 'systemctl stop cron' '${SB11}/systemctl.log'"
 
+check "cron: both install steps only enable it under --update (no start before the after snapshot)" \
+    test "$(grep -cF 'systemctl enable $([[ "$UPDATE_MODE" == "1" ]] || echo --now) cron' "${REPO}/install.sh")" = 2
+check "cron: no other unconditional start of cron in the installer" test "$(grep -c 'enable --now cron' "${REPO}/install.sh")" = 0
+
 # --- 2. refusals ----------------------------------------------------------------------------------
 out=$(run "$SB1" 'update_prepare' || true)
 check "no key: stops with the command to run" grep -q 'NEUROOTDEL_AZV_KEY=<ключ>' <<<"$out"
