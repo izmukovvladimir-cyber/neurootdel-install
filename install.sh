@@ -25,6 +25,9 @@
 #   sudo bash /root/neurootdel-install.sh --stage workshop    # stage 1: Jarvis + Richard
 #   sudo bash /root/neurootdel-install.sh --stage intensive   # stage 2: adds Coder + Auditor
 #   sudo bash /root/neurootdel-install.sh --azv-owner-rules   # installed «Агент за вечер»: rules 1-4 -> 9-13, Superpowers off
+#   sudo NEUROOTDEL_AZV_KEY=... bash /root/neurootdel-install.sh --update   # installed «Агент за вечер»: current
+#                                  # rules, hooks, soul; copy first, memory and owner files kept, no questions
+#   sudo bash /root/neurootdel-install.sh --update-rollback [dir]   # back to the copy of the last --update
 #   sudo neurootdel-verify                                    # end-of-stage check, any time
 #
 # Every agent has its OWN Telegram bot, and within a stage every bot is required: the installer asks
@@ -281,6 +284,7 @@ _cleanup() {
     for d in "${TMPDIRS[@]:-}"; do
         [[ -n "$d" && -d "$d" ]] && rm -rf "$d" || true
     done
+    _update_abort
 }
 trap _cleanup EXIT
 
@@ -3598,7 +3602,8 @@ install_memory_cron() {
 
     # Ensure cron service is enabled + running. On minimal Ubuntu images
     # (LXC, cloud) the cron package is installed but not auto-started.
-    systemctl enable --now cron 2>/dev/null \
+    # --update: enabled only; cron stays stopped until the after snapshot (update_finish starts it).
+    systemctl enable $([[ "$UPDATE_MODE" == "1" ]] || echo --now) cron 2>/dev/null \
         || warn "cron service not started -- memory rotation will run after next reboot."
 
     # Merge cron lines with the agent user's existing crontab without clobbering it.
@@ -4150,7 +4155,7 @@ install_guard() {
     as_agent chmod 0700 "${shared_state}/agents-reset" "${shared_state}/quiet-restart" \
         "${AGENT_HOME}/backups" "${AGENT_HOME}/backups/memory" "${AGENT_HOME}/backups/offsite" || true
 
-    systemctl enable --now cron 2>/dev/null \
+    systemctl enable $([[ "$UPDATE_MODE" == "1" ]] || echo --now) cron 2>/dev/null \
         || warn "cron service not started -- guard jobs will run after next reboot."
 
     local reset_state="${shared_state}/agents-reset"
@@ -5154,6 +5159,7 @@ parse_args() {
         case "$1" in
             --solo) SOLO=1 ;;
             --azv-owner-rules) AZV_OWNER_RULES_ONLY=1 ;;
+            --update) UPDATE_MODE=1; SOLO=1 ;;
             --stage)
                 [[ $# -ge 2 ]] || die "--stage needs a value: workshop or intensive."
                 STAGE_ARG="$2"; shift ;;
@@ -5224,6 +5230,264 @@ azv_owner_rules_only() {
     ok "Агент подхватит изменения с новой сессии (ночной сброс или перезапуск)."
 }
 
+# =============================================================================
+# --update: an installed «Агент за вечер» gets the current rules, hooks and soul (#1920 d)
+# =============================================================================
+# The update IS the --solo re-run (kept values: owner, bot, names, models; owner files written
+# only when missing; installer lines only between markers or as exact template lines), wrapped in:
+#   update_prepare  agent stopped, every agent file copied (files.tgz + manifest) before anything;
+#   update_finish   what changed, checked: memory, journals and the login byte for byte, the bot
+#                   and access keys of channel.env, and every line the update removed from a text
+#                   file must be the installer's own (report.txt); one result line + rollback line;
+#   update_rollback puts back only what the update changed and drops only what it added.
+UPDATE_MODE=0
+UPDATE_DIR=""
+UPDATE_DONE=0
+UPDATE_BACKUP_ROOT="${LEGACY_BACKUP_ROOT}"
+UPDATE_LAST_FILE="${INSTALL_STATE_ROOT}/last-update"
+UPDATE_SYSTEMD_DIR="/etc/systemd/system"
+UPDATE_CRON_DIR="/etc/cron.d"
+UPDATE_CRONTAB_DIR="/var/spool/cron/crontabs"
+UPDATE_SCRIPT_PATH="/root/neurootdel-install.sh"
+UPDATE_REQUIRE_ROOT=1   # tests: 0
+UPDATE_RICHARD_DIR="${RICHARD_HOME}"
+
+# _update_units -- the agent units this install may have.
+# cron too: its memory jobs (rotate, trim) and the guard must not write or restart anything between
+# the two snapshots (crontab(1) itself works without the daemon).
+_update_units() {
+    printf '%s\n' "$JARVIS_UNIT" "$CODER_UNIT" claude-richard "$AUDITOR_UNIT" "$AUDITOR_BRIDGE_UNIT" cron
+}
+
+# _update_unit_running <unit> -- active, or on its way (activating / reloading) = running.
+_update_unit_running() {
+    case "$(systemctl is-active "$1" 2>/dev/null)" in
+        active|activating|reloading) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# _update_roots -- every place the installer writes for the agent (existing ones only), one per line.
+_update_roots() {
+    local p u
+    for p in "${AGENT_HOME}/.claude" "${AGENT_HOME}/.claude-lab" "${AGENT_HOME}/.claude.json" \
+            "${AGENT_HOME}/.bashrc" "${AGENT_HOME}/.profile" "$GUARD_LIB_DIR" "$CONFIG_ROOT" \
+            "$AZV_STAGE_DIR" "$SUDOERS_FILE" "$APT_WRAPPER_BIN" "$VERIFY_BIN" "$OFFSITE_SETUP_BIN" \
+            "${UPDATE_RICHARD_DIR}/.env" "${UPDATE_RICHARD_DIR}/DOCTOR.md" "${UPDATE_RICHARD_DIR}/launch" \
+            "${UPDATE_CRONTAB_DIR}/${AGENT_USER}" "${UPDATE_SYSTEMD_DIR}/${AUDITOR_UNIT}.service.d"; do
+        [[ -e "$p" || -L "$p" ]] && printf '%s\n' "$p"
+    done
+    while IFS= read -r u; do
+        [[ -e "${UPDATE_SYSTEMD_DIR}/${u}.service" ]] && printf '%s\n' "${UPDATE_SYSTEMD_DIR}/${u}.service"
+    done < <(_update_units)
+    for p in "${UPDATE_CRON_DIR}/${AGENT_USER}"-* "${UPDATE_SYSTEMD_DIR}/${AGENT_USER}"-*.service; do
+        [[ -e "$p" ]] && printf '%s\n' "$p"
+    done
+    return 0
+}
+
+# _update_config <file> -- the check's settings: roots, strict files, managed dirs, installer sources.
+_update_config() {
+    local roots_json src=() ws="${AGENT_HOME}/.claude-lab/jarvis/.claude"
+    roots_json=$(_update_roots | python3 -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.strip()]))')
+    src+=("$INSTALLER_ROOT" "$AZV_STAGE_DIR")
+    [[ -n "$TEMPLATE_CLONE_DIR" && -d "$TEMPLATE_CLONE_DIR" ]] && src+=("$TEMPLATE_CLONE_DIR")
+    UPD_ROOTS="$roots_json" UPD_DIR="$UPDATE_DIR" UPD_STAGE="$AZV_STAGE_DIR" UPD_AZV="$AZV_AGENT_DIR" \
+    UPD_MANAGED="$(printf '%s\n' "$GUARD_LIB_DIR" "$AZV_STAGE_DIR" "${ws}/dashi-plugin-claude-code" \
+        "${AGENT_HOME}/.claude-lab/coder/.claude/dashi-plugin-claude-code" "${AGENT_HOME}/.claude/plugins" \
+        "${AGENT_HOME}/.claude.json" "$APT_WRAPPER_BIN" "$VERIFY_BIN" "$OFFSITE_SETUP_BIN" \
+        "${AGENT_HOME}/.claude-lab/shared/state/agents-reset")" \
+    UPD_TAG="$INSTALL_TAG" UPD_SOURCES="$(printf '%s\n' "${src[@]}")" python3 - "$1" <<'PY'
+import json, os, sys
+lines = lambda k: [x for x in os.environ[k].split("\n") if x]
+# One set of roots for both snapshots and the rollback: those of this run plus those recorded before.
+roots_file = os.path.join(os.environ["UPD_DIR"], "roots.json")
+roots = json.loads(os.environ["UPD_ROOTS"])
+if os.path.exists(roots_file):
+    with open(roots_file, encoding="utf-8") as fh:
+        roots = sorted(set(roots) | set(json.load(fh)))
+cfg = {
+    "backup_dir": os.environ["UPD_DIR"],
+    "roots": roots,
+    # the installer's own marker blocks: <!-- BEGIN <tag>: name --> and <!-- <name>:begin -->
+    "block_tags": [os.environ["UPD_TAG"], ":azv", ":agent-rules-starter", ":agent-rules-owner-work", ":red-secrets-rule"],
+    "azv_stage": os.environ["UPD_STAGE"],
+    "azv_agent_dir": os.environ["UPD_AZV"],
+    "managed": lines("UPD_MANAGED"),
+    "sources": lines("UPD_SOURCES"),
+    # memory and journals of every agent, the login: never touched by an update, byte for byte
+    "strict": [
+        r"/\.claude-lab/[^/]+/\.claude/core/(hot|warm|archive)/",
+        r"/\.claude-lab/[^/]+/\.claude/core/(MEMORY|USER|LEARNINGS|TONE_OF_VOICE)\.md$",
+        r"/\.claude-lab/[^/]+/\.claude/core/[^/]+\.jsonl$",
+        r"/\.claude/projects/[^/]+/memory/(?!MEMORY\.md$|index-[a-z-]+\.md$)",
+        r"/\.claude/\.credentials\.json$",
+    ],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(cfg, fh, ensure_ascii=False, indent=1)
+with open(os.path.join(cfg["backup_dir"], "roots.json"), "w", encoding="utf-8") as fh:
+    json.dump(cfg["roots"], fh, ensure_ascii=False)
+PY
+}
+
+# _update_lock -- one --update or --update-rollback at a time (held until the process exits).
+_update_lock() {
+    install -d -m 0755 "$(dirname "$UPDATE_LAST_FILE")"
+    exec {UPDATE_LOCK_FD}>"$(dirname "$UPDATE_LAST_FILE")/update.lock" \
+        || die "Не удалось взять замок обновления. Напиши куратору."
+    flock -n "$UPDATE_LOCK_FD" || die "Обновление или откат уже идёт. Дождись конца и запусти снова."
+}
+
+# update_prepare -- checks this is an installed «Агент за вечер», stops the agent and copies every
+# agent file into ${UPDATE_BACKUP_ROOT}/update-<ts>/ (files.tgz, manifest, the check helper).
+update_prepare() {
+    step U "Обновление «Агента за вечер»: копия всего перед обновлением"
+    [[ -d "$AZV_AGENT_DIR" ]] \
+        || die "Не найдено ${AZV_AGENT_DIR}: --update только для установленного «Агента за вечер». Новый сервер ставится с --solo."
+    [[ -f "${JARVIS_ENV_DIR}/channel.env" ]] \
+        || die "Не найден ${JARVIS_ENV_DIR}/channel.env: агент на этом сервере не установлен до конца. Напиши куратору."
+    [[ -n "$(env_value AZV_KEY)" ]] \
+        || die "Нужен твой личный ключ, тот же, что при установке: sudo NEUROOTDEL_AZV_KEY=<ключ> bash ${UPDATE_SCRIPT_PATH} --update"
+    local helper="${INSTALLER_ROOT}/lib/azv-update.py" u n
+    [[ -f "$helper" ]] || die "${helper} missing -- the installer copy is incomplete. Download it again."
+    _update_lock
+    # No questions: everything is kept from this server (owner, bot, names, models, stage).
+    export NEUROOTDEL_NONINTERACTIVE=1
+    install -d -m 0700 "$UPDATE_BACKUP_ROOT"
+    UPDATE_DIR=$(mktemp -d "${UPDATE_BACKUP_ROOT}/update-$(date +%Y%m%d-%H%M%S)-XXXX") \
+        || die "Не удалось создать копию в ${UPDATE_BACKUP_ROOT}. Ничего не менял."
+    chmod 0700 "$UPDATE_DIR"
+    install -m 0600 "$helper" "${UPDATE_DIR}/azv-update.py"
+    # Agent stopped: nothing writes its memory while it is copied and checked; enable_services starts it.
+    : > "${UPDATE_DIR}/was-active"
+    while IFS= read -r u; do
+        if _update_unit_running "$u"; then
+            printf '%s\n' "$u" >> "${UPDATE_DIR}/was-active"
+            systemctl stop "$u" 2>/dev/null || { _update_start_units; die "Не удалось остановить ${u}, обновление не начинал."; }
+        fi
+    done < <(_update_units)
+    _update_config "${UPDATE_DIR}/config.json"
+    n=$(_update_roots | tr '\n' '\0' | xargs -0 python3 "${UPDATE_DIR}/azv-update.py" manifest \
+        "${UPDATE_DIR}/manifest-before.json" "${UPDATE_DIR}/files.list") \
+        || die "Не удалось составить список файлов агента. Ничего не менял, агент: sudo systemctl start ${JARVIS_UNIT}"
+    # Any tar complaint, or a copy that differs from the manifest (two passes) = no update.
+    # Hard links stored as plain files: a rollback never ties a path to another file's inode.
+    if ! tar --null --no-recursion --hard-dereference -T "${UPDATE_DIR}/files.list" -czf "${UPDATE_DIR}/files.tgz" \
+            --numeric-owner 2>"${UPDATE_DIR}/tar.err" \
+        || ! python3 "${UPDATE_DIR}/azv-update.py" verify "${UPDATE_DIR}/manifest-before.json" \
+            "${UPDATE_DIR}/files.tgz" >>"${UPDATE_DIR}/tar.err" 2>&1; then
+        _update_start_units
+        die "Копия не записалась (${UPDATE_DIR}/tar.err). Ничего не менял, агент запущен как был. Запусти обновление ещё раз."
+    fi
+    chmod 0600 "${UPDATE_DIR}"/*
+    install -d -m 0755 "$(dirname "$UPDATE_LAST_FILE")"
+    printf '%s\n' "$UPDATE_DIR" > "$UPDATE_LAST_FILE"
+    ok "Копия: ${n} файлов агента в ${UPDATE_DIR}"
+}
+
+# _update_start_units [dir] -- starts again every unit that ran before the update (was-active).
+_update_start_units() {
+    local dir="${1:-$UPDATE_DIR}" u
+    [[ -n "$dir" && -f "${dir}/was-active" ]] || return 0
+    while IFS= read -r u; do
+        [[ -n "$u" ]] || continue
+        _update_unit_running "$u" || systemctl start "$u" 2>/dev/null \
+            || warn "Не стартовал ${u}: journalctl -u ${u}"
+    done < "${dir}/was-active"
+}
+
+# update_check -- what the update changed, while the agent is still stopped (nothing else writes):
+# changes.json + manifest-after.json for the rollback, report.txt, UPDATE_CHECK_LINE for update_finish.
+UPDATE_CHECK_LINE=""
+update_check() {
+    local u
+    # Anything an install step started (a unit, cron) is stopped again: the after snapshot is taken
+    # with nothing else writing, or not at all (update_finish then reports the check as failed).
+    UPDATE_CHECK_LINE=""
+    while IFS= read -r u; do
+        if _update_unit_running "$u" && ! systemctl stop "$u" 2>/dev/null; then
+            warn "Не удалось остановить ${u} перед проверкой."
+            return 0
+        fi
+    done < <(_update_units)
+    _update_config "${UPDATE_DIR}/config.json"
+    UPDATE_CHECK_LINE=$(python3 "${UPDATE_DIR}/azv-update.py" check "${UPDATE_DIR}/config.json") || UPDATE_CHECK_LINE=""
+    chmod 0600 "${UPDATE_DIR}"/*
+}
+
+# update_finish -- after enable_services: what ran before runs again, one result line + the rollback.
+update_finish() {
+    local line="$UPDATE_CHECK_LINE" problems soul
+    _update_start_units
+    UPDATE_DONE=1
+    if [[ -z "$line" ]]; then
+        warn "Проверка после обновления не прошла. Откат: sudo bash ${UPDATE_SCRIPT_PATH} --update-rollback ${UPDATE_DIR}"
+        return 1
+    fi
+    problems=$(sed -n 's/.* problems=\([0-9]*\).*/\1/p' <<<"$line")
+    soul=$(sed -n 's/.* soul_edits=\([0-9]*\).*/\1/p' <<<"$line")
+    log "Проверка: ${line} (подробно: ${UPDATE_DIR}/report.txt)"
+    if [[ "${soul:-0}" != "0" ]]; then
+        warn "Файлы души, которые правили руками, заменены новыми (${soul}); прежние лежат в копии, список в report.txt."
+    fi
+    if [[ "${problems:-1}" == "0" ]]; then
+        ok "Обновление готово: правила, хуки и душа новые, память и настройки владельца на месте. Откат: sudo bash ${UPDATE_SCRIPT_PATH} --update-rollback ${UPDATE_DIR}"
+    else
+        warn "Обновление прошло, но задело файлы владельца (${problems}, список в ${UPDATE_DIR}/report.txt). Откат: sudo bash ${UPDATE_SCRIPT_PATH} --update-rollback ${UPDATE_DIR}"
+        return 1
+    fi
+}
+
+# _update_abort -- EXIT trap part: an update that stopped half way says how to roll back and
+# starts the agent again, so the owner is not left without it.
+_update_abort() {
+    [[ "$UPDATE_MODE" == "1" && -n "$UPDATE_DIR" && "$UPDATE_DONE" != "1" ]] || return 0
+    err "Обновление не закончилось. Откат: sudo bash ${UPDATE_SCRIPT_PATH} --update-rollback ${UPDATE_DIR}"
+    # Recorded before anything starts: the rollback then knows exactly what the half update left.
+    if [[ -f "${UPDATE_DIR}/files.tgz" && ! -f "${UPDATE_DIR}/changes.json" ]]; then
+        _update_config "${UPDATE_DIR}/config.json" 2>/dev/null || true
+        python3 "${UPDATE_DIR}/azv-update.py" check "${UPDATE_DIR}/config.json" >/dev/null 2>&1 || true
+    fi
+    _update_start_units
+}
+
+# update_rollback [dir] -- back to the copy (default: the last update). Only what the update changed
+# is put back and only what it added and nobody touched since is removed; the rest stays as it is now.
+update_rollback() {
+    local dir="${1:-}" u line base f
+    [[ "$UPDATE_REQUIRE_ROOT" != "1" || $EUID -eq 0 ]] || die "Run as root: sudo bash ${UPDATE_SCRIPT_PATH} --update-rollback"
+    [[ -n "$dir" ]] || dir=$(cat "$UPDATE_LAST_FILE" 2>/dev/null) || true
+    [[ -n "$dir" && -f "${dir}/files.tgz" && -f "${dir}/azv-update.py" ]] \
+        || die "Копия обновления не найдена (${dir:-нет записи в ${UPDATE_LAST_FILE}}). Напиши куратору."
+    # The helper runs as root: only a copy this installer made (inside the backup root, no symlink
+    # on the way, root's own and closed to others) is trusted.
+    dir=$(readlink -f -- "$dir"); base=$(readlink -f -- "$UPDATE_BACKUP_ROOT")
+    [[ "$dir" == "${base}/update-"* && "$(dirname "$dir")" == "$base" ]] \
+        || die "Откат берётся только из копии в ${UPDATE_BACKUP_ROOT}/update-*. Напиши куратору."
+    if [[ "$UPDATE_REQUIRE_ROOT" == "1" ]]; then
+        for f in "$base" "$dir" "${dir}/azv-update.py" "${dir}/files.tgz"; do
+            [[ ! -L "$f" && "$(stat -c %u -- "$f")" == 0 && $(( 0$(stat -c %a -- "$f") & 022 )) -eq 0 ]] \
+                || die "Копия ${dir} не закрыта от других (${f}), откат не запускаю. Напиши куратору."
+        done
+    fi
+    _update_lock
+    # Nothing is touched while an agent could still write: a unit that does not stop = no rollback.
+    while IFS= read -r u; do
+        if _update_unit_running "$u" && ! systemctl stop "$u" 2>/dev/null; then
+            _update_start_units "$dir"
+            die "Не удалось остановить ${u}, откат не начинал. Напиши куратору."
+        fi
+    done < <(_update_units)
+    if ! line=$(python3 "${dir}/azv-update.py" rollback "$dir"); then
+        _update_start_units "$dir"
+        die "Откат не прошёл (что менялось, не записано или ошибка выше), копия цела: ${dir}. Агент запущен как был. Напиши куратору."
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    _update_start_units "$dir"
+    ok "Откат готов (${line}). Агент работает как до обновления."
+}
+
 # run_stage_verify -- the end-of-stage check (verify-stage.sh): what was taught and installed, ✅/❌.
 # A ❌ right after install is normal before the logins (services start after them): the final notes
 # say to run `sudo neurootdel-verify` again once they are done. Never fails the install itself.
@@ -5246,6 +5510,10 @@ main() {
         rollback_to_gateway
         return 0
     fi
+    if [[ "${1:-}" == "--update-rollback" ]]; then
+        update_rollback "${2:-}"
+        return 0
+    fi
     parse_args "$@"
     if [[ "$AZV_OWNER_RULES_ONLY" == "1" ]]; then
         preflight
@@ -5255,6 +5523,9 @@ main() {
 
     banner
     preflight
+    if [[ "$UPDATE_MODE" == "1" ]]; then
+        update_prepare
+    fi
     if [[ "$SOLO" == "1" ]]; then
         azv_activate
     fi
@@ -5287,7 +5558,15 @@ main() {
     install_auditor
     setup_agent_hooks || die "Hooks are not all on; fix the warnings above and re-run the installer."
     install_team_refs || die "Team references are not all in place; fix the warnings above and re-run the installer."
+    if [[ "$UPDATE_MODE" == "1" ]]; then
+        update_check
+    fi
     enable_services
+    if [[ "$UPDATE_MODE" == "1" ]]; then
+        run_stage_verify
+        update_finish
+        return
+    fi
     report_claude_plan
     final_instructions
     run_stage_verify
