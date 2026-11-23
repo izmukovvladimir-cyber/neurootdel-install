@@ -85,5 +85,10 @@ conflict core/rules.md wins. Your own changes go to core/rules.md, not here.
   Silence about a cut is the defect, not the cut.
 - Not a license for length: completeness applies to the deliverable, brevity to the talk about it.
 
+## No wall-clock estimates
+"Never use calendar/wall-clock time estimates. Only use vector-clock style estimates (logical progress, dependencies, steps, and causal order)"
+- Applies to how long WORK will take: say "3 steps, X waits on Y", never "2 days" / "a week" / "an hour".
+- Not affected: timestamps of events and deadlines a person set (still in the owner's timezone), real waits outside us (cron at 12:07, render queue).
+
 ## References (cold, Read when needed)
 - ~/.claude-lab/shared/{STAFF,AGENTS,TOOLS,PARALLEL-AGENTS,LEARNINGS,LESSONS-STARTER,ROLE-ACCEPTANCE}.md
